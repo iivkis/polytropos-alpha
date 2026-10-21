@@ -266,6 +266,29 @@ fn proof_generator_emits_node_and_module_theorems() {
 }
 
 #[test]
+fn proof_generator_marks_unused_graph_inputs_without_hiding_lean_warnings() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2]), Domain::Finite);
+    let b = graph.input(shape(&[2]), Domain::Finite);
+    let result = graph.add(a, b).unwrap();
+
+    let generated = LeanProofEngine::default().generate(&graph, result).unwrap();
+    let lean = generated.source();
+    assert!(lean.contains(
+        "def node_0 (x_0 : VeriNeural.Tensor 2) (_x_1 : VeriNeural.Tensor 2)"
+    ));
+    assert!(lean.contains(
+        "def node_1 (_x_0 : VeriNeural.Tensor 2) (x_1 : VeriNeural.Tensor 2)"
+    ));
+    // Calling conventions and theorem statements still use the real inputs.
+    assert!(lean.contains(
+        "def node_2 (x_0 : VeriNeural.Tensor 2) (x_1 : VeriNeural.Tensor 2)"
+    ));
+    assert!(lean.contains("theorem node_0_semantics (x_0 : VeriNeural.Tensor 2) (x_1 : VeriNeural.Tensor 2)"));
+    assert!(!lean.contains("set_option linter.unusedVariables false"));
+}
+
+#[test]
 fn proof_generator_keeps_source_domain_assumptions_explicit() {
     let mut graph = NeuralGraph::default();
     let src = graph.input(shape(&[3]), Domain::NonNegativeFinite);

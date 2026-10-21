@@ -245,8 +245,30 @@ impl LeanProofEngine {
                 _ => unreachable!("checked while collecting ancestors"),
             };
 
+            // Every node accepts the shared graph inputs for stable calling
+            // conventions. An input node consumes only its own binder; mark
+            // the other binders intentionally unused to avoid Lean warnings.
+            let definition_params = if matches!(node.operation, Operation::Input) {
+                sources
+                    .iter()
+                    .map(|&source_index| {
+                        let binder = if source_index == index {
+                            format!("x_{source_index}")
+                        } else {
+                            format!("_x_{source_index}")
+                        };
+                        format!(
+                            "({binder} : VeriNeural.Tensor {})",
+                            graph.nodes()[source_index].shape.element_count()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                params.clone()
+            };
             source.push_str(&format!(
-                "def node_{index} {params} : VeriNeural.Tensor {count} :=\n  {rhs}\n\n"
+                "def node_{index} {definition_params} : VeriNeural.Tensor {count} :=\n  {rhs}\n\n"
             ));
 
             let name = format!("node_{index}_shape");
