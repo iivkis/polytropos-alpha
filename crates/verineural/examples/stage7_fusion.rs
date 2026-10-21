@@ -8,7 +8,6 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::Command;
-use std::time::Instant;
 
 use verineural::{
     CertificateEngine, Domain, GpuEngine, GpuLaunchConfig, LeanProofEngine, NeuralGraph,
@@ -95,15 +94,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // The intermediate bias-add node is exclusively consumed by the Relu.
+    // Keep launch geometry identical so fusion is the measured variable.
     let baseline =
-        GpuEngine::default().with_launch_config(GpuLaunchConfig::new(64, ReluFusion::Disabled)?);
+        GpuEngine::default().with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Disabled)?);
     let fused = GpuEngine::default()
         .with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Experimental)?);
     let unoptimized_plan = baseline.compile(&graph, output)?;
     let fused_plan = fused.compile(&graph, output)?;
-    if fused_plan.fused_relus().len() != 1 {
-        return Err(io::Error::other("expected exactly one exclusive Relu fusion").into());
+    if fused_plan.fused_pointwise_chains().len() != 1
+        || fused_plan.removed_kernel_count() != 2
+    {
+        return Err(io::Error::other(
+            "expected Add -> BiasAdd -> Relu to remove exactly two kernels",
+        )
+        .into());
     }
 
     // Check the mathematical rewrite using the real Lean executable.
@@ -116,20 +120,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proof = LeanProofEngine::default();
     proof.check_file(&fusion_lean)?;
 
-    // These measurements include Lean checking, NVPTX compilation, JIT,
-    // host transfers and CUDA work. They are NOT kernel-only benchmarks.
-    let t0 = Instant::now();
-    let baseline_cert = CertificateEngine::new(LeanProofEngine::default(), baseline);
+    // Evidence generation still performs its own one-shot replay and bitwise CPU check.
+    let baseline_cert = CertificateEngine::new(LeanProofEngine::default(), baseline.clone());
     let baseline_report =
         baseline_cert.run(&graph, output, &inputs, &reference, &root.join("baseline"))?;
     baseline_cert.verify_bundle(&baseline_report.directory)?;
-    let baseline_duration = t0.elapsed();
 
-    let t1 = Instant::now();
-    let fused_cert = CertificateEngine::new(LeanProofEngine::default(), fused);
-    let fused_report = fused_cert.run(&graph, output, &inputs, &reference, &root.join("fused"))?;
+    let fused_cert = CertificateEngine::new(LeanProofEngine::default(), fused.clone());
+    let fused_report =
+        fused_cert.run(&graph, output, &inputs, &reference, &root.join("fused"))?;
     fused_cert.verify_bundle(&fused_report.directory)?;
-    let fused_duration = t1.elapsed();
+
+    // Benchmark only an already instantiated CUgraphExec. CUDA events exclude
+    // Lean, LLVM, context/JIT setup, allocations and host transfers.
+    let benchmark_root = Path::new("target/verineural/stage7-benchmark");
+    match fs::remove_dir_all(benchmark_root) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    let mut baseline_execution =
+        baseline.prepare(&unoptimized_plan, &inputs, &benchmark_root.join("baseline"))?;
+    let mut fused_execution =
+        fused.prepare(&fused_plan, &inputs, &benchmark_root.join("fused"))?;
+    let baseline_benchmark = baseline_execution.benchmark(25, 1000)?;
+    let fused_benchmark = fused_execution.benchmark(25, 1000)?;
+
+    for (label, actual) in [
+        ("baseline", baseline_execution.read_output()?),
+        ("fused", fused_execution.read_output()?),
+    ] {
+        for (index, (&gpu, &cpu)) in actual
+            .values()
+            .iter()
+            .zip(reference.values())
+            .enumerate()
+        {
+            if gpu.to_bits() != cpu.to_bits() {
+                return Err(io::Error::other(format!(
+                    "{label} benchmark output mismatch at {index}: GPU={:08x} CPU={:08x}",
+                    gpu.to_bits(),
+                    cpu.to_bits()
+                ))
+                .into());
+            }
+        }
+    }
 
     let count_kernels = |text: &str| text.matches("define ptx_kernel void").count();
     let hashes = Command::new("sha256sum")
@@ -151,15 +187,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         count_kernels(fused_plan.llvm_ir()),
         fused_plan.fused_relus().len(),
     );
-    println!("Launch: baseline 64 threads, fused 256 threads per block");
+    println!("Launch: baseline/fused both 256 threads per block");
     println!(
         "CPU comparisons: baseline {} / fused {} identical f32 values",
         baseline_report.compared_fp32_values, fused_report.compared_fp32_values
     );
     println!("Lean ideal-Int rule checked: {}", fusion_lean.display());
     println!(
-        "End-to-end validation wall time (NOT a GPU-only benchmark): {:?} vs {:?}",
-        baseline_duration, fused_duration
+        "CUDA-event graph replay: baseline {:?} total / {:.3} us avg; fused {:?} total / {:.3} us avg",
+        baseline_benchmark.elapsed(),
+        baseline_benchmark.average().as_secs_f64() * 1_000_000.0,
+        fused_benchmark.elapsed(),
+        fused_benchmark.average().as_secs_f64() * 1_000_000.0,
+    );
+    println!(
+        "Benchmark protocol: {} warmup + {} measured replays, one CUgraphExec per mode",
+        baseline_benchmark.warmup_launches(),
+        baseline_benchmark.measured_launches(),
     );
     println!(
         "SHA256SUMS digests: baseline {}, fused {}",

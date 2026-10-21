@@ -20,4 +20,18 @@ theorem relu_bias_fusion {m n : Nat} (a : Tensor (m * n)) (b : Tensor n) :
   funext i
   rfl
 
+theorem relu_add_bias_fusion {m n : Nat}
+    (a b : Tensor (m * n)) (bias : Tensor n) :
+    relu (biasAdd (add a b) bias) =
+      (fun i => max ((a i + b i) + flatGet bias (i.val % n)) 0) := by
+  funext i
+  rfl
+
+theorem relu_mul_bias_fusion {m n : Nat}
+    (a b : Tensor (m * n)) (bias : Tensor n) :
+    relu (biasAdd (mul a b) bias) =
+      (fun i => max ((a i * b i) + flatGet bias (i.val % n)) 0) := by
+  funext i
+  rfl
+
 end VeriNeural

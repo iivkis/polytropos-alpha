@@ -21,7 +21,7 @@ mod tensor;
 
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
-pub use gpu::{GpuEngine, GpuError, GpuLaunchConfig, GpuProgram, ReluFusion};
+pub use gpu::{GpuBenchmark, GpuEngine, GpuError, GpuExecution, GpuLaunchConfig, GpuProgram, ReluFusion};
 pub use ir::{
     Domain, FP32Policy, FmaMode, GpuSemantics, MathContract, ModuleInvocation, NeuralGraph,
     NeuralModule, Node, NodeId, Operation, OperationSemantics, PortContract, ReductionOrder,

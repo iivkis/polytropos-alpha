@@ -9,8 +9,9 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
-use crate::{NeuralError, NeuralGraph, NodeId, Operation, Tensor};
+use crate::{NeuralError, NeuralGraph, NodeId, Operation, Shape, Tensor};
 
 use super::cuda::CudaSession;
 
@@ -85,6 +86,10 @@ pub enum GpuError {
     InvalidLaunch {
         threads_per_block: u32,
     },
+    InvalidBenchmark {
+        iterations: usize,
+    },
+    NoKernelGraph,
     MissingInput {
         node: usize,
     },
@@ -118,6 +123,11 @@ impl fmt::Display for GpuError {
                 f,
                 "unsupported CUDA threads per block: {threads_per_block} (use 64, 128, 256 or 512)"
             ),
+            Self::InvalidBenchmark { iterations } => write!(
+                f,
+                "GPU benchmark needs at least one measured graph replay, got {iterations}"
+            ),
+            Self::NoKernelGraph => write!(f, "GPU benchmark requires at least one CUDA kernel"),
             Self::Io(err) => write!(f, "GPU I/O failure: {err}"),
             Self::LlvmFailed { diagnostics } => write!(f, "NVPTX lowering failed: {diagnostics}"),
             Self::Driver(message) => write!(f, "CUDA driver unavailable: {message}"),
@@ -157,8 +167,10 @@ pub struct GpuProgram {
     source_inputs: Vec<NodeId>,
     llvm_ir: String,
     launch: GpuLaunchConfig,
-    // Relu index -> exclusive binary producer index. Only this producer is skipped.
+    // Relu index -> exclusive immediate producer index.
     fused_relus: BTreeMap<usize, usize>,
+    // Relu root -> [exclusive Add/Mul producer, exclusive BiasAdd producer].
+    fused_pointwise_chains: BTreeMap<usize, Vec<usize>>,
 }
 
 impl GpuProgram {
@@ -183,6 +195,22 @@ impl GpuProgram {
         &self.fused_relus
     }
 
+    pub fn fused_pointwise_chains(&self) -> &BTreeMap<usize, Vec<usize>> {
+        &self.fused_pointwise_chains
+    }
+
+    pub fn removed_kernel_count(&self) -> usize {
+        self.skipped_nodes().len()
+    }
+
+    fn skipped_nodes(&self) -> BTreeSet<usize> {
+        let mut skipped = self.fused_relus.values().copied().collect::<BTreeSet<_>>();
+        for chain in self.fused_pointwise_chains.values() {
+            skipped.extend(chain.iter().copied());
+        }
+        skipped
+    }
+
     /// The Lean proof of the *ideal integer* fusion rule, not PTX/FP32 equivalence.
     /// None when no fusion was actually applied.
     pub fn fusion_lean_source(&self) -> Option<String> {
@@ -192,6 +220,68 @@ impl GpuProgram {
                 include_str!("../../../lean/VeriNeural/Basic.lean"),
                 include_str!("../../../lean/VeriNeural/Fusion.lean"),
             )
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuBenchmark {
+    warmup_launches: usize,
+    measured_launches: usize,
+    elapsed: Duration,
+}
+
+impl GpuBenchmark {
+    pub const fn warmup_launches(self) -> usize { self.warmup_launches }
+    pub const fn measured_launches(self) -> usize { self.measured_launches }
+    pub const fn elapsed(self) -> Duration { self.elapsed }
+    pub fn average(self) -> Duration {
+        Duration::from_secs_f64(self.elapsed.as_secs_f64() / self.measured_launches as f64)
+    }
+}
+
+pub struct GpuExecution {
+    session: CudaSession,
+    output_shape: Shape,
+    output_address: u64,
+    has_graph: bool,
+}
+
+impl GpuExecution {
+    pub fn replay(&self) -> Result<(), GpuError> {
+        if self.has_graph {
+            self.session.launch_graph()?;
+        }
+        self.session.synchronize()
+    }
+
+    pub fn read_output(&mut self) -> Result<Tensor<f32>, GpuError> {
+        let mut values = vec![0.0f32; self.output_shape.element_count()];
+        self.session.copy_to_host(&mut values, self.output_address)?;
+        Ok(Tensor::new(self.output_shape.clone(), values)?)
+    }
+
+    pub fn benchmark(
+        &self,
+        warmup_launches: usize,
+        measured_launches: usize,
+    ) -> Result<GpuBenchmark, GpuError> {
+        if measured_launches == 0 {
+            return Err(GpuError::InvalidBenchmark { iterations: 0 });
+        }
+        if !self.has_graph {
+            return Err(GpuError::NoKernelGraph);
+        }
+        let milliseconds = self.session.benchmark_graph(warmup_launches, measured_launches)?;
+        if !milliseconds.is_finite() || milliseconds < 0.0 {
+            return Err(GpuError::Driver(
+                "CUDA event benchmark returned an invalid duration".into(),
+            ));
+        }
+        Ok(GpuBenchmark {
+            warmup_launches,
+            measured_launches,
+            elapsed: Duration::from_secs_f64(f64::from(milliseconds) / 1000.0),
         })
     }
 }
@@ -275,6 +365,7 @@ impl GpuEngine {
             }
         }
         let mut fused_relus = BTreeMap::new();
+        let mut fused_pointwise_chains = BTreeMap::new();
         if self.launch.relu_fusion == ReluFusion::Experimental {
             for &index in &live_nodes {
                 let node = &graph.nodes()[index];
@@ -282,18 +373,33 @@ impl GpuEngine {
                     continue;
                 }
                 let producer_id = node.inputs[0];
-                let predecessor = graph.node(producer_id)?;
-                if uses[producer_id.index()] == 1
-                    && matches!(
-                        predecessor.operation,
-                        Operation::Add | Operation::Mul | Operation::BiasAdd
-                    )
-                {
-                    fused_relus.insert(index, producer_id.index());
+                let producer = graph.node(producer_id)?;
+                if uses[producer_id.index()] != 1 {
+                    continue;
+                }
+                match producer.operation {
+                    Operation::Add | Operation::Mul => {
+                        fused_relus.insert(index, producer_id.index());
+                    }
+                    Operation::BiasAdd => {
+                        fused_relus.insert(index, producer_id.index());
+                        let inner_id = producer.inputs[0];
+                        let inner = graph.node(inner_id)?;
+                        if uses[inner_id.index()] == 1
+                            && matches!(inner.operation, Operation::Add | Operation::Mul)
+                        {
+                            fused_pointwise_chains
+                                .insert(index, vec![inner_id.index(), producer_id.index()]);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
-        let skipped = fused_relus.values().copied().collect::<BTreeSet<_>>();
+        let mut skipped = fused_relus.values().copied().collect::<BTreeSet<_>>();
+        for chain in fused_pointwise_chains.values() {
+            skipped.extend(chain.iter().copied());
+        }
         let mut llvm_ir = String::from(
             "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n\
              target triple = \"nvptx64-nvidia-cuda\"\n\n\
@@ -308,7 +414,15 @@ impl GpuEngine {
             {
                 continue;
             }
-            if let Some(&producer) = fused_relus.get(&index) {
+            if let Some(chain) = fused_pointwise_chains.get(&index) {
+                let inner = &graph.nodes()[chain[0]];
+                let bias_add = &graph.nodes()[chain[1]];
+                llvm_ir.push_str(&pointwise_chain_kernel_ir(
+                    index,
+                    &inner.operation,
+                    bias_add.shape.dims()[1],
+                ));
+            } else if let Some(&producer) = fused_relus.get(&index) {
                 let first = &graph.nodes()[producer];
                 let columns = if matches!(first.operation, Operation::BiasAdd) {
                     first.shape.dims()[1]
@@ -340,6 +454,7 @@ impl GpuEngine {
             llvm_ir,
             launch: self.launch,
             fused_relus,
+            fused_pointwise_chains,
         })
     }
 
@@ -371,68 +486,21 @@ impl GpuEngine {
         Ok(ptx)
     }
 
-    /// Execute the plan using libcuda.so.1. Inputs must match every reachable
-    /// source exactly once. All declared input domains are checked on host.
-    pub fn execute(
+    pub fn prepare(
         &self,
         program: &GpuProgram,
         inputs: &[(NodeId, Tensor<f32>)],
         output_dir: &Path,
-    ) -> Result<Tensor<f32>, GpuError> {
-        let mut given = BTreeMap::new();
-        for (id, value) in inputs {
-            let node = program.graph.node(*id)?;
-            if !matches!(node.operation, Operation::Input) {
-                return Err(GpuError::InvalidInput {
-                    node: id.index(),
-                    reason: "handle is not a graph input",
-                });
-            }
-            if !program.source_inputs.contains(id) {
-                return Err(GpuError::InvalidInput {
-                    node: id.index(),
-                    reason: "input is outside the compiled output slice",
-                });
-            }
-            if value.shape() != &node.shape {
-                return Err(GpuError::InvalidGraph(NeuralError::ShapeMismatch {
-                    expected: node.shape.clone(),
-                    actual: value.shape().clone(),
-                }));
-            }
-            value.validate_domain(node.domain)?;
-            if given.insert(id.index(), value).is_some() {
-                return Err(GpuError::InvalidInput {
-                    node: id.index(),
-                    reason: "duplicate input",
-                });
-            }
-        }
-        for id in &program.source_inputs {
-            if !given.contains_key(&id.index()) {
-                return Err(GpuError::MissingInput { node: id.index() });
-            }
-        }
-
-        // Compile before creating a CUDA context, so compiler failures do not
-        // leave device allocations behind.
+    ) -> Result<GpuExecution, GpuError> {
+        let given = validate_inputs(program, inputs)?;
         let ptx_path = self.lower(program, output_dir)?;
         let ptx = fs::read(ptx_path)?;
         let mut session = CudaSession::new(&ptx)?;
         let mut buffers: BTreeMap<usize, u64> = BTreeMap::new();
-        let skipped = program
-            .fused_relus
-            .values()
-            .copied()
-            .collect::<BTreeSet<_>>();
+        let skipped = program.skipped_nodes();
 
-        // Stage all input uploads and allocate all output buffers *before*
-        // graph capture. No CUDA allocation or host transfer is allowed while
-        // capture is active. Reshape remains a zero-copy alias.
         for &index in &program.live_nodes {
-            if skipped.contains(&index) {
-                continue;
-            }
+            if skipped.contains(&index) { continue; }
             let node = &program.graph.nodes()[index];
             match node.operation {
                 Operation::Input => {
@@ -445,11 +513,8 @@ impl GpuEngine {
                     let ptr = buffers[&node.inputs[0].index()];
                     buffers.insert(index, ptr);
                 }
-                Operation::Add
-                | Operation::Mul
-                | Operation::MatMul
-                | Operation::BiasAdd
-                | Operation::Relu => {
+                Operation::Add | Operation::Mul | Operation::MatMul
+                | Operation::BiasAdd | Operation::Relu => {
                     let ptr = session.allocate(node.shape.element_count())?;
                     buffers.insert(index, ptr);
                 }
@@ -457,25 +522,17 @@ impl GpuEngine {
             }
         }
 
-        // Every actual kernel becomes a node in one CUDA Graph. For input-only
-        // graphs there are no kernels to launch, only explicit-stream copies.
-        let kernel_count = program
-            .live_nodes
-            .iter()
-            .filter(|&&index| {
-                !skipped.contains(&index)
-                    && !matches!(
-                        program.graph.nodes()[index].operation,
-                        Operation::Input | Operation::Reshape(_)
-                    )
-            })
-            .count();
-        if kernel_count > 0 {
-            // Resolve CUDA module functions before capture (including lazy JIT).
+        let kernel_count = program.live_nodes.iter().filter(|&&index| {
+            !skipped.contains(&index)
+                && !matches!(
+                    program.graph.nodes()[index].operation,
+                    Operation::Input | Operation::Reshape(_)
+                )
+        }).count();
+        let has_graph = kernel_count > 0;
+        if has_graph {
             for &index in &program.live_nodes {
-                if skipped.contains(&index) {
-                    continue;
-                }
+                if skipped.contains(&index) { continue; }
                 let op = &program.graph.nodes()[index].operation;
                 if !matches!(op, Operation::Input | Operation::Reshape(_)) {
                     session.prepare_kernel(&format!("vn_node_{index}"))?;
@@ -483,41 +540,104 @@ impl GpuEngine {
             }
             session.begin_graph()?;
             for &index in &program.live_nodes {
-                if skipped.contains(&index) {
-                    continue;
-                }
+                if skipped.contains(&index) { continue; }
                 let node = &program.graph.nodes()[index];
                 if matches!(node.operation, Operation::Input | Operation::Reshape(_)) {
                     continue;
                 }
-                let inputs = if let Some(&producer) = program.fused_relus.get(&index) {
+                if let Some(chain) = program.fused_pointwise_chains.get(&index) {
+                    let inner = &program.graph.nodes()[chain[0]];
+                    let bias_add = &program.graph.nodes()[chain[1]];
+                    session.launch3(
+                        &format!("vn_node_{index}"),
+                        buffers[&inner.inputs[0].index()],
+                        buffers[&inner.inputs[1].index()],
+                        buffers[&bias_add.inputs[1].index()],
+                        buffers[&index],
+                        node.shape.element_count(),
+                        program.launch.threads_per_block,
+                    )?;
+                    continue;
+                }
+                let kernel_inputs = if let Some(&producer) = program.fused_relus.get(&index) {
                     &program.graph.nodes()[producer].inputs
                 } else {
                     &node.inputs
                 };
-                let first = buffers[&inputs[0].index()];
-                let second = if inputs.len() == 2 {
-                    buffers[&inputs[1].index()]
-                } else {
-                    0
-                };
+                let first = buffers[&kernel_inputs[0].index()];
+                let second = if kernel_inputs.len() == 2 {
+                    buffers[&kernel_inputs[1].index()]
+                } else { 0 };
                 session.launch(
                     &format!("vn_node_{index}"),
-                    first,
-                    second,
-                    buffers[&index],
+                    first, second, buffers[&index],
                     node.shape.element_count(),
                     program.launch.threads_per_block,
                 )?;
             }
-            session.launch_graph()?;
+            session.finish_graph()?;
         }
-        session.synchronize()?;
+
         let last = program.graph.node(program.output)?;
-        let mut values = vec![0.0f32; last.shape.element_count()];
-        session.copy_to_host(&mut values, buffers[&program.output.index()])?;
-        Ok(Tensor::new(last.shape.clone(), values)?)
+        Ok(GpuExecution {
+            session,
+            output_shape: last.shape.clone(),
+            output_address: buffers[&program.output.index()],
+            has_graph,
+        })
     }
+
+    pub fn execute(
+        &self,
+        program: &GpuProgram,
+        inputs: &[(NodeId, Tensor<f32>)],
+        output_dir: &Path,
+    ) -> Result<Tensor<f32>, GpuError> {
+        let mut execution = self.prepare(program, inputs, output_dir)?;
+        execution.replay()?;
+        execution.read_output()
+    }
+}
+
+fn validate_inputs<'a>(
+    program: &GpuProgram,
+    inputs: &'a [(NodeId, Tensor<f32>)],
+) -> Result<BTreeMap<usize, &'a Tensor<f32>>, GpuError> {
+    let mut given = BTreeMap::new();
+    for (id, value) in inputs {
+        let node = program.graph.node(*id)?;
+        if !matches!(node.operation, Operation::Input) {
+            return Err(GpuError::InvalidInput {
+                node: id.index(),
+                reason: "handle is not a graph input",
+            });
+        }
+        if !program.source_inputs.contains(id) {
+            return Err(GpuError::InvalidInput {
+                node: id.index(),
+                reason: "input is outside the compiled output slice",
+            });
+        }
+        if value.shape() != &node.shape {
+            return Err(GpuError::InvalidGraph(NeuralError::ShapeMismatch {
+                expected: node.shape.clone(),
+                actual: value.shape().clone(),
+            }));
+        }
+        value.validate_domain(node.domain)?;
+        if given.insert(id.index(), value).is_some() {
+            return Err(GpuError::InvalidInput {
+                node: id.index(),
+                reason: "duplicate input",
+            });
+        }
+    }
+    for id in &program.source_inputs {
+        if !given.contains_key(&id.index()) {
+            return Err(GpuError::MissingInput { node: id.index() });
+        }
+    }
+    Ok(given)
 }
 
 fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> String {
@@ -558,6 +678,47 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
     };
     let result = if fuse_relu { "%fused_result" } else { "%value" };
     pointwise_kernel_ir(index, &format!("{computation}{tail}"), result)
+}
+
+fn pointwise_chain_kernel_ir(index: usize, inner_op: &Operation, columns: usize) -> String {
+    let inner = match inner_op {
+        Operation::Add => "fadd",
+        Operation::Mul => "fmul",
+        _ => unreachable!("only Add/Mul start the supported pointwise chain"),
+    };
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %bias, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %idx
+  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %y = load float, ptr addrspace(1) %bp, align 4
+  %inner = {inner} float %x, %y
+  %col = urem i32 %idx, {columns}
+  %biasp = getelementptr float, ptr addrspace(1) %bias, i32 %col
+  %bias_value = load float, ptr addrspace(1) %biasp, align 4
+  %biased = fadd float %inner, %bias_value
+  %nan = fcmp uno float %biased, %biased
+  %positive = fcmp ogt float %biased, 0.000000e+00
+  %keep = or i1 %nan, %positive
+  %result = select i1 %keep, float %biased, float 0.000000e+00
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %result, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
 }
 
 fn pointwise_kernel_ir(index: usize, computation: &str, result: &str) -> String {

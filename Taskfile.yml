@@ -102,7 +102,7 @@ tasks:
       - cargo run -p verineural --example stage6_ffn
 
   gpu-stage7:
-    desc: Compare controlled CUDA launches and experimental Relu fusion with Lean and CPU checks (developer-run)
+    desc: Validate fusion and benchmark reusable CUDA Graph replay with CUDA events (developer-run)
     cmds:
       - cargo run -p verineural --example stage7_fusion
 

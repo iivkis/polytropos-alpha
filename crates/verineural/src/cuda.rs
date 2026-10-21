@@ -22,6 +22,7 @@ mod platform {
     const RTLD_NOW: c_int = 2;
     const CU_STREAM_NON_BLOCKING: c_uint = 1;
     const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
+    const CU_EVENT_DEFAULT: c_uint = 0;
 
     struct Library(*mut c_void);
 
@@ -90,6 +91,11 @@ mod platform {
         graph_launch: unsafe extern "C" fn(Handle, Handle) -> ResultCode,
         graph_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
         graph_exec_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
+        event_create: unsafe extern "C" fn(*mut Handle, c_uint) -> ResultCode,
+        event_record: unsafe extern "C" fn(Handle, Handle) -> ResultCode,
+        event_sync: unsafe extern "C" fn(Handle) -> ResultCode,
+        event_elapsed: unsafe extern "C" fn(*mut f32, Handle, Handle) -> ResultCode,
+        event_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
         launch: unsafe extern "C" fn(
             Handle,
             c_uint,
@@ -132,6 +138,11 @@ mod platform {
                 graph_launch: lib.function("cuGraphLaunch")?,
                 graph_destroy: lib.function("cuGraphDestroy")?,
                 graph_exec_destroy: lib.function("cuGraphExecDestroy")?,
+                event_create: lib.function("cuEventCreate")?,
+                event_record: lib.function("cuEventRecord")?,
+                event_sync: lib.function("cuEventSynchronize")?,
+                event_elapsed: lib.function("cuEventElapsedTime")?,
+                event_destroy: lib.function("cuEventDestroy_v2")?,
                 launch: lib.function("cuLaunchKernel")?,
             })
         }
@@ -289,8 +300,8 @@ mod platform {
             Ok(())
         }
 
-        /// Finish capture, instantiate and submit once to the explicit stream.
-        pub fn launch_graph(&mut self) -> Result<(), GpuError> {
+        /// Finish capture and instantiate an executable graph without launching it.
+        pub fn finish_graph(&mut self) -> Result<(), GpuError> {
             if !self.capturing {
                 return Err(GpuError::Driver("CUDA Graph was not started".into()));
             }
@@ -306,11 +317,69 @@ mod platform {
             // SAFETY: all captured kernel parameters have been copied by CUDA.
             check("cuGraphInstantiateWithFlags", unsafe {
                 (self.functions.graph_instantiate)(&mut self.graph_exec, self.graph, 0)
-            })?;
-            // SAFETY: the executable graph is valid, the launch stream is not legacy.
+            })
+        }
+
+        /// Replay an already instantiated graph on the owned non-blocking stream.
+        pub fn launch_graph(&self) -> Result<(), GpuError> {
+            if self.capturing || self.graph_exec.is_null() {
+                return Err(GpuError::Driver(
+                    "CUDA Graph must be instantiated before replay".into(),
+                ));
+            }
             check("cuGraphLaunch", unsafe {
                 (self.functions.graph_launch)(self.graph_exec, self.stream)
             })
+        }
+
+        /// Measure graph replay on the CUDA stream with device events.
+        pub fn benchmark_graph(
+            &self,
+            warmup_launches: usize,
+            measured_launches: usize,
+        ) -> Result<f32, GpuError> {
+            for _ in 0..warmup_launches {
+                self.launch_graph()?;
+            }
+            self.synchronize()?;
+
+            let mut start = ptr::null_mut();
+            check("cuEventCreate", unsafe {
+                (self.functions.event_create)(&mut start, CU_EVENT_DEFAULT)
+            })?;
+            let mut stop = ptr::null_mut();
+            if let Err(err) = check("cuEventCreate", unsafe {
+                (self.functions.event_create)(&mut stop, CU_EVENT_DEFAULT)
+            }) {
+                unsafe { (self.functions.event_destroy)(start) };
+                return Err(err);
+            }
+
+            let result = (|| {
+                check("cuEventRecord", unsafe {
+                    (self.functions.event_record)(start, self.stream)
+                })?;
+                for _ in 0..measured_launches {
+                    self.launch_graph()?;
+                }
+                check("cuEventRecord", unsafe {
+                    (self.functions.event_record)(stop, self.stream)
+                })?;
+                check("cuEventSynchronize", unsafe {
+                    (self.functions.event_sync)(stop)
+                })?;
+                let mut milliseconds = 0.0f32;
+                check("cuEventElapsedTime", unsafe {
+                    (self.functions.event_elapsed)(&mut milliseconds, start, stop)
+                })?;
+                Ok(milliseconds)
+            })();
+
+            unsafe {
+                (self.functions.event_destroy)(stop);
+                (self.functions.event_destroy)(start);
+            }
+            result
         }
 
         /// Resolve the CUDA function before capture. Lazy lookup/JIT is not
@@ -384,6 +453,50 @@ mod platform {
                     self.stream,
                     args.as_mut_ptr(),
                     ptr::null_mut(),
+                )
+            })
+        }
+
+        pub fn launch3(
+            &self,
+            name: &str,
+            first: DevicePtr,
+            second: DevicePtr,
+            third: DevicePtr,
+            output: DevicePtr,
+            length: usize,
+            threads: u32,
+        ) -> Result<(), GpuError> {
+            if !self.capturing {
+                return Err(GpuError::Driver(
+                    "direct kernel launch is forbidden; capture a CUDA Graph".into(),
+                ));
+            }
+            let function = *self.kernels.get(name).ok_or_else(|| {
+                GpuError::Driver(
+                    "kernel function must be resolved before CUDA Graph capture".into(),
+                )
+            })?;
+            let count = i32::try_from(length)
+                .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
+            let grid = u32::try_from(length.div_ceil(threads as usize))
+                .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
+            let mut a = first;
+            let mut b = second;
+            let mut c = third;
+            let mut dst = output;
+            let mut n = count;
+            let mut args = [
+                (&mut a as *mut DevicePtr).cast::<c_void>(),
+                (&mut b as *mut DevicePtr).cast::<c_void>(),
+                (&mut c as *mut DevicePtr).cast::<c_void>(),
+                (&mut dst as *mut DevicePtr).cast::<c_void>(),
+                (&mut n as *mut i32).cast::<c_void>(),
+            ];
+            check("cuLaunchKernel", unsafe {
+                (self.functions.launch)(
+                    function, grid, 1, 1, threads, 1, 1, 0, self.stream,
+                    args.as_mut_ptr(), ptr::null_mut(),
                 )
             })
         }
@@ -476,7 +589,19 @@ mod platform {
             ))
         }
 
-        pub fn launch_graph(&mut self) -> Result<(), GpuError> {
+        pub fn finish_graph(&mut self) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn launch_graph(&self) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn benchmark_graph(&self, _: usize, _: usize) -> Result<f32, GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))
@@ -491,6 +616,21 @@ mod platform {
         pub fn launch(
             &self,
             _: &str,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: usize,
+            _: u32,
+        ) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn launch3(
+            &self,
+            _: &str,
+            _: u64,
             _: u64,
             _: u64,
             _: u64,
