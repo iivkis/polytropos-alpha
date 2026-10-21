@@ -123,7 +123,9 @@ mod platform {
                 stream_create: lib.function("cuStreamCreate")?,
                 stream_destroy: lib.function("cuStreamDestroy_v2")?,
                 stream_sync: lib.function("cuStreamSynchronize")?,
-                stream_capture_begin: lib.function("cuStreamBeginCapture")?,
+                // CUDA Driver API: the unversioned cuStreamBeginCapture takes ONE
+                // argument. We need the two-argument v2 ABI (mode included).
+                stream_capture_begin: lib.function("cuStreamBeginCapture_v2")?,
                 stream_capture_end: lib.function("cuStreamEndCapture")?,
                 graph_instantiate: lib.function("cuGraphInstantiateWithFlags")?,
                 graph_launch: lib.function("cuGraphLaunch")?,

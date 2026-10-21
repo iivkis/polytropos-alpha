@@ -604,7 +604,7 @@ fn stage7_fusion_applies_to_add_and_mul_but_not_across_reshape() {
 fn cuda_graph_only_runtime_regression_guard() {
     let source = include_str!("cuda.rs");
     assert!(source.contains("CU_STREAM_NON_BLOCKING"));
-    assert!(source.contains("cuStreamBeginCapture"));
+    assert!(source.contains("cuStreamBeginCapture_v2"));
     assert!(source.contains("cuStreamEndCapture"));
     assert!(source.contains("cuGraphInstantiateWithFlags"));
     assert!(source.contains("cuGraphLaunch"));
