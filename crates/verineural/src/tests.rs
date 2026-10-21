@@ -435,3 +435,66 @@ fn gpu_input_validation_fails_before_toolchain_or_driver_is_required() {
         Err(GpuError::InvalidGraph(NeuralError::ShapeMismatch { .. }))
     ));
 }
+
+
+#[test]
+fn stage6_bias_shape_validation_and_cpu_broadcast() {
+    let matrix = Tensor::new(shape(&[2, 3]), vec![1_f32, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    let bias = Tensor::new(shape(&[3]), vec![-1_f32, 0.0, 2.0]).unwrap();
+    assert_eq!(matrix.bias_add(&bias).unwrap().values(), &[0., 2., 5., 3., 5., 8.]);
+    assert!(matches!(
+        matrix.bias_add(&Tensor::new(shape(&[2]), vec![1_f32, 2.0]).unwrap()),
+        Err(NeuralError::InnerDimensionMismatch { .. })
+    ));
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2, 3]), Domain::Finite);
+    let wrong = graph.input(shape(&[2]), Domain::Finite);
+    let old_len = graph.nodes().len();
+    assert!(matches!(graph.bias_add(a, wrong), Err(NeuralError::InnerDimensionMismatch { .. })));
+    assert_eq!(graph.nodes().len(), old_len);
+}
+
+#[test]
+fn stage6_dense_residual_ffn_composes_and_emits_matmul_proofs() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2, 2]), Domain::Finite);
+    let w1 = graph.input(shape(&[2, 3]), Domain::Finite);
+    let b1 = graph.input(shape(&[3]), Domain::Finite);
+    let w2 = graph.input(shape(&[3, 2]), Domain::Finite);
+    let b2 = graph.input(shape(&[2]), Domain::Finite);
+    let block = ResidualFfn::new(2, 2, 3).unwrap();
+    let output = graph.apply_module(&block, &[x, w1, b1, w2, b2]).unwrap();
+    assert_eq!(graph.node(output).unwrap().shape.dims(), &[2, 2]);
+    assert_eq!(graph.modules().len(), 1);
+
+    let lean = LeanProofEngine::default().generate(&graph, output).unwrap();
+    assert!(lean.source().contains("VeriNeural.matmul (m := 2) (k := 2) (n := 3)"));
+    assert!(lean.source().contains("VeriNeural.biasAdd (m := 2) (n := 3)"));
+    assert!(lean.source().contains("theorem module_0_output_shape"));
+
+    let gpu = GpuEngine::default().compile(&graph, output).unwrap();
+    assert!(gpu.llvm_ir().contains("%sum = phi float"));
+    assert!(gpu.llvm_ir().contains("urem i32 %idx, 3"));
+    assert!(!gpu.llvm_ir().contains("fast "));
+}
+
+#[test]
+fn stage6_dense_and_residual_contracts_are_checked() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2, 2]), Domain::Any);
+    let w = graph.input(shape(&[2, 3]), Domain::Any);
+    let bias = graph.input(shape(&[3]), Domain::Any);
+    let dense = Dense::new(2, 2, 3).unwrap();
+    let out = graph.apply_module(&dense, &[a, w, bias]).unwrap();
+    assert_eq!(graph.node(out).unwrap().shape.dims(), &[2, 3]);
+
+    let residual = ResidualAdd::new(shape(&[2, 3]));
+    let twice = graph.apply_module(&residual, &[out, out]).unwrap();
+    assert_eq!(graph.node(twice).unwrap().shape.dims(), &[2, 3]);
+
+    let bad_bias = graph.input(shape(&[2]), Domain::Any);
+    let previous_nodes = graph.nodes().len();
+    assert!(graph.apply_module(&dense, &[a, w, bad_bias]).is_err());
+    assert_eq!(graph.nodes().len(), previous_nodes);
+    assert!(ResidualFfn::new(2, 0, 3).is_err());
+}

@@ -5,6 +5,7 @@
 //! and compositional nonnegativity are verified under explicit input hypotheses.
 //! Stage 4 adds experimental LLVM NVPTX + CUDA Driver execution on NVIDIA GPUs.
 //! Stage 5 emits an integrity-checked evidence bundle with separate assurance levels.
+//! Stage 6 adds MatMul, row-wise bias and composable Dense/Residual FFN blocks.
 //! Neither IEEE-754 behavior nor the generated GPU binary is formally certified.
 
 mod certificate;
@@ -12,6 +13,7 @@ mod cuda;
 mod error;
 mod gpu;
 mod ir;
+mod modules;
 mod proof;
 mod tensor;
 
@@ -23,6 +25,7 @@ pub use ir::{
     NeuralModule, Node, NodeId, Operation, OperationSemantics, PortContract, ReductionOrder,
     RoundingMode, SubnormalMode,
 };
+pub use modules::{Dense, ResidualAdd, ResidualFfn};
 pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
 pub use tensor::{Shape, Tensor, TensorShape};
 

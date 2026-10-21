@@ -346,10 +346,10 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize) -> String {
         }
         Operation::BiasAdd => {
             return pointwise_kernel_ir(index, &format!(
-                "  %col = urem i32 %idx, {columns}\\n\\
-                 %bp = getelementptr float, ptr addrspace(1) %b, i32 %col\\n\\
-                 %y = load float, ptr addrspace(1) %bp, align 4\\n\\
-                 %result = fadd float %x, %y\\n"
+                "  %col = urem i32 %idx, {columns}\n\
+                 %bp = getelementptr float, ptr addrspace(1) %b, i32 %col\n\
+                 %y = load float, ptr addrspace(1) %bp, align 4\n\
+                 %result = fadd float %x, %y\n"
             ));
         }
         Operation::Relu => {
