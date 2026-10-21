@@ -422,7 +422,7 @@ impl LeanProofEngine {
         }
         Ok(())
     }
-
+}
 
 fn shape_expr(shape: &Shape) -> String {
     let dims = shape

@@ -46,13 +46,15 @@ task --list
 task check
 task test
 task clippy
-task fmt-check # сначала cargo fmt --all, затем проверка
+task fmt-check # cargo fmt + проверка; если .rs изменились, отдельный commit и git push origin
 task example-stage2
 task proof-stage3
 task gpu-stage4
 task cert-stage5
 task verify-stage5
 ```
+
+**Поведение `task fmt-check`:** только при полностью чистом рабочем дереве запускаются `cargo fmt --all` и `cargo fmt --all -- --check`. Если rustfmt изменил отслеживаемые `.rs`, команда проверяет `origin/<текущая-ветка>`, добавляет только Rust-файлы, создаёт коммит `style(verineural): apply cargo fmt` и выполняет обычный fast-forward `git push` без `--force`. При грязном дереве, отставшей/опережающей ветке, ошибке форматирования или push происходит отказ; при отсутствии изменений коммит и push не выполняются. Прямой вызов `cargo fmt` и `task fmt` ничего автоматически не отправляет. При отказе push созданный локальный коммит сохраняется.
 
 Согласно [AGENTS.md](AGENTS.md), сборка, тесты и другие тяжёлые команды выполняются **пользователем локально**, а не ИИ-агентом без отдельного разрешения. Для будущего GPU-исполнения необходим совместимый NVIDIA GPU и системный NVIDIA-драйвер.
 

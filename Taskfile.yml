@@ -14,10 +14,37 @@ tasks:
       - cargo fmt --all
 
   fmt-check:
-    desc: Auto-format then verify Rust formatting (developer-run)
+    desc: Format and verify Rust; auto-commit and fast-forward push rustfmt-only changes (clean checkout required)
     cmds:
-      - cargo fmt --all
-      - cargo fmt --all -- --check
+      - |
+        set -eu
+        # A dirty tree could mix an existing edit with rustfmt's changes.
+        if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+          echo "fmt-check: dirty working tree; commit or stash changes before auto-push." >&2
+          exit 1
+        fi
+        branch="$(git symbolic-ref --quiet --short HEAD)" || {
+          echo "fmt-check: detached HEAD; refusing auto-push." >&2
+          exit 1
+        }
+        git remote get-url origin >/dev/null
+        cargo fmt --all
+        cargo fmt --all -- --check
+        if git diff --quiet HEAD -- '*.rs'; then
+          echo "fmt-check: no formatting changes; nothing to push."
+          exit 0
+        fi
+        git diff --check
+        # Refuse to publish other local commits or overwrite a newer remote.
+        git fetch --quiet origin "$branch"
+        remote_head="$(git rev-parse --verify "refs/remotes/origin/$branch")"
+        if [ "$(git rev-parse HEAD)" != "$remote_head" ]; then
+          echo "fmt-check: branch differs from origin/$branch; synchronize manually." >&2
+          exit 1
+        fi
+        git add -- '*.rs'
+        git commit -m "style(verineural): apply cargo fmt"
+        git push origin "HEAD:refs/heads/$branch"
 
   check:
     desc: Type-check the Rust workspace (developer-run)
