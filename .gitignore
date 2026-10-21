@@ -1,0 +1,7 @@
+/target/
+/.direnv/
+/result
+/result-*
+/.lake/
+*.swp
+*.swo

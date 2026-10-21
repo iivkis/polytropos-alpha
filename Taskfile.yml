@@ -1,0 +1,44 @@
+version: '3'
+
+# Local developer commands. AI agents must not execute build/test commands
+# by default; see agents.md. No CI is configured.
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  fmt:
+    desc: Format the entire Rust workspace (developer-run)
+    cmds:
+      - cargo fmt --all
+
+  fmt-check:
+    desc: Check Rust formatting (developer-run)
+    cmds:
+      - cargo fmt --all -- --check
+
+  check:
+    desc: Type-check the Rust workspace (developer-run)
+    cmds:
+      - cargo check --workspace --all-targets
+
+  build:
+    desc: Build the Rust workspace (developer-run)
+    cmds:
+      - cargo build --workspace
+
+  test:
+    desc: Run workspace tests (developer-run)
+    cmds:
+      - cargo test --workspace
+
+  clippy:
+    desc: Lint the workspace (developer-run)
+    cmds:
+      - cargo clippy --workspace --all-targets -- -D warnings
+
+  doc:
+    desc: Build Rust documentation locally (developer-run)
+    cmds:
+      - cargo doc --workspace --no-deps

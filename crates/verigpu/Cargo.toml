@@ -1,0 +1,13 @@
+[package]
+name = "verigpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Importable verified GPU computation library (initial scaffold)"
+publish = false
+
+[lib]
+name = "verigpu"
+path = "src/lib.rs"
+
+# No runtime dependencies yet. The implementation begins in stage 2.
