@@ -22,7 +22,8 @@ fn stage7_chain_fusion_removes_two_kernels() {
         1
     );
     assert_eq!(
-        program.fused_pointwise_chains()
+        program
+            .fused_pointwise_chains()
             .get(&result.index())
             .map(Vec::as_slice),
         Some(&[sum.index(), biased.index()][..])

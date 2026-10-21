@@ -232,9 +232,15 @@ pub struct GpuBenchmark {
 }
 
 impl GpuBenchmark {
-    pub const fn warmup_launches(self) -> usize { self.warmup_launches }
-    pub const fn measured_launches(self) -> usize { self.measured_launches }
-    pub const fn elapsed(self) -> Duration { self.elapsed }
+    pub const fn warmup_launches(self) -> usize {
+        self.warmup_launches
+    }
+    pub const fn measured_launches(self) -> usize {
+        self.measured_launches
+    }
+    pub const fn elapsed(self) -> Duration {
+        self.elapsed
+    }
     pub fn average(self) -> Duration {
         Duration::from_secs_f64(self.elapsed.as_secs_f64() / self.measured_launches as f64)
     }
@@ -257,7 +263,8 @@ impl GpuExecution {
 
     pub fn read_output(&mut self) -> Result<Tensor<f32>, GpuError> {
         let mut values = vec![0.0f32; self.output_shape.element_count()];
-        self.session.copy_to_host(&mut values, self.output_address)?;
+        self.session
+            .copy_to_host(&mut values, self.output_address)?;
         Ok(Tensor::new(self.output_shape.clone(), values)?)
     }
 
@@ -272,7 +279,9 @@ impl GpuExecution {
         if !self.has_graph {
             return Err(GpuError::NoKernelGraph);
         }
-        let milliseconds = self.session.benchmark_graph(warmup_launches, measured_launches)?;
+        let milliseconds = self
+            .session
+            .benchmark_graph(warmup_launches, measured_launches)?;
         if !milliseconds.is_finite() || milliseconds < 0.0 {
             return Err(GpuError::Driver(
                 "CUDA event benchmark returned an invalid duration".into(),
@@ -500,7 +509,9 @@ impl GpuEngine {
         let skipped = program.skipped_nodes();
 
         for &index in &program.live_nodes {
-            if skipped.contains(&index) { continue; }
+            if skipped.contains(&index) {
+                continue;
+            }
             let node = &program.graph.nodes()[index];
             match node.operation {
                 Operation::Input => {
@@ -513,8 +524,11 @@ impl GpuEngine {
                     let ptr = buffers[&node.inputs[0].index()];
                     buffers.insert(index, ptr);
                 }
-                Operation::Add | Operation::Mul | Operation::MatMul
-                | Operation::BiasAdd | Operation::Relu => {
+                Operation::Add
+                | Operation::Mul
+                | Operation::MatMul
+                | Operation::BiasAdd
+                | Operation::Relu => {
                     let ptr = session.allocate(node.shape.element_count())?;
                     buffers.insert(index, ptr);
                 }
@@ -522,17 +536,23 @@ impl GpuEngine {
             }
         }
 
-        let kernel_count = program.live_nodes.iter().filter(|&&index| {
-            !skipped.contains(&index)
-                && !matches!(
-                    program.graph.nodes()[index].operation,
-                    Operation::Input | Operation::Reshape(_)
-                )
-        }).count();
+        let kernel_count = program
+            .live_nodes
+            .iter()
+            .filter(|&&index| {
+                !skipped.contains(&index)
+                    && !matches!(
+                        program.graph.nodes()[index].operation,
+                        Operation::Input | Operation::Reshape(_)
+                    )
+            })
+            .count();
         let has_graph = kernel_count > 0;
         if has_graph {
             for &index in &program.live_nodes {
-                if skipped.contains(&index) { continue; }
+                if skipped.contains(&index) {
+                    continue;
+                }
                 let op = &program.graph.nodes()[index].operation;
                 if !matches!(op, Operation::Input | Operation::Reshape(_)) {
                     session.prepare_kernel(&format!("vn_node_{index}"))?;
@@ -540,7 +560,9 @@ impl GpuEngine {
             }
             session.begin_graph()?;
             for &index in &program.live_nodes {
-                if skipped.contains(&index) { continue; }
+                if skipped.contains(&index) {
+                    continue;
+                }
                 let node = &program.graph.nodes()[index];
                 if matches!(node.operation, Operation::Input | Operation::Reshape(_)) {
                     continue;
@@ -567,10 +589,14 @@ impl GpuEngine {
                 let first = buffers[&kernel_inputs[0].index()];
                 let second = if kernel_inputs.len() == 2 {
                     buffers[&kernel_inputs[1].index()]
-                } else { 0 };
+                } else {
+                    0
+                };
                 session.launch(
                     &format!("vn_node_{index}"),
-                    first, second, buffers[&index],
+                    first,
+                    second,
+                    buffers[&index],
                     node.shape.element_count(),
                     program.launch.threads_per_block,
                 )?;

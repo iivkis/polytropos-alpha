@@ -101,9 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Experimental)?);
     let unoptimized_plan = baseline.compile(&graph, output)?;
     let fused_plan = fused.compile(&graph, output)?;
-    if fused_plan.fused_pointwise_chains().len() != 1
-        || fused_plan.removed_kernel_count() != 2
-    {
+    if fused_plan.fused_pointwise_chains().len() != 1 || fused_plan.removed_kernel_count() != 2 {
         return Err(io::Error::other(
             "expected Add -> BiasAdd -> Relu to remove exactly two kernels",
         )
@@ -127,8 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     baseline_cert.verify_bundle(&baseline_report.directory)?;
 
     let fused_cert = CertificateEngine::new(LeanProofEngine::default(), fused.clone());
-    let fused_report =
-        fused_cert.run(&graph, output, &inputs, &reference, &root.join("fused"))?;
+    let fused_report = fused_cert.run(&graph, output, &inputs, &reference, &root.join("fused"))?;
     fused_cert.verify_bundle(&fused_report.directory)?;
 
     // Benchmark only an already instantiated CUgraphExec. CUDA events exclude
@@ -141,8 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut baseline_execution =
         baseline.prepare(&unoptimized_plan, &inputs, &benchmark_root.join("baseline"))?;
-    let mut fused_execution =
-        fused.prepare(&fused_plan, &inputs, &benchmark_root.join("fused"))?;
+    let mut fused_execution = fused.prepare(&fused_plan, &inputs, &benchmark_root.join("fused"))?;
     let baseline_benchmark = baseline_execution.benchmark(25, 1000)?;
     let fused_benchmark = fused_execution.benchmark(25, 1000)?;
 
@@ -150,12 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("baseline", baseline_execution.read_output()?),
         ("fused", fused_execution.read_output()?),
     ] {
-        for (index, (&gpu, &cpu)) in actual
-            .values()
-            .iter()
-            .zip(reference.values())
-            .enumerate()
-        {
+        for (index, (&gpu, &cpu)) in actual.values().iter().zip(reference.values()).enumerate() {
             if gpu.to_bits() != cpu.to_bits() {
                 return Err(io::Error::other(format!(
                     "{label} benchmark output mismatch at {index}: GPU={:08x} CPU={:08x}",
