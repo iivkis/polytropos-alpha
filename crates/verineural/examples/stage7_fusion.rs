@@ -7,6 +7,7 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::process::Command;
 use std::time::Instant;
 
 use verineural::{
@@ -14,7 +15,58 @@ use verineural::{
     ReluFusion, Shape, Tensor,
 };
 
+const STAGE7_ARTIFACTS: [&str; 3] = [
+    "fusion.lean",
+    "baseline/SHA256SUMS",
+    "fused/SHA256SUMS",
+];
+
+fn digest(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("sha256sum").arg(path).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("sha256sum failed").into());
+    }
+    let text = String::from_utf8(output.stdout)?;
+    let hash = text.split_whitespace().next().unwrap_or("");
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io::Error::other("invalid sha256sum digest").into());
+    }
+    Ok(hash.to_owned())
+}
+
+/// No GPU run: verify all three pinned sub-artifacts, and rerun Lean.
+fn verify_stage7(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = root.join("SHA256SUMS");
+    if let Ok(expected) = std::env::var("VERINEURAL_STAGE7_SHA256") {
+        if digest(&manifest)? != expected {
+            return Err(io::Error::other("Stage 7 pinned digest mismatch").into());
+        }
+    }
+    let check = Command::new("sha256sum")
+        .current_dir(root)
+        .args(["--check", "SHA256SUMS"])
+        .output()?;
+    if !check.status.success() {
+        return Err(io::Error::other(format!(
+            "Stage 7 manifest rejected: {}",
+            String::from_utf8_lossy(&check.stderr)
+        )).into());
+    }
+    let proof = LeanProofEngine::default();
+    proof.check_file(&root.join("fusion.lean"))?;
+    for name in ["baseline", "fused"] {
+        CertificateEngine::default().verify_bundle(&root.join(name))?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Path::new("target/verineural/stage7");
+    if std::env::args().any(|a| a == "--verify") {
+        verify_stage7(root)?;
+        println!("Stage 7: hashes and all saved Lean sources verified (no GPU replay)");
+        return Ok(());
+    }
     let shape = Shape::new(vec![2, 3])?;
     let x = Tensor::new(shape.clone(), vec![-3.0_f32, 0.0, 1.0, 2.0, -2.0, 5.0])?;
     let y = Tensor::new(shape.clone(), vec![0.5_f32, 2.0, -2.0, 1.0, 3.0, 0.0])?;
@@ -30,8 +82,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = graph.relu(biased)?;
     let reference = x.add(&y)?.bias_add(&bias)?.relu();
     let inputs = [(xid, x), (yid, y), (bid, bias)];
-    let root = Path::new("target/verineural/stage7");
     fs::create_dir_all(root)?;
+    // Fail closed: a previous success manifest must not survive a bad rerun.
+    for name in [
+        "SHA256SUMS",
+        "baseline/SHA256SUMS",
+        "baseline/report.json",
+        "fused/SHA256SUMS",
+        "fused/report.json",
+    ] {
+        match fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
 
     // The intermediate bias-add node is exclusively consumed by the Relu.
     let baseline = GpuEngine::default().with_launch_config(
@@ -75,6 +140,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fused_duration = t1.elapsed();
 
     let count_kernels = |text: &str| text.matches("define ptx_kernel void").count();
+    let hashes = Command::new("sha256sum")
+        .current_dir(root)
+        .args(STAGE7_ARTIFACTS)
+        .output()?;
+    if !hashes.status.success() {
+        return Err(io::Error::other("Stage 7 sha256sum generation failed").into());
+    }
+    fs::write(root.join("SHA256SUMS"), hashes.stdout)?;
+    if let Err(err) = verify_stage7(root) {
+        let _ = fs::remove_file(root.join("SHA256SUMS"));
+        return Err(err);
+    }
+
     println!(
         "Stage 7: kernels {} -> {}, guarded fusions {}",
         count_kernels(unoptimized_plan.llvm_ir()),
@@ -96,7 +174,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "SHA256SUMS digests: baseline {}, fused {}",
         baseline_report.manifest_sha256, fused_report.manifest_sha256
     );
-    println!("The standalone fusion.lean is not included in the Stage-5-format SHA256SUMS.");
+    println!("Pinned Stage 7 SHA256SUMS digest: {}", digest(&root.join("SHA256SUMS"))?);
+    println!("Recheck without a GPU: task verify-gpu-stage7");
+    println!("Stage 7 manifest covers fusion.lean and both Stage 5 evidence manifests.");
     println!("No certified PTX/FP32/machine-code equivalence is claimed.");
     Ok(())
 }

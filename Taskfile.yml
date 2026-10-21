@@ -105,3 +105,8 @@ tasks:
     desc: Compare controlled CUDA launches and experimental Relu fusion with Lean and CPU checks (developer-run)
     cmds:
       - cargo run -p verineural --example stage7_fusion
+
+  verify-gpu-stage7:
+    desc: Replay Stage 7 SHA-256 manifests and Lean proof checks without GPU execution (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage7_fusion -- --verify
