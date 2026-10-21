@@ -1,5 +1,7 @@
 //! CUDA Driver API bindings loaded from the system NVIDIA driver at runtime.
-//! ABI bindings here are deliberately limited to the stage-4 synchronous path.
+//! GPU kernels execute only as CUDA Graph nodes on an explicit non-blocking stream.
+//! Legacy/default streams, direct standalone kernel launches and silent fallbacks
+//! are forbidden. Host transfers also use this explicit stream.
 
 #[cfg(target_os = "linux")]
 mod platform {
@@ -17,6 +19,8 @@ mod platform {
     }
 
     const RTLD_NOW: c_int = 2;
+    const CU_STREAM_NON_BLOCKING: c_uint = 1;
+    const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
 
     struct Library(*mut c_void);
 
@@ -72,8 +76,19 @@ mod platform {
         module_function: unsafe extern "C" fn(*mut Handle, Handle, *const c_char) -> ResultCode,
         mem_allocate: unsafe extern "C" fn(*mut DevicePtr, usize) -> ResultCode,
         mem_free: unsafe extern "C" fn(DevicePtr) -> ResultCode,
-        host_to_device: unsafe extern "C" fn(DevicePtr, *const c_void, usize) -> ResultCode,
-        device_to_host: unsafe extern "C" fn(*mut c_void, DevicePtr, usize) -> ResultCode,
+        pinned_allocate: unsafe extern "C" fn(*mut *mut c_void, usize) -> ResultCode,
+        pinned_free: unsafe extern "C" fn(*mut c_void) -> ResultCode,
+        host_to_device: unsafe extern "C" fn(DevicePtr, *const c_void, usize, Handle) -> ResultCode,
+        device_to_host: unsafe extern "C" fn(*mut c_void, DevicePtr, usize, Handle) -> ResultCode,
+        stream_create: unsafe extern "C" fn(*mut Handle, c_uint) -> ResultCode,
+        stream_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
+        stream_sync: unsafe extern "C" fn(Handle) -> ResultCode,
+        stream_capture_begin: unsafe extern "C" fn(Handle, c_int) -> ResultCode,
+        stream_capture_end: unsafe extern "C" fn(Handle, *mut Handle) -> ResultCode,
+        graph_instantiate: unsafe extern "C" fn(*mut Handle, Handle, u64) -> ResultCode,
+        graph_launch: unsafe extern "C" fn(Handle, Handle) -> ResultCode,
+        graph_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
+        graph_exec_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
         launch: unsafe extern "C" fn(
             Handle,
             c_uint,
@@ -87,8 +102,7 @@ mod platform {
             *mut *mut c_void,
             *mut *mut c_void,
         ) -> ResultCode,
-        synchronize: unsafe extern "C" fn() -> ResultCode,
-    }
+     }
 
     impl Functions {
         fn load(lib: &Library) -> Result<Self, GpuError> {
@@ -102,10 +116,20 @@ mod platform {
                 module_function: lib.function("cuModuleGetFunction")?,
                 mem_allocate: lib.function("cuMemAlloc_v2")?,
                 mem_free: lib.function("cuMemFree_v2")?,
-                host_to_device: lib.function("cuMemcpyHtoD_v2")?,
-                device_to_host: lib.function("cuMemcpyDtoH_v2")?,
+                pinned_allocate: lib.function("cuMemAllocHost_v2")?,
+                pinned_free: lib.function("cuMemFreeHost")?,
+                host_to_device: lib.function("cuMemcpyHtoDAsync_v2")?,
+                device_to_host: lib.function("cuMemcpyDtoHAsync_v2")?,
+                stream_create: lib.function("cuStreamCreate")?,
+                stream_destroy: lib.function("cuStreamDestroy_v2")?,
+                stream_sync: lib.function("cuStreamSynchronize")?,
+                stream_capture_begin: lib.function("cuStreamBeginCapture")?,
+                stream_capture_end: lib.function("cuStreamEndCapture")?,
+                graph_instantiate: lib.function("cuGraphInstantiateWithFlags")?,
+                graph_launch: lib.function("cuGraphLaunch")?,
+                graph_destroy: lib.function("cuGraphDestroy")?,
+                graph_exec_destroy: lib.function("cuGraphExecDestroy")?,
                 launch: lib.function("cuLaunchKernel")?,
-                synchronize: lib.function("cuCtxSynchronize")?,
             })
         }
     }
@@ -125,6 +149,11 @@ mod platform {
         context: Handle,
         module: Handle,
         allocations: Vec<DevicePtr>,
+        pinned_buffers: Vec<*mut c_void>,
+        stream: Handle,
+        graph: Handle,
+        graph_exec: Handle,
+        capturing: bool,
         _library: Library,
     }
 
@@ -149,6 +178,11 @@ mod platform {
                 context,
                 module: ptr::null_mut(),
                 allocations: Vec::new(),
+                pinned_buffers: Vec::new(),
+                stream: ptr::null_mut(),
+                graph: ptr::null_mut(),
+                graph_exec: ptr::null_mut(),
+                capturing: false,
                 _library: library,
             };
             let bytes = CString::new(ptx)
@@ -160,6 +194,14 @@ mod platform {
                     bytes.as_ptr().cast::<c_void>(),
                 )
             })?;
+            // Never pass 0/CU_STREAM_LEGACY/CU_STREAM_PER_THREAD as a launch stream.
+            // No fallback: require an explicitly allocated non-blocking stream.
+            check("cuStreamCreate", unsafe {
+                (session.functions.stream_create)(&mut session.stream, CU_STREAM_NON_BLOCKING)
+            })?;
+            if session.stream.is_null() {
+                return Err(GpuError::Driver("CUDA returned a null stream handle".into()));
+            }
             Ok(session)
         }
 
@@ -176,21 +218,85 @@ mod platform {
             Ok(address)
         }
 
-        pub fn copy_to_device(&self, address: DevicePtr, values: &[f32]) -> Result<(), GpuError> {
+        /// Stage input bytes in page-locked memory and enqueue on our explicit
+        /// non-blocking stream. Pinned buffers stay owned until session teardown.
+        pub fn copy_to_device(&mut self, address: DevicePtr, values: &[f32]) -> Result<(), GpuError> {
             let bytes = std::mem::size_of_val(values);
-            // SAFETY: address is a valid allocation owned by this session and the
-            // source slice remains alive for the synchronous CUDA copy.
-            check("cuMemcpyHtoD_v2", unsafe {
-                (self.functions.host_to_device)(address, values.as_ptr().cast::<c_void>(), bytes)
+            let mut pinned = ptr::null_mut();
+            // SAFETY: pinned is a writable output pointer for CUDA's host allocation.
+            check("cuMemAllocHost_v2", unsafe {
+                (self.functions.pinned_allocate)(&mut pinned, bytes)
+            })?;
+            self.pinned_buffers.push(pinned);
+            // SAFETY: the pinned allocation has capacity for values.len() f32s.
+            unsafe {
+                ptr::copy_nonoverlapping(values.as_ptr(), pinned.cast::<f32>(), values.len())
+            };
+            // SAFETY: pinned is kept alive through graph execution and synchronization.
+            check("cuMemcpyHtoDAsync_v2", unsafe {
+                (self.functions.host_to_device)(address, pinned, bytes, self.stream)
             })
         }
 
-        pub fn copy_to_host(&self, out: &mut [f32], address: DevicePtr) -> Result<(), GpuError> {
+        pub fn copy_to_host(&mut self, out: &mut [f32], address: DevicePtr) -> Result<(), GpuError> {
             let bytes = std::mem::size_of_val(out);
-            // SAFETY: destination slice is writable and device allocation is
-            // valid; the copy is synchronous after cuCtxSynchronize.
-            check("cuMemcpyDtoH_v2", unsafe {
-                (self.functions.device_to_host)(out.as_mut_ptr().cast::<c_void>(), address, bytes)
+            let mut pinned = ptr::null_mut();
+            // SAFETY: the CUDA allocation is valid and owned by this session.
+            check("cuMemAllocHost_v2", unsafe {
+                (self.functions.pinned_allocate)(&mut pinned, bytes)
+            })?;
+            self.pinned_buffers.push(pinned);
+            // SAFETY: destination remains valid through synchronization.
+            check("cuMemcpyDtoHAsync_v2", unsafe {
+                (self.functions.device_to_host)(pinned, address, bytes, self.stream)
+            })?;
+            self.synchronize()?;
+            // SAFETY: the async transfer completed; Rust out is valid for out.len() f32s.
+            unsafe {
+                ptr::copy_nonoverlapping(pinned.cast::<f32>(), out.as_mut_ptr(), out.len())
+            };
+            Ok(())
+        }
+
+        /// Begin capturing only kernel launches to a CUDA Graph. No allocations,
+        /// host copies, or default-stream commands are permitted during capture.
+        pub fn begin_graph(&mut self) -> Result<(), GpuError> {
+            if self.capturing || !self.graph.is_null() || !self.graph_exec.is_null() {
+                return Err(GpuError::Driver("CUDA Graph already in progress".into()));
+            }
+            self.synchronize()?;
+            // SAFETY: an explicitly created nonblocking stream is current.
+            check("cuStreamBeginCapture", unsafe {
+                (self.functions.stream_capture_begin)(
+                    self.stream,
+                    CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+                )
+            })?;
+            self.capturing = true;
+            Ok(())
+        }
+
+        /// Finish capture, instantiate and submit once to the explicit stream.
+        pub fn launch_graph(&mut self) -> Result<(), GpuError> {
+            if !self.capturing {
+                return Err(GpuError::Driver("CUDA Graph was not started".into()));
+            }
+            let mut graph = ptr::null_mut();
+            // SAFETY: capture runs on the current thread and same CUDA stream.
+            let code = unsafe { (self.functions.stream_capture_end)(self.stream, &mut graph) };
+            self.capturing = false;
+            self.graph = graph;
+            check("cuStreamEndCapture", code)?;
+            if self.graph.is_null() {
+                return Err(GpuError::Driver("CUDA Graph capture returned null".into()));
+            }
+            // SAFETY: all captured kernel parameters have been copied by CUDA.
+            check("cuGraphInstantiateWithFlags", unsafe {
+                (self.functions.graph_instantiate)(&mut self.graph_exec, self.graph, 0)
+            })?;
+            // SAFETY: the executable graph is valid, the launch stream is not legacy.
+            check("cuGraphLaunch", unsafe {
+                (self.functions.graph_launch)(self.graph_exec, self.stream)
             })
         }
 
@@ -203,6 +309,9 @@ mod platform {
             length: usize,
             threads: u32,
         ) -> Result<(), GpuError> {
+            if !self.capturing {
+                return Err(GpuError::Driver("direct kernel launch is forbidden; capture a CUDA Graph".into()));
+            }
             let name = CString::new(name)
                 .map_err(|_| GpuError::Driver("kernel name contains NUL".into()))?;
             let mut function = ptr::null_mut();
@@ -237,7 +346,7 @@ mod platform {
                     1,
                     1,
                     0,
-                    ptr::null_mut(),
+                    self.stream,
                     args.as_mut_ptr(),
                     ptr::null_mut(),
                 )
@@ -245,22 +354,48 @@ mod platform {
         }
 
         pub fn synchronize(&self) -> Result<(), GpuError> {
-            // SAFETY: session context is current for the calling host thread.
-            check("cuCtxSynchronize", unsafe {
-                (self.functions.synchronize)()
+            // SAFETY: stream belongs to this CUDA context; never synchronize legacy.
+            check("cuStreamSynchronize", unsafe {
+                (self.functions.stream_sync)(self.stream)
             })
         }
     }
 
     impl Drop for CudaSession {
         fn drop(&mut self) {
-            // SAFETY: these handles belong to this session. Attempt to release
-            // all resources even when the preceding operation has failed.
+            // The stream must complete before releasing graph/module/device/pinned
+            // buffers. A failed capture is ended best-effort without replay.
+            if self.capturing && !self.stream.is_null() {
+                let mut graph = ptr::null_mut();
+                // SAFETY: same CUDA stream, no concurrent host access.
+                unsafe { (self.functions.stream_capture_end)(self.stream, &mut graph) };
+                self.capturing = false;
+                if !graph.is_null() {
+                    unsafe { (self.functions.graph_destroy)(graph) };
+                }
+            }
+            if !self.stream.is_null() {
+                // SAFETY: session owns this stream.
+                unsafe { (self.functions.stream_sync)(self.stream) };
+            }
+            if !self.graph_exec.is_null() {
+                // SAFETY: the executable graph is owned by this session.
+                unsafe { (self.functions.graph_exec_destroy)(self.graph_exec) };
+            }
+            if !self.graph.is_null() {
+                unsafe { (self.functions.graph_destroy)(self.graph) };
+            }
             for address in self.allocations.drain(..).rev() {
                 unsafe { (self.functions.mem_free)(address) };
             }
+            for host in self.pinned_buffers.drain(..).rev() {
+                unsafe { (self.functions.pinned_free)(host) };
+            }
             if !self.module.is_null() {
                 unsafe { (self.functions.module_unload)(self.module) };
+            }
+            if !self.stream.is_null() {
+                unsafe { (self.functions.stream_destroy)(self.stream) };
             }
             if !self.context.is_null() {
                 unsafe { (self.functions.context_destroy)(self.context) };
@@ -288,16 +423,24 @@ mod platform {
             ))
         }
 
-        pub fn copy_to_device(&self, _: u64, _: &[f32]) -> Result<(), GpuError> {
+        pub fn copy_to_device(&mut self, _: u64, _: &[f32]) -> Result<(), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))
         }
 
-        pub fn copy_to_host(&self, _: &mut [f32], _: u64) -> Result<(), GpuError> {
+        pub fn copy_to_host(&mut self, _: &mut [f32], _: u64) -> Result<(), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))
+        }
+
+        pub fn begin_graph(&mut self) -> Result<(), GpuError> {
+            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+        }
+
+        pub fn launch_graph(&mut self) -> Result<(), GpuError> {
+            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
         }
 
         pub fn launch(
