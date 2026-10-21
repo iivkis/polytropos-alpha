@@ -3,11 +3,11 @@ name = "verineural"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Importable Rust library for neural computation and formal verification (initial scaffold)"
+description = "Importable Rust library for neural computation and formal verification (Semantic Neural IR stage)"
 publish = false
 
 [lib]
 name = "verineural"
 path = "src/lib.rs"
 
-# No runtime dependencies yet. The implementation begins in stage 2.
+# Stage 2 deliberately uses only the Rust standard library.

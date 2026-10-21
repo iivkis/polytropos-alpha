@@ -42,3 +42,8 @@ tasks:
     desc: Build Rust documentation locally (developer-run)
     cmds:
       - cargo doc --workspace --no-deps
+
+  example-stage2:
+    desc: Run the stage-2 Semantic Neural IR example (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage2_graph
