@@ -34,16 +34,17 @@ mod platform {
         }
 
         fn function<T: Copy>(&self, name: &'static str) -> Result<T, GpuError> {
-            let cname = CString::new(name).map_err(|_| GpuError::Driver(
-                "invalid CUDA symbol name".into()
-            ))?;
+            let cname = CString::new(name)
+                .map_err(|_| GpuError::Driver("invalid CUDA symbol name".into()))?;
             // SAFETY: handle is live and cname is NUL-terminated.
             let symbol = unsafe { dlsym(self.0, cname.as_ptr()) };
             if symbol.is_null() {
                 return Err(GpuError::Driver(format!("missing CUDA symbol {name}")));
             }
             if std::mem::size_of::<T>() != std::mem::size_of::<*mut c_void>() {
-                return Err(GpuError::Driver("CUDA symbol has an invalid ABI size".into()));
+                return Err(GpuError::Driver(
+                    "CUDA symbol has an invalid ABI size".into(),
+                ));
             }
             // SAFETY: each caller chooses T to match the exact CUDA C ABI.
             Ok(unsafe { transmute_copy(&symbol) })
@@ -74,8 +75,17 @@ mod platform {
         host_to_device: unsafe extern "C" fn(DevicePtr, *const c_void, usize) -> ResultCode,
         device_to_host: unsafe extern "C" fn(*mut c_void, DevicePtr, usize) -> ResultCode,
         launch: unsafe extern "C" fn(
-            Handle, c_uint, c_uint, c_uint, c_uint, c_uint, c_uint,
-            c_uint, Handle, *mut *mut c_void, *mut *mut c_void
+            Handle,
+            c_uint,
+            c_uint,
+            c_uint,
+            c_uint,
+            c_uint,
+            c_uint,
+            c_uint,
+            Handle,
+            *mut *mut c_void,
+            *mut *mut c_void,
         ) -> ResultCode,
         synchronize: unsafe extern "C" fn() -> ResultCode,
     }
@@ -110,7 +120,7 @@ mod platform {
 
     /// Owns every device allocation, loaded PTX module and CUDA context.
     /// The library is dropped last, after all CUDA handles are released.
-    pub(super) struct CudaSession {
+    pub(crate) struct CudaSession {
         functions: Functions,
         context: Handle,
         module: Handle,
@@ -126,13 +136,14 @@ mod platform {
             check("cuInit", unsafe { (functions.init)(0) })?;
             let mut device = 0;
             // SAFETY: device is a valid writable pointer.
-            check("cuDeviceGet", unsafe { (functions.device_get)(&mut device, 0) })?;
+            check("cuDeviceGet", unsafe {
+                (functions.device_get)(&mut device, 0)
+            })?;
             let mut context = ptr::null_mut();
             // SAFETY: context is a valid output pointer; CUDA owns the context.
-            check(
-                "cuCtxCreate_v2",
-                unsafe { (functions.context_create)(&mut context, 0, device) },
-            )?;
+            check("cuCtxCreate_v2", unsafe {
+                (functions.context_create)(&mut context, 0, device)
+            })?;
             let mut session = Self {
                 functions,
                 context,
@@ -143,15 +154,12 @@ mod platform {
             let bytes = CString::new(ptx)
                 .map_err(|_| GpuError::Driver("PTX contains interior NUL byte".into()))?;
             // SAFETY: PTX has an extra terminating NUL and lives through the call.
-            check(
-                "cuModuleLoadData",
-                unsafe {
-                    (session.functions.module_load)(
-                        &mut session.module,
-                        bytes.as_ptr().cast::<c_void>(),
-                    )
-                },
-            )?;
+            check("cuModuleLoadData", unsafe {
+                (session.functions.module_load)(
+                    &mut session.module,
+                    bytes.as_ptr().cast::<c_void>(),
+                )
+            })?;
             Ok(session)
         }
 
@@ -161,10 +169,9 @@ mod platform {
                 .ok_or(GpuError::UnsupportedSize { elements })?;
             let mut address = 0;
             // SAFETY: address is writable, CUDA manages allocated device memory.
-            check(
-                "cuMemAlloc_v2",
-                unsafe { (self.functions.mem_allocate)(&mut address, bytes) },
-            )?;
+            check("cuMemAlloc_v2", unsafe {
+                (self.functions.mem_allocate)(&mut address, bytes)
+            })?;
             self.allocations.push(address);
             Ok(address)
         }
@@ -173,32 +180,18 @@ mod platform {
             let bytes = std::mem::size_of_val(values);
             // SAFETY: address is a valid allocation owned by this session and the
             // source slice remains alive for the synchronous CUDA copy.
-            check(
-                "cuMemcpyHtoD_v2",
-                unsafe {
-                    (self.functions.host_to_device)(
-                        address,
-                        values.as_ptr().cast::<c_void>(),
-                        bytes,
-                    )
-                },
-            )
+            check("cuMemcpyHtoD_v2", unsafe {
+                (self.functions.host_to_device)(address, values.as_ptr().cast::<c_void>(), bytes)
+            })
         }
 
         pub fn copy_to_host(&self, out: &mut [f32], address: DevicePtr) -> Result<(), GpuError> {
             let bytes = std::mem::size_of_val(out);
             // SAFETY: destination slice is writable and device allocation is
             // valid; the copy is synchronous after cuCtxSynchronize.
-            check(
-                "cuMemcpyDtoH_v2",
-                unsafe {
-                    (self.functions.device_to_host)(
-                        out.as_mut_ptr().cast::<c_void>(),
-                        address,
-                        bytes,
-                    )
-                },
-            )
+            check("cuMemcpyDtoH_v2", unsafe {
+                (self.functions.device_to_host)(out.as_mut_ptr().cast::<c_void>(), address, bytes)
+            })
         }
 
         pub fn launch(
@@ -214,16 +207,9 @@ mod platform {
                 .map_err(|_| GpuError::Driver("kernel name contains NUL".into()))?;
             let mut function = ptr::null_mut();
             // SAFETY: name is NUL-terminated and module remains loaded.
-            check(
-                "cuModuleGetFunction",
-                unsafe {
-                    (self.functions.module_function)(
-                        &mut function,
-                        self.module,
-                        name.as_ptr(),
-                    )
-                },
-            )?;
+            check("cuModuleGetFunction", unsafe {
+                (self.functions.module_function)(&mut function, self.module, name.as_ptr())
+            })?;
             let count = i32::try_from(length)
                 .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
             let grid = u32::try_from(length.div_ceil(threads as usize))
@@ -241,29 +227,28 @@ mod platform {
             // SAFETY: each kernel argument points to correctly sized stable
             // storage matching the LLVM kernel signature. The launch itself
             // is asynchronous; synchronize before copying results.
-            check(
-                "cuLaunchKernel",
-                unsafe {
-                    (self.functions.launch)(
-                        function,
-                        grid,
-                        1,
-                        1,
-                        threads,
-                        1,
-                        1,
-                        0,
-                        ptr::null_mut(),
-                        args.as_mut_ptr(),
-                        ptr::null_mut(),
-                    )
-                },
-            )
+            check("cuLaunchKernel", unsafe {
+                (self.functions.launch)(
+                    function,
+                    grid,
+                    1,
+                    1,
+                    threads,
+                    1,
+                    1,
+                    0,
+                    ptr::null_mut(),
+                    args.as_mut_ptr(),
+                    ptr::null_mut(),
+                )
+            })
         }
 
         pub fn synchronize(&self) -> Result<(), GpuError> {
             // SAFETY: session context is current for the calling host thread.
-            check("cuCtxSynchronize", unsafe { (self.functions.synchronize)() })
+            check("cuCtxSynchronize", unsafe {
+                (self.functions.synchronize)()
+            })
         }
     }
 
@@ -288,23 +273,31 @@ mod platform {
 mod platform {
     use super::super::gpu::GpuError;
 
-    pub(super) struct CudaSession;
+    pub(crate) struct CudaSession;
 
     impl CudaSession {
         pub fn new(_: &[u8]) -> Result<Self, GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn allocate(&mut self, _: usize) -> Result<u64, GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn copy_to_device(&self, _: u64, _: &[f32]) -> Result<(), GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn copy_to_host(&self, _: &mut [f32], _: u64) -> Result<(), GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn launch(
@@ -316,11 +309,15 @@ mod platform {
             _: usize,
             _: u32,
         ) -> Result<(), GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn synchronize(&self) -> Result<(), GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
     }
 }

@@ -46,7 +46,7 @@ task --list
 task check
 task test
 task clippy
-task fmt-check
+task fmt-check # сначала cargo fmt --all, затем проверка
 task example-stage2
 task proof-stage3
 task gpu-stage4

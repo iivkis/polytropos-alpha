@@ -19,14 +19,29 @@ const THREADS: usize = 256;
 #[derive(Debug)]
 pub enum GpuError {
     InvalidGraph(NeuralError),
-    UnsupportedOperation { node: usize, operation: &'static str },
-    UnsupportedSize { elements: usize },
-    InvalidInput { node: usize, reason: &'static str },
-    MissingInput { node: usize },
+    UnsupportedOperation {
+        node: usize,
+        operation: &'static str,
+    },
+    UnsupportedSize {
+        elements: usize,
+    },
+    InvalidInput {
+        node: usize,
+        reason: &'static str,
+    },
+    MissingInput {
+        node: usize,
+    },
     Io(std::io::Error),
-    LlvmFailed { diagnostics: String },
+    LlvmFailed {
+        diagnostics: String,
+    },
     Driver(String),
-    Cuda { function: &'static str, code: i32 },
+    Cuda {
+        function: &'static str,
+        code: i32,
+    },
 }
 
 impl fmt::Display for GpuError {
@@ -37,7 +52,10 @@ impl fmt::Display for GpuError {
                 write!(f, "GPU node {node}: {operation} is not supported")
             }
             Self::UnsupportedSize { elements } => {
-                write!(f, "GPU tensor length {elements} exceeds supported i32 range")
+                write!(
+                    f,
+                    "GPU tensor length {elements} exceeds supported i32 range"
+                )
             }
             Self::InvalidInput { node, reason } => write!(f, "GPU input {node}: {reason}"),
             Self::MissingInput { node } => write!(f, "GPU input {node} is missing"),

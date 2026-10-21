@@ -342,7 +342,6 @@ fn proof_generator_rejects_handles_from_other_graphs() {
     ));
 }
 
-
 #[test]
 fn gpu_compiler_lowers_arithmetic_and_reshape_to_a_reachable_kernel_dag() {
     let mut graph = NeuralGraph::default();
@@ -407,7 +406,9 @@ fn gpu_input_validation_fails_before_toolchain_or_driver_is_required() {
     let invalid = Tensor::new(shape(&[2]), vec![-1.0f32, 2.0]).unwrap();
     assert!(matches!(
         engine.execute(&program, &[(a, invalid)], std::path::Path::new("unused")),
-        Err(GpuError::InvalidGraph(NeuralError::ValueOutsideDomain { .. }))
+        Err(GpuError::InvalidGraph(
+            NeuralError::ValueOutsideDomain { .. }
+        ))
     ));
     let wrong = Tensor::new(shape(&[1]), vec![1.0f32]).unwrap();
     assert!(matches!(

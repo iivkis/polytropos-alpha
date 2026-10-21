@@ -14,8 +14,9 @@ tasks:
       - cargo fmt --all
 
   fmt-check:
-    desc: Check Rust formatting (developer-run)
+    desc: Auto-format then verify Rust formatting (developer-run)
     cmds:
+      - cargo fmt --all
       - cargo fmt --all -- --check
 
   check:

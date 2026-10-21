@@ -58,13 +58,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (&actual, &expected) in output.values().iter().zip(cpu_result.values()) {
         if actual.to_bits() != expected.to_bits() {
-            return Err(format!(
-                "GPU differs from CPU: actual={actual:?} expected={expected:?}"
-            )
-            .into());
+            return Err(
+                format!("GPU differs from CPU: actual={actual:?} expected={expected:?}").into(),
+            );
         }
     }
-    println!("GPU execution matched CPU for {} FP32 values", output.values().len());
+    println!(
+        "GPU execution matched CPU for {} FP32 values",
+        output.values().len()
+    );
     println!("LLVM IR and PTX: target/verineural/gpu-stage4/");
     println!("Scope: numerical validation, not a proof of the GPU machine code.");
     Ok(())
