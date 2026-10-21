@@ -53,3 +53,13 @@ fn stage7_shared_inner_node_blocks_chain_fusion() {
     assert!(program.fused_pointwise_chains().is_empty());
     assert_eq!(program.removed_kernel_count(), 1);
 }
+
+#[test]
+fn cuda_sessions_rebind_their_owned_context() {
+    let source = include_str!("../src/cuda.rs");
+    assert!(source.contains("cuCtxPushCurrent_v2"));
+    assert!(source.contains("cuCtxPopCurrent_v2"));
+    assert!(source.contains("fn enter_context"));
+    assert!(source.matches("self.enter_context()?;").count() >= 7);
+    assert!(source.contains("Keep this session context current for the entire capture sequence."));
+}

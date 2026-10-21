@@ -572,9 +572,11 @@ impl GpuEngine {
                     let bias_add = &program.graph.nodes()[chain[1]];
                     session.launch3(
                         &format!("vn_node_{index}"),
-                        buffers[&inner.inputs[0].index()],
-                        buffers[&inner.inputs[1].index()],
-                        buffers[&bias_add.inputs[1].index()],
+                        [
+                            buffers[&inner.inputs[0].index()],
+                            buffers[&inner.inputs[1].index()],
+                            buffers[&bias_add.inputs[1].index()],
+                        ],
                         buffers[&index],
                         node.shape.element_count(),
                         program.launch.threads_per_block,

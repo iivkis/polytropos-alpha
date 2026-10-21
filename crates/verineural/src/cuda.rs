@@ -73,6 +73,8 @@ mod platform {
         device_get: unsafe extern "C" fn(*mut c_int, c_int) -> ResultCode,
         context_create: unsafe extern "C" fn(*mut Handle, c_uint, c_int) -> ResultCode,
         context_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
+        context_push: unsafe extern "C" fn(Handle) -> ResultCode,
+        context_pop: unsafe extern "C" fn(*mut Handle) -> ResultCode,
         module_load: unsafe extern "C" fn(*mut Handle, *const c_void) -> ResultCode,
         module_unload: unsafe extern "C" fn(Handle) -> ResultCode,
         module_function: unsafe extern "C" fn(*mut Handle, Handle, *const c_char) -> ResultCode,
@@ -118,6 +120,8 @@ mod platform {
                 device_get: lib.function("cuDeviceGet")?,
                 context_create: lib.function("cuCtxCreate_v2")?,
                 context_destroy: lib.function("cuCtxDestroy_v2")?,
+                context_push: lib.function("cuCtxPushCurrent_v2")?,
+                context_pop: lib.function("cuCtxPopCurrent_v2")?,
                 module_load: lib.function("cuModuleLoadData")?,
                 module_unload: lib.function("cuModuleUnload")?,
                 module_function: lib.function("cuModuleGetFunction")?,
@@ -156,6 +160,21 @@ mod platform {
         }
     }
 
+    struct ContextGuard {
+        pop: unsafe extern "C" fn(*mut Handle) -> ResultCode,
+        expected: Handle,
+    }
+
+    impl Drop for ContextGuard {
+        fn drop(&mut self) {
+            let mut popped = ptr::null_mut();
+            // SAFETY: this guard exists only after a successful push on this thread.
+            let code = unsafe { (self.pop)(&mut popped) };
+            debug_assert_eq!(code, 0);
+            debug_assert_eq!(popped, self.expected);
+        }
+    }
+
     /// Owns every device allocation, loaded PTX module and CUDA context.
     /// The library is dropped last, after all CUDA handles are released.
     pub(crate) struct CudaSession {
@@ -173,6 +192,31 @@ mod platform {
     }
 
     impl CudaSession {
+        fn enter_context(&self) -> Result<ContextGuard, GpuError> {
+            // SAFETY: the context is owned by this session and remains live.
+            check("cuCtxPushCurrent_v2", unsafe {
+                (self.functions.context_push)(self.context)
+            })?;
+            Ok(ContextGuard {
+                pop: self.functions.context_pop,
+                expected: self.context,
+            })
+        }
+
+        fn pop_context(&self) -> Result<(), GpuError> {
+            let mut popped = ptr::null_mut();
+            // SAFETY: callers only pop a context previously pushed on this thread.
+            check("cuCtxPopCurrent_v2", unsafe {
+                (self.functions.context_pop)(&mut popped)
+            })?;
+            if popped != self.context {
+                return Err(GpuError::Driver(
+                    "CUDA popped a different context than the session owns".into(),
+                ));
+            }
+            Ok(())
+        }
+
         pub fn new(ptx: &[u8]) -> Result<Self, GpuError> {
             let library = Library::open()?;
             let functions = Functions::load(&library)?;
@@ -220,10 +264,15 @@ mod platform {
                     "CUDA returned a null stream handle".into(),
                 ));
             }
+
+            // cuCtxCreate makes the new context current. Detach it before
+            // returning so multiple prepared executions can coexist safely.
+            session.pop_context()?;
             Ok(session)
         }
 
         pub fn allocate(&mut self, elements: usize) -> Result<DevicePtr, GpuError> {
+            let _context = self.enter_context()?;
             let bytes = elements
                 .checked_mul(std::mem::size_of::<f32>())
                 .ok_or(GpuError::UnsupportedSize { elements })?;
@@ -243,6 +292,7 @@ mod platform {
             address: DevicePtr,
             values: &[f32],
         ) -> Result<(), GpuError> {
+            let _context = self.enter_context()?;
             let bytes = std::mem::size_of_val(values);
             let mut pinned = ptr::null_mut();
             // SAFETY: pinned is a writable output pointer for CUDA's host allocation.
@@ -265,6 +315,7 @@ mod platform {
             out: &mut [f32],
             address: DevicePtr,
         ) -> Result<(), GpuError> {
+            let _context = self.enter_context()?;
             let bytes = std::mem::size_of_val(out);
             let mut pinned = ptr::null_mut();
             // SAFETY: the CUDA allocation is valid and owned by this session.
@@ -289,13 +340,21 @@ mod platform {
                 return Err(GpuError::Driver("CUDA Graph already in progress".into()));
             }
             self.synchronize()?;
+            // Keep this session context current for the entire capture sequence.
+            check("cuCtxPushCurrent_v2", unsafe {
+                (self.functions.context_push)(self.context)
+            })?;
             // SAFETY: an explicitly created nonblocking stream is current.
-            check("cuStreamBeginCapture", unsafe {
+            let code = unsafe {
                 (self.functions.stream_capture_begin)(
                     self.stream,
                     CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
                 )
-            })?;
+            };
+            if let Err(err) = check("cuStreamBeginCapture", code) {
+                let _ = self.pop_context();
+                return Err(err);
+            }
             self.capturing = true;
             Ok(())
         }
@@ -305,23 +364,29 @@ mod platform {
             if !self.capturing {
                 return Err(GpuError::Driver("CUDA Graph was not started".into()));
             }
-            let mut graph = ptr::null_mut();
-            // SAFETY: capture runs on the current thread and same CUDA stream.
-            let code = unsafe { (self.functions.stream_capture_end)(self.stream, &mut graph) };
-            self.capturing = false;
-            self.graph = graph;
-            check("cuStreamEndCapture", code)?;
-            if self.graph.is_null() {
-                return Err(GpuError::Driver("CUDA Graph capture returned null".into()));
-            }
-            // SAFETY: all captured kernel parameters have been copied by CUDA.
-            check("cuGraphInstantiateWithFlags", unsafe {
-                (self.functions.graph_instantiate)(&mut self.graph_exec, self.graph, 0)
-            })
+            let result = (|| {
+                let mut graph = ptr::null_mut();
+                // SAFETY: capture runs on the current thread and same CUDA stream.
+                let code = unsafe { (self.functions.stream_capture_end)(self.stream, &mut graph) };
+                self.capturing = false;
+                self.graph = graph;
+                check("cuStreamEndCapture", code)?;
+                if self.graph.is_null() {
+                    return Err(GpuError::Driver("CUDA Graph capture returned null".into()));
+                }
+                // SAFETY: all captured kernel parameters have been copied by CUDA.
+                check("cuGraphInstantiateWithFlags", unsafe {
+                    (self.functions.graph_instantiate)(&mut self.graph_exec, self.graph, 0)
+                })
+            })();
+            let pop_result = self.pop_context();
+            result?;
+            pop_result
         }
 
         /// Replay an already instantiated graph on the owned non-blocking stream.
         pub fn launch_graph(&self) -> Result<(), GpuError> {
+            let _context = self.enter_context()?;
             if self.capturing || self.graph_exec.is_null() {
                 return Err(GpuError::Driver(
                     "CUDA Graph must be instantiated before replay".into(),
@@ -338,6 +403,7 @@ mod platform {
             warmup_launches: usize,
             measured_launches: usize,
         ) -> Result<f32, GpuError> {
+            let _context = self.enter_context()?;
             for _ in 0..warmup_launches {
                 self.launch_graph()?;
             }
@@ -385,6 +451,7 @@ mod platform {
         /// Resolve the CUDA function before capture. Lazy lookup/JIT is not
         /// part of the captured stream's execution dependency graph.
         pub fn prepare_kernel(&mut self, name: &str) -> Result<(), GpuError> {
+            let _context = self.enter_context()?;
             if self.capturing {
                 return Err(GpuError::Driver(
                     "kernel resolution during CUDA Graph capture is forbidden".into(),
@@ -460,9 +527,7 @@ mod platform {
         pub fn launch3(
             &self,
             name: &str,
-            first: DevicePtr,
-            second: DevicePtr,
-            third: DevicePtr,
+            sources: [DevicePtr; 3],
             output: DevicePtr,
             length: usize,
             threads: u32,
@@ -481,9 +546,7 @@ mod platform {
                 .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
             let grid = u32::try_from(length.div_ceil(threads as usize))
                 .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
-            let mut a = first;
-            let mut b = second;
-            let mut c = third;
+            let [mut a, mut b, mut c] = sources;
             let mut dst = output;
             let mut n = count;
             let mut args = [
@@ -511,6 +574,7 @@ mod platform {
         }
 
         pub fn synchronize(&self) -> Result<(), GpuError> {
+            let _context = self.enter_context()?;
             // SAFETY: stream belongs to this CUDA context; never synchronize legacy.
             check("cuStreamSynchronize", unsafe {
                 (self.functions.stream_sync)(self.stream)
@@ -520,6 +584,12 @@ mod platform {
 
     impl Drop for CudaSession {
         fn drop(&mut self) {
+            // begin_graph intentionally keeps the context pushed until capture ends.
+            let mut context_pushed = self.capturing;
+            if !context_pushed && !self.context.is_null() {
+                context_pushed = unsafe { (self.functions.context_push)(self.context) } == 0;
+            }
+
             // The stream must complete before releasing graph/module/device/pinned
             // buffers. A failed capture is ended best-effort without replay.
             if self.capturing && !self.stream.is_null() {
@@ -553,6 +623,11 @@ mod platform {
             }
             if !self.stream.is_null() {
                 unsafe { (self.functions.stream_destroy)(self.stream) };
+            }
+            if context_pushed {
+                let mut popped = ptr::null_mut();
+                unsafe { (self.functions.context_pop)(&mut popped) };
+                debug_assert_eq!(popped, self.context);
             }
             if !self.context.is_null() {
                 unsafe { (self.functions.context_destroy)(self.context) };
@@ -639,9 +714,7 @@ mod platform {
         pub fn launch3(
             &self,
             _: &str,
-            _: u64,
-            _: u64,
-            _: u64,
+            _: [u64; 3],
             _: u64,
             _: usize,
             _: u32,
