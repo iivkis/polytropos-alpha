@@ -4,7 +4,7 @@
 
 ## Состояние
 
-**Этап 2/10 проверен локально пользователем:** форматирование, Rust check, 9 тестов, Clippy и пример прошли. **Этап 3/10: базовый Lean 4 proof backend подтверждён локальным запуском:** 14 Rust-тестов пройдены, Clippy и `cargo check` успешны, Lean проверил 25 обязательств. После корректировки `rustfmt` повторный `fmt-check` прошёл. **Этап 4/10: LLVM NVPTX/CUDA backend добавлен в исходный код, локальная GPU-проверка ожидается.** Полная формальная верификация GPU и IEEE-754 не реализована.
+**Этап 2/10 проверен локально пользователем:** форматирование, Rust check, 9 тестов, Clippy и пример прошли. **Этап 3/10: базовый Lean 4 proof backend подтверждён локальным запуском:** 14 Rust-тестов пройдены, Clippy и `cargo check` успешны, Lean проверил 25 обязательств. После корректировки `rustfmt` повторный `fmt-check` прошёл. **Этап 4/10: LLVM NVPTX/CUDA backend подтверждён пользователем на NVIDIA GPU: 6/6 FP32 значений совпали с CPU; 17 тестов, Lean 25 обязательств, fmt/check/clippy пройдены.** **Этап 5/10: объединённый отчёт реализован в коде, локальные проверки пока не подтверждены.** GPU и IEEE-754 формально не доказаны.
 
 - `crates/verineural/` — импортируемая Rust-библиотека, не приложение.
 - `Tensor<T, Shape>` — владеющий данными тензор, проверяющий размеры и длину буфера.
@@ -50,11 +50,13 @@ task fmt-check # сначала cargo fmt --all, затем проверка
 task example-stage2
 task proof-stage3
 task gpu-stage4
+task cert-stage5
+task verify-stage5
 ```
 
 Согласно [AGENTS.md](AGENTS.md), сборка, тесты и другие тяжёлые команды выполняются **пользователем локально**, а не ИИ-агентом без отдельного разрешения. Для будущего GPU-исполнения необходим совместимый NVIDIA GPU и системный NVIDIA-драйвер.
 
-[SPEC.md](docs/verineural/SPEC.md) описывает всю конечную систему; [ROADMAP.md](docs/verineural/ROADMAP.md) — последовательность 10 этапов. LLVM IR/PTX генерируются для ограниченного GPU-подмножества, но сертификатов GPU-исполнения пока нет.
+[SPEC.md](docs/verineural/SPEC.md) описывает всю конечную систему; [ROADMAP.md](docs/verineural/ROADMAP.md) — последовательность 10 этапов. LLVM IR/PTX генерируются для ограниченного GPU-подмножества. Stage 5 добавляет отчёт с уровнями доказательств и проверками целостности, но не формальный сертификат GPU-исполнения.
 
 ## Proof Engine: этап 3
 
@@ -93,6 +95,28 @@ task gpu-stage4
 Артефакты: `target/verineural/gpu-stage4/graph.ll` и `graph.ptx`. Нужны Linux, NVIDIA GPU, установленный драйвер и LLVM `llc` из `flake.nix`. Архитектуру можно указать через `GpuEngine::new("llc", "sm_86")`; значение по умолчанию `sm_52`.
 
 **Граница гарантии:** успешное совпадение CPU/GPU является численной проверкой примера, не математическим доказательством IEEE-754 либо исполнения GPU. Lean этапа 3 работает над идеальными `Int`, LLVM/PTX, JIT-драйвер и железо ещё не входят в доказанную цепочку.
+
+## Proof + Execution Integration: этап 5 (ожидает локального подтверждения)
+
+`CertificateEngine::run(&graph, output, &inputs, &cpu_reference, dir)` использует один Rust Semantic Neural IR для генерации Lean 4 и LLVM NVPTX/PTX, вызывает Lean checker, исполняет kernels через CUDA Driver API и сравнивает выходные FP32 **по битам** с независимым CPU reference. При ошибке старые `report.json` и `SHA256SUMS` удаляются. Успешный результат даёт проверяемый evidence bundle, но **не машинный сертификат**.
+
+```sh
+nix develop
+task fmt-check
+task check
+task test
+task clippy
+task cert-stage5
+task verify-stage5
+# Для защиты от подмены манифеста подставить напечатанный ранее хеш:
+VERINEURAL_STAGE5_SHA256=<sha256_из_первого_прогона> task verify-stage5
+```
+
+Результат в `target/verineural/stage5/`: `graph.ir`, `proof.lean`, `graph.ll`, `graph.ptx`, `inputs.bits`, `output.bits`, `report.json` и `SHA256SUMS`. Манифест фиксированного состава связывает все семь артефактов SHA-256. При первом запуске запомните SHA-256 **манифеста** отдельно от каталога. Без внешней фиксации можно переписать и файлы, и их хеши, подписи нет. `task verify-stage5` пересчитывает хеши и повторно запускает Lean **без GPU**, но не перепроверяет наблюдение CUDA и не доказывает связь Lean ↔ машинный код.
+
+В JSON установлены разные статусы: `mathematical=proven`, `composition=proven` **только** для условной идеальной `Int` модели Lean; `numerical=validated` и `gpu_execution=validated` только для записанных входных FP32 битов; `compilation=trusted`; `fp32_semantics=unsupported`, `machine_code_correctness=unsupported`. Записываются предположения и реальные входы. TCB: Rust сериализатор и Lean-генератор, Lean kernel, LLVM `llc`, CUDA драйвер/JIT, GPU, CPU oracle, `sha256sum`.
+
+Этот этап не включает доказательство корректности lowering, памяти GPU, IEEE-754, или авторства JSON. Неподдерживаемые операции/отвергнутый Lean/несовпадение результатов прерывают выпуск отчёта. Для чистой локальной проверки при необходимости удалите прежний каталог `target/verineural/stage5` перед повторным прогоном.
 
 ## Git-процесс
 

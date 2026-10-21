@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{
-    GpuEngine, GpuError, LeanProofEngine, NeuralGraph, NodeId, Operation, ProofError, Tensor,
+    GpuEngine, GpuError, LeanProofEngine, NeuralGraph, NodeId, ProofError, Tensor,
 };
 
 const ARTIFACTS: [&str; 7] = [
@@ -277,6 +277,21 @@ impl CertificateEngine {
         })
     }
 
+    /// Verify the report against a SHA256SUMS digest pinned outside the bundle.
+    pub fn verify_bundle_with_digest(
+        &self,
+        directory: &Path,
+        pinned_sha256: &str,
+    ) -> Result<(), CertificateError> {
+        let actual = hash_file(&directory.join(MANIFEST))?;
+        if actual != pinned_sha256 {
+            return Err(CertificateError::Integrity(
+                "pinned SHA256SUMS digest mismatch".into(),
+            ));
+        }
+        self.verify_bundle(directory)
+    }
+
     /// Recompute all bundled hashes and rerun the trusted Lean checker.
     ///
     /// This confirms integrity relative to SHA256SUMS and Lean acceptance,
@@ -384,10 +399,11 @@ fn hash_file(path: &Path) -> Result<String, CertificateError> {
 }
 
 fn manifest_contents(directory: &Path) -> Result<String, CertificateError> {
-    ARTIFACTS
+    let lines = ARTIFACTS
         .iter()
         .map(|name| Ok(format!("{}  {}\n", hash_file(&directory.join(name))?, name)))
-        .collect::<Result<String, CertificateError>>()
+        .collect::<Result<Vec<_>, CertificateError>>()?;
+    Ok(lines.concat())
 }
 
 #[cfg(test)]
