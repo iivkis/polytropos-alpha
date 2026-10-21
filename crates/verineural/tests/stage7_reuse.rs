@@ -81,12 +81,24 @@ fn stage7_replay_inputs_are_validated_before_cuda_setup() {
     let engine = GpuEngine::default();
     let plan = engine.compile(&graph, output).unwrap();
     let valid = [
-        (x, verineural::Tensor::new(matrix.clone(), vec![1.0; 6]).unwrap()),
-        (y, verineural::Tensor::new(matrix.clone(), vec![2.0; 6]).unwrap()),
-        (bias, verineural::Tensor::new(Shape::new(vec![3]).unwrap(), vec![1.0; 3]).unwrap()),
+        (
+            x,
+            verineural::Tensor::new(matrix.clone(), vec![1.0; 6]).unwrap(),
+        ),
+        (
+            y,
+            verineural::Tensor::new(matrix.clone(), vec![2.0; 6]).unwrap(),
+        ),
+        (
+            bias,
+            verineural::Tensor::new(Shape::new(vec![3]).unwrap(), vec![1.0; 3]).unwrap(),
+        ),
     ];
     let wrong_shape = [
-        (x, Tensor::new(Shape::new(vec![6]).unwrap(), vec![1.0; 6]).unwrap()),
+        (
+            x,
+            Tensor::new(Shape::new(vec![6]).unwrap(), vec![1.0; 6]).unwrap(),
+        ),
         valid[1].clone(),
         valid[2].clone(),
     ];

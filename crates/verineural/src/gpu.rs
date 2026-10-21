@@ -260,10 +260,7 @@ impl GpuExecution {
     /// Validate the full batch before the first transfer, so rejected input
     /// metadata cannot partially replace the previous input set.
     /// Transfers finish on the owned non-blocking stream before returning.
-    pub fn update_inputs(
-        &mut self,
-        inputs: &[(NodeId, Tensor<f32>)],
-    ) -> Result<(), GpuError> {
+    pub fn update_inputs(&mut self, inputs: &[(NodeId, Tensor<f32>)]) -> Result<(), GpuError> {
         let given = validate_inputs(&self.program, inputs)?;
         for id in self.program.source_inputs() {
             self.session.copy_to_device(

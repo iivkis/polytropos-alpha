@@ -338,7 +338,9 @@ mod platform {
         fn release_completed_staging(&mut self) -> Result<(), GpuError> {
             let _context = self.enter_context()?;
             for host in self.pinned_buffers.drain(..) {
-                check("cuMemFreeHost", unsafe { (self.functions.pinned_free)(host) })?;
+                check("cuMemFreeHost", unsafe {
+                    (self.functions.pinned_free)(host)
+                })?;
             }
             Ok(())
         }

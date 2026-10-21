@@ -56,12 +56,7 @@ fn check_bits(label: &str, observed: &Tensor<f32>, expected: &Tensor<f32>) -> io
     if observed.shape() != expected.shape() {
         return Err(io::Error::other(format!("{label}: shape mismatch")));
     }
-    for (i, (&actual, &cpu)) in observed
-        .values()
-        .iter()
-        .zip(expected.values())
-        .enumerate()
-    {
+    for (i, (&actual, &cpu)) in observed.values().iter().zip(expected.values()).enumerate() {
         if actual.to_bits() != cpu.to_bits() {
             return Err(io::Error::other(format!(
                 "{label}: FP32 mismatch at {i}: GPU={:08x}, CPU={:08x}",
@@ -75,7 +70,11 @@ fn check_bits(label: &str, observed: &Tensor<f32>, expected: &Tensor<f32>) -> io
 
 fn summary(samples: &mut [f64]) -> (f64, f64, f64) {
     samples.sort_by(f64::total_cmp);
-    (samples[0], samples[samples.len() / 2], samples[samples.len() - 1])
+    (
+        samples[0],
+        samples[samples.len() / 2],
+        samples[samples.len() - 1],
+    )
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -87,8 +86,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "CUDA Graph workload experiment: {SAMPLES} series, {WARMUP} warmup + {REPLAYS} measured per series"
     );
-    println!("Results are CUDA-event stream replay intervals in microseconds, not GPU-kernel-only latency");
-    println!("elements | baseline min/median/max us | fused min/median/max us | fused/baseline median");
+    println!(
+        "Results are CUDA-event stream replay intervals in microseconds, not GPU-kernel-only latency"
+    );
+    println!(
+        "elements | baseline min/median/max us | fused min/median/max us | fused/baseline median"
+    );
 
     for elements in ELEMENT_COUNTS {
         let rows = elements / COLUMNS;
@@ -139,15 +142,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut data = invalid[0].1.values().to_vec();
         data[0] = f32::NAN;
         invalid[0].1 = Tensor::new(Shape::new(vec![rows, COLUMNS])?, data)?;
-        if !matches!(exec_a.update_inputs(&invalid), Err(GpuError::InvalidGraph(_)))
-            || !matches!(exec_b.update_inputs(&invalid), Err(GpuError::InvalidGraph(_)))
-        {
+        if !matches!(
+            exec_a.update_inputs(&invalid),
+            Err(GpuError::InvalidGraph(_))
+        ) || !matches!(
+            exec_b.update_inputs(&invalid),
+            Err(GpuError::InvalidGraph(_))
+        ) {
             return Err(io::Error::other("non-finite input update was not rejected").into());
         }
         exec_a.replay()?;
         exec_b.replay()?;
-        check_bits("rejected update baseline", &exec_a.read_output()?, &second_expected)?;
-        check_bits("rejected update fused", &exec_b.read_output()?, &second_expected)?;
+        check_bits(
+            "rejected update baseline",
+            &exec_a.read_output()?,
+            &second_expected,
+        )?;
+        check_bits(
+            "rejected update fused",
+            &exec_b.read_output()?,
+            &second_expected,
+        )?;
 
         // Alternate measurement order to reduce systematic drift bias.
         let mut times_a = Vec::with_capacity(SAMPLES);
@@ -173,8 +188,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             ratio = bmed / amed
         );
     }
-    println!("Each size verified by bitwise CPU comparison before and after graph input replacement");
-    println!("Including signed zeros and minimum normal values does not prove general IEEE-754 equivalence");
+    println!(
+        "Each size verified by bitwise CPU comparison before and after graph input replacement"
+    );
+    println!(
+        "Including signed zeros and minimum normal values does not prove general IEEE-754 equivalence"
+    );
     println!("No FP32, PTX, machine code or GPU memory-safety proof is implied.");
     Ok(())
 }
