@@ -21,9 +21,13 @@ pub enum ProofError {
         node: usize,
         operation: &'static str,
     },
-    UnsupportedGuarantee { node: usize },
+    UnsupportedGuarantee {
+        node: usize,
+    },
     Io(std::io::Error),
-    LeanRejected { details: String },
+    LeanRejected {
+        details: String,
+    },
 }
 
 impl fmt::Display for ProofError {
@@ -31,10 +35,16 @@ impl fmt::Display for ProofError {
         match self {
             Self::InvalidGraph(error) => write!(f, "invalid neural graph: {error}"),
             Self::UnsupportedOperation { node, operation } => {
-                write!(f, "Lean proof backend cannot model {operation} at node {node}")
+                write!(
+                    f,
+                    "Lean proof backend cannot model {operation} at node {node}"
+                )
             }
             Self::UnsupportedGuarantee { node } => {
-                write!(f, "Lean proof backend cannot establish domain at node {node}")
+                write!(
+                    f,
+                    "Lean proof backend cannot establish domain at node {node}"
+                )
             }
             Self::Io(error) => write!(f, "Lean checker I/O failure: {error}"),
             Self::LeanRejected { details } => write!(f, "Lean proof rejected: {details}"),
@@ -126,11 +136,7 @@ impl LeanProofEngine {
     /// Only Add, Mul, Relu and Reshape have integer ideal semantics in stage 3.
     /// Sqrt and MatMul fail closed, even though they are available to the Rust
     /// reference engine. The input nonnegativity assumptions are explicit.
-    pub fn generate(
-        &self,
-        graph: &NeuralGraph,
-        output: NodeId,
-    ) -> Result<LeanProgram, ProofError> {
+    pub fn generate(&self, graph: &NeuralGraph, output: NodeId) -> Result<LeanProgram, ProofError> {
         let mut used = BTreeSet::new();
         let mut pending = vec![output];
 
@@ -248,10 +254,7 @@ impl LeanProofEngine {
                 &mut source,
                 &mut theorems,
                 name,
-                format!(
-                    "VeriNeural.shapeSize {} = {count}",
-                    shape_expr(&node.shape)
-                ),
+                format!("VeriNeural.shapeSize {} = {count}", shape_expr(&node.shape)),
             );
 
             for (port, &input_id) in node.inputs.iter().enumerate() {
@@ -389,7 +392,10 @@ impl LeanProofEngine {
         program: &LeanProgram,
         output_file: &Path,
     ) -> Result<CheckedLean, ProofError> {
-        if let Some(parent) = output_file.parent().filter(|path| !path.as_os_str().is_empty()) {
+        if let Some(parent) = output_file
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)?;
         }
         fs::write(output_file, program.source())?;

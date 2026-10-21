@@ -237,7 +237,9 @@ fn reshape_keeps_count_and_domain() {
 fn proof_generator_emits_node_and_module_theorems() {
     let mut graph = NeuralGraph::default();
     let input = graph.input(shape(&[2, 2]), Domain::Finite);
-    let hidden = graph.apply_module(&ReluModule::new(&[2, 2]), &[input]).unwrap();
+    let hidden = graph
+        .apply_module(&ReluModule::new(&[2, 2]), &[input])
+        .unwrap();
     let flat = graph.reshape(hidden, shape(&[4])).unwrap();
     let summed = graph.add(flat, flat).unwrap();
     let out = graph.mul(summed, flat).unwrap();
@@ -248,8 +250,16 @@ fn proof_generator_emits_node_and_module_theorems() {
     assert!(!proof.source().contains("axiom "));
     assert!(proof.source().contains("theorem node_1_nonnegative"));
     assert!(proof.source().contains("theorem node_2_input_0_shape"));
-    assert!(proof.source().contains("theorem module_0_output_nonnegative"));
-    assert!(proof.source().contains("VeriNeural.add (node_2 x_0) (node_2 x_0)"));
+    assert!(
+        proof
+            .source()
+            .contains("theorem module_0_output_nonnegative")
+    );
+    assert!(
+        proof
+            .source()
+            .contains("VeriNeural.add (node_2 x_0) (node_2 x_0)")
+    );
     assert!(proof.source().contains("theorem node_4_semantics"));
     assert!(proof.assumptions().is_empty());
     assert!(proof.theorem_names().len() >= 10);
@@ -261,7 +271,11 @@ fn proof_generator_keeps_source_domain_assumptions_explicit() {
     let src = graph.input(shape(&[3]), Domain::NonNegativeFinite);
     let output = graph.reshape(src, shape(&[1, 3])).unwrap();
     let proof = LeanProofEngine::default().generate(&graph, output).unwrap();
-    assert!(proof.source().contains("(h_0 : VeriNeural.Nonnegative x_0)"));
+    assert!(
+        proof
+            .source()
+            .contains("(h_0 : VeriNeural.Nonnegative x_0)")
+    );
     assert!(proof.source().contains("exact h_0"));
     assert_eq!(
         proof.assumptions(),
@@ -278,7 +292,9 @@ fn proof_generator_rejects_unsupported_operations() {
     let a = graph.input(shape(&[2, 3]), Domain::Any);
     let b = graph.input(shape(&[3, 2]), Domain::Any);
     let out = graph.matmul(a, b).unwrap();
-    let error = LeanProofEngine::default().generate(&graph, out).unwrap_err();
+    let error = LeanProofEngine::default()
+        .generate(&graph, out)
+        .unwrap_err();
     assert!(matches!(
         error,
         ProofError::UnsupportedOperation {
@@ -308,7 +324,9 @@ fn proof_generator_checks_only_reachable_subgraph() {
     let b = graph.input(shape(&[2, 2]), Domain::Any);
     let _unsupported = graph.matmul(a, b).unwrap();
     // This test deliberately retains a sibling operation outside the proof slice.
-    let proof = LeanProofEngine::default().generate(&graph, verified_path).unwrap();
+    let proof = LeanProofEngine::default()
+        .generate(&graph, verified_path)
+        .unwrap();
     assert!(proof.source().contains("theorem node_1_nonnegative"));
     assert!(!proof.source().contains("theorem node_2_shape"));
 }
