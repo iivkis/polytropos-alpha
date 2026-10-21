@@ -248,12 +248,32 @@ impl GpuBenchmark {
 
 pub struct GpuExecution {
     session: CudaSession,
+    program: GpuProgram,
+    input_addresses: BTreeMap<usize, u64>,
     output_shape: Shape,
     output_address: u64,
     has_graph: bool,
 }
 
 impl GpuExecution {
+    /// Replace all reachable graph inputs without rebuilding the CUDA Graph.
+    /// Validate the full batch before the first transfer, so rejected input
+    /// metadata cannot partially replace the previous input set.
+    /// Transfers finish on the owned non-blocking stream before returning.
+    pub fn update_inputs(
+        &mut self,
+        inputs: &[(NodeId, Tensor<f32>)],
+    ) -> Result<(), GpuError> {
+        let given = validate_inputs(&self.program, inputs)?;
+        for id in self.program.source_inputs() {
+            self.session.copy_to_device(
+                self.input_addresses[&id.index()],
+                given[&id.index()].values(),
+            )?;
+        }
+        self.session.flush_input_copies()
+    }
+
     pub fn replay(&self) -> Result<(), GpuError> {
         if self.has_graph {
             self.session.launch_graph()?;
@@ -506,6 +526,7 @@ impl GpuEngine {
         let ptx = fs::read(ptx_path)?;
         let mut session = CudaSession::new(&ptx)?;
         let mut buffers: BTreeMap<usize, u64> = BTreeMap::new();
+        let mut input_addresses = BTreeMap::new();
         let skipped = program.skipped_nodes();
 
         for &index in &program.live_nodes {
@@ -518,6 +539,7 @@ impl GpuEngine {
                     let value = given[&index];
                     let ptr = session.allocate(value.values().len())?;
                     session.copy_to_device(ptr, value.values())?;
+                    input_addresses.insert(index, ptr);
                     buffers.insert(index, ptr);
                 }
                 Operation::Reshape(_) => {
@@ -609,6 +631,8 @@ impl GpuEngine {
         let last = program.graph.node(program.output)?;
         Ok(GpuExecution {
             session,
+            program: program.clone(),
+            input_addresses,
             output_shape: last.shape.clone(),
             output_address: buffers[&program.output.index()],
             has_graph,

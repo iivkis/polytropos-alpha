@@ -110,3 +110,8 @@ tasks:
     desc: Replay Stage 7 SHA-256 manifests and Lean proof checks without GPU execution (developer-run)
     cmds:
       - cargo run -p verineural --example stage7_fusion -- --verify
+
+  gpu-stage7-bench:
+    desc: Benchmark four CUDA Graph workload sizes, input rebinding, and FP32 bitwise checks (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage7_benchmark --release

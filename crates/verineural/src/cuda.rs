@@ -330,7 +330,22 @@ mod platform {
             self.synchronize()?;
             // SAFETY: the async transfer completed; Rust out is valid for out.len() f32s.
             unsafe { ptr::copy_nonoverlapping(pinned.cast::<f32>(), out.as_mut_ptr(), out.len()) };
+            self.release_completed_staging()
+        }
+
+        // Only release pinned staging memory after the owned stream has finished.
+        // This avoids an unbounded host allocation per input update or readback.
+        fn release_completed_staging(&mut self) -> Result<(), GpuError> {
+            let _context = self.enter_context()?;
+            for host in self.pinned_buffers.drain(..) {
+                check("cuMemFreeHost", unsafe { (self.functions.pinned_free)(host) })?;
+            }
             Ok(())
+        }
+
+        pub fn flush_input_copies(&mut self) -> Result<(), GpuError> {
+            self.synchronize()?;
+            self.release_completed_staging()
         }
 
         /// Begin capturing only kernel launches to a CUDA Graph. No allocations,
@@ -339,7 +354,7 @@ mod platform {
             if self.capturing || !self.graph.is_null() || !self.graph_exec.is_null() {
                 return Err(GpuError::Driver("CUDA Graph already in progress".into()));
             }
-            self.synchronize()?;
+            self.flush_input_copies()?;
             // Keep this session context current for the entire capture sequence.
             check("cuCtxPushCurrent_v2", unsafe {
                 (self.functions.context_push)(self.context)
@@ -387,6 +402,11 @@ mod platform {
         /// Replay an already instantiated graph on the owned non-blocking stream.
         pub fn launch_graph(&self) -> Result<(), GpuError> {
             let _context = self.enter_context()?;
+            self.launch_graph_current_context()
+        }
+
+        // For use inside a longer-lived context guard (CUDA-event benchmarks).
+        fn launch_graph_current_context(&self) -> Result<(), GpuError> {
             if self.capturing || self.graph_exec.is_null() {
                 return Err(GpuError::Driver(
                     "CUDA Graph must be instantiated before replay".into(),
@@ -405,7 +425,7 @@ mod platform {
         ) -> Result<f32, GpuError> {
             let _context = self.enter_context()?;
             for _ in 0..warmup_launches {
-                self.launch_graph()?;
+                self.launch_graph_current_context()?;
             }
             self.synchronize()?;
 
@@ -426,7 +446,7 @@ mod platform {
                     (self.functions.event_record)(start, self.stream)
                 })?;
                 for _ in 0..measured_launches {
-                    self.launch_graph()?;
+                    self.launch_graph_current_context()?;
                 }
                 check("cuEventRecord", unsafe {
                     (self.functions.event_record)(stop, self.stream)
@@ -725,6 +745,12 @@ mod platform {
         }
 
         pub fn synchronize(&self) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn flush_input_copies(&mut self) -> Result<(), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))
