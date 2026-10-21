@@ -308,21 +308,6 @@ fn proof_generator_keeps_source_domain_assumptions_explicit() {
 #[test]
 fn proof_generator_rejects_unsupported_operations() {
     let mut graph = NeuralGraph::default();
-    let a = graph.input(shape(&[2, 3]), Domain::Any);
-    let b = graph.input(shape(&[3, 2]), Domain::Any);
-    let out = graph.matmul(a, b).unwrap();
-    let error = LeanProofEngine::default()
-        .generate(&graph, out)
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        ProofError::UnsupportedOperation {
-            operation: "matmul",
-            ..
-        }
-    ));
-
-    let mut graph = NeuralGraph::default();
     let input = graph.input(shape(&[2]), Domain::NonNegativeFinite);
     let out = graph.sqrt(input).unwrap();
     assert!(matches!(
@@ -339,10 +324,9 @@ fn proof_generator_checks_only_reachable_subgraph() {
     let mut graph = NeuralGraph::default();
     let input = graph.input(shape(&[2]), Domain::Finite);
     let verified_path = graph.relu(input).unwrap();
-    let a = graph.input(shape(&[2, 2]), Domain::Any);
-    let b = graph.input(shape(&[2, 2]), Domain::Any);
-    let _unsupported = graph.matmul(a, b).unwrap();
-    // This test deliberately retains a sibling operation outside the proof slice.
+    let a = graph.input(shape(&[2, 2]), Domain::NonNegativeFinite);
+    let _unsupported = graph.sqrt(a).unwrap();
+    // An unsupported sibling outside the proof slice must be ignored.
     let proof = LeanProofEngine::default()
         .generate(&graph, verified_path)
         .unwrap();
@@ -391,13 +375,12 @@ fn gpu_compiler_lowers_arithmetic_and_reshape_to_a_reachable_kernel_dag() {
 #[test]
 fn gpu_compiler_rejects_unsupported_operations_and_foreign_handles() {
     let mut graph = NeuralGraph::default();
-    let a = graph.input(shape(&[2, 2]), Domain::Any);
-    let b = graph.input(shape(&[2, 2]), Domain::Any);
-    let matmul = graph.matmul(a, b).unwrap();
+    let a = graph.input(shape(&[2, 2]), Domain::NonNegativeFinite);
+    let sqrt = graph.sqrt(a).unwrap();
     assert!(matches!(
-        GpuEngine::default().compile(&graph, matmul),
+        GpuEngine::default().compile(&graph, sqrt),
         Err(GpuError::UnsupportedOperation {
-            operation: "matmul",
+            operation: "sqrt",
             ..
         })
     ));
