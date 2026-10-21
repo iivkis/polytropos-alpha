@@ -598,3 +598,23 @@ fn stage7_fusion_applies_to_add_and_mul_but_not_across_reshape() {
         .unwrap();
     assert_eq!(fused.fused_relus().get(&direct.index()), Some(&product.index()));
 }
+
+
+#[test]
+fn cuda_graph_only_runtime_regression_guard() {
+    let source = include_str!("cuda.rs");
+    assert!(source.contains("CU_STREAM_NON_BLOCKING"));
+    assert!(source.contains("cuStreamBeginCapture"));
+    assert!(source.contains("cuStreamEndCapture"));
+    assert!(source.contains("cuGraphInstantiateWithFlags"));
+    assert!(source.contains("cuGraphLaunch"));
+    assert!(source.contains("cuStreamSynchronize"));
+    assert!(source.contains("cuMemcpyHtoDAsync_v2"));
+    assert!(source.contains("cuMemcpyDtoHAsync_v2"));
+    // The GPU launch uses an owned stream, never null / stream 0.
+    assert!(source.contains("                    self.stream,\n                    args.as_mut_ptr()"));
+    assert!(!source.contains("                    ptr::null_mut(),\n                    args.as_mut_ptr()"));
+    assert!(!source.contains("cuCtxSynchronize"));
+    assert!(!source.contains("cuMemcpyHtoD_v2"));
+    assert!(!source.contains("cuMemcpyDtoH_v2"));
+}
