@@ -6,6 +6,8 @@
 //! Stage 4 adds experimental LLVM NVPTX + CUDA Driver execution on NVIDIA GPUs.
 //! Stage 5 emits an integrity-checked evidence bundle with separate assurance levels.
 //! Stage 6 adds MatMul, row-wise bias and composable Dense/Residual FFN blocks.
+//! Stage 7 begins controllable CUDA launches and experimental local Relu fusion,
+//! with ideal-Int Lean rewrite lemmas, not certified FP32/PTX equivalence.
 //! Neither IEEE-754 behavior nor the generated GPU binary is formally certified.
 
 mod certificate;
@@ -19,7 +21,7 @@ mod tensor;
 
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
-pub use gpu::{GpuEngine, GpuError, GpuProgram};
+pub use gpu::{GpuEngine, GpuError, GpuLaunchConfig, GpuProgram, ReluFusion};
 pub use ir::{
     Domain, FP32Policy, FmaMode, GpuSemantics, MathContract, ModuleInvocation, NeuralGraph,
     NeuralModule, Node, NodeId, Operation, OperationSemantics, PortContract, ReductionOrder,

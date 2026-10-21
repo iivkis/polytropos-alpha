@@ -506,3 +506,95 @@ fn stage6_cpu_ffn_oracle_has_expected_concrete_values() {
         .unwrap();
     assert_eq!(y.values(), &[5., 9., 13., 17.]);
 }
+
+
+#[test]
+fn stage7_launch_config_rejects_invalid_threads() {
+    for threads in [0, 1, 63, 65, 1024, u32::MAX] {
+        assert!(matches!(
+            GpuLaunchConfig::new(threads, ReluFusion::Experimental),
+            Err(GpuError::InvalidLaunch { .. })
+        ));
+    }
+    for threads in [64, 128, 256, 512] {
+        let launch = GpuLaunchConfig::new(threads, ReluFusion::Disabled).unwrap();
+        assert_eq!(launch.threads_per_block(), threads);
+        assert_eq!(launch.relu_fusion(), ReluFusion::Disabled);
+    }
+    assert_eq!(GpuLaunchConfig::default().threads_per_block(), 256);
+}
+
+#[test]
+fn stage7_exclusive_bias_relu_fusion_removes_only_safe_producer() {
+    let mut graph = NeuralGraph::default();
+    let matrix = graph.input(shape(&[2, 3]), Domain::Finite);
+    let bias = graph.input(shape(&[3]), Domain::Finite);
+    let sum = graph.bias_add(matrix, bias).unwrap();
+    let result = graph.relu(sum).unwrap();
+
+    let ordinary = GpuEngine::default().compile(&graph, result).unwrap();
+    assert!(ordinary.fused_relus().is_empty());
+    assert!(ordinary.llvm_ir().contains(&format!("void @vn_node_{}", sum.index())));
+
+    let launch = GpuLaunchConfig::new(128, ReluFusion::Experimental).unwrap();
+    let fused = GpuEngine::default()
+        .with_launch_config(launch)
+        .compile(&graph, result)
+        .unwrap();
+    assert_eq!(fused.launch_config(), launch);
+    assert_eq!(fused.fused_relus().get(&result.index()), Some(&sum.index()));
+    assert!(!fused.llvm_ir().contains(&format!("void @vn_node_{}", sum.index())));
+    assert!(fused.llvm_ir().contains(&format!("void @vn_node_{}", result.index())));
+    assert!(fused.llvm_ir().contains("urem i32 %idx, 3"));
+    assert!(fused.llvm_ir().contains("%fused_result = select"));
+    assert!(!fused.llvm_ir().contains("fast "));
+    let proof = fused.fusion_lean_source().unwrap();
+    assert!(proof.contains("theorem relu_bias_fusion"));
+    assert!(!proof.contains("sorry"));
+    assert!(!proof.contains("admit"));
+    assert!(ordinary.fusion_lean_source().is_none());
+}
+
+#[test]
+fn stage7_shared_producer_is_not_fused_or_discarded() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[4]), Domain::Finite);
+    let y = graph.input(shape(&[4]), Domain::Finite);
+    let product = graph.mul(x, y).unwrap();
+    let positive = graph.relu(product).unwrap();
+    let output = graph.add(product, positive).unwrap();
+    let launch = GpuLaunchConfig::new(256, ReluFusion::Experimental).unwrap();
+    let gpu = GpuEngine::default()
+        .with_launch_config(launch)
+        .compile(&graph, output)
+        .unwrap();
+    assert!(gpu.fused_relus().is_empty());
+    assert!(gpu.llvm_ir().contains(&format!("void @vn_node_{}", product.index())));
+    assert!(gpu.llvm_ir().contains(&format!("void @vn_node_{}", positive.index())));
+}
+
+#[test]
+fn stage7_fusion_applies_to_add_and_mul_but_not_across_reshape() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2, 2]), Domain::Finite);
+    let b = graph.input(shape(&[2, 2]), Domain::Finite);
+    let sum = graph.add(a, b).unwrap();
+    let add_relu = graph.relu(sum).unwrap();
+    let product = graph.mul(add_relu, b).unwrap();
+    let reshaped = graph.reshape(product, shape(&[4])).unwrap();
+    let mul_relu = graph.relu(reshaped).unwrap();
+    let gpu = GpuEngine::default()
+        .with_launch_config(GpuLaunchConfig::new(64, ReluFusion::Experimental).unwrap())
+        .compile(&graph, mul_relu)
+        .unwrap();
+    assert_eq!(gpu.fused_relus().len(), 1);
+    assert_eq!(gpu.fused_relus().get(&add_relu.index()), Some(&sum.index()));
+    assert!(!gpu.fused_relus().contains_key(&mul_relu.index()));
+
+    let direct = graph.relu(product).unwrap();
+    let fused = GpuEngine::default()
+        .with_launch_config(GpuLaunchConfig::new(64, ReluFusion::Experimental).unwrap())
+        .compile(&graph, direct)
+        .unwrap();
+    assert_eq!(fused.fused_relus().get(&direct.index()), Some(&product.index()));
+}
