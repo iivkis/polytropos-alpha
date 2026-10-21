@@ -144,6 +144,7 @@ impl CertificateEngine {
             }
         }
 
+        let result: Result<Stage5Report, CertificateError> = (|| {
         let model = self.proof.generate(graph, output)?;
         let checked = self.proof.verify(&model, &directory.join("proof.lean"))?;
         let program = self.gpu.compile(graph, output)?;
@@ -275,6 +276,14 @@ impl CertificateEngine {
             theorem_count: checked.theorem_names.len(),
             compared_fp32_values: actual.values().len(),
         })
+        })();
+        if result.is_err() {
+            // A partially written report must never survive any failed run.
+            for name in ["report.json", MANIFEST] {
+                let _ = fs::remove_file(directory.join(name));
+            }
+        }
+        result
     }
 
     /// Verify the report against a SHA256SUMS digest pinned outside the bundle.

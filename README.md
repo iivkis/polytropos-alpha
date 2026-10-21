@@ -109,7 +109,7 @@ task clippy
 task cert-stage5
 task verify-stage5
 # Для защиты от подмены манифеста подставить напечатанный ранее хеш:
-VERINEURAL_STAGE5_SHA256=<sha256_из_первого_прогона> task verify-stage5
+VERINEURAL_STAGE5_SHA256=PASTE_DIGEST task verify-stage5
 ```
 
 Результат в `target/verineural/stage5/`: `graph.ir`, `proof.lean`, `graph.ll`, `graph.ptx`, `inputs.bits`, `output.bits`, `report.json` и `SHA256SUMS`. Манифест фиксированного состава связывает все семь артефактов SHA-256. При первом запуске запомните SHA-256 **манифеста** отдельно от каталога. Без внешней фиксации можно переписать и файлы, и их хеши, подписи нет. `task verify-stage5` пересчитывает хеши и повторно запускает Lean **без GPU**, но не перепроверяет наблюдение CUDA и не доказывает связь Lean ↔ машинный код.
