@@ -47,3 +47,8 @@ tasks:
     desc: Run the stage-2 Semantic Neural IR example (developer-run)
     cmds:
       - cargo run -p verineural --example stage2_graph
+
+  proof-stage3:
+    desc: Generate and check the stage-3 Lean 4 proof (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage3_proof

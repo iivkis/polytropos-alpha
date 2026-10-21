@@ -232,3 +232,94 @@ fn reshape_keeps_count_and_domain() {
         &[3, 2]
     );
 }
+
+#[test]
+fn proof_generator_emits_node_and_module_theorems() {
+    let mut graph = NeuralGraph::default();
+    let input = graph.input(shape(&[2, 2]), Domain::Finite);
+    let hidden = graph.apply_module(&ReluModule::new(&[2, 2]), &[input]).unwrap();
+    let flat = graph.reshape(hidden, shape(&[4])).unwrap();
+    let summed = graph.add(flat, flat).unwrap();
+    let out = graph.mul(summed, flat).unwrap();
+
+    let proof = LeanProofEngine::default().generate(&graph, out).unwrap();
+    assert!(proof.source().contains("import Init"));
+    assert!(!proof.source().contains("sorry"));
+    assert!(!proof.source().contains("axiom "));
+    assert!(proof.source().contains("theorem node_1_nonnegative"));
+    assert!(proof.source().contains("theorem node_2_input_0_shape"));
+    assert!(proof.source().contains("theorem module_0_output_nonnegative"));
+    assert!(proof.source().contains("VeriNeural.add (node_2 x_0) (node_2 x_0)"));
+    assert!(proof.source().contains("theorem node_4_semantics"));
+    assert!(proof.assumptions().is_empty());
+    assert!(proof.theorem_names().len() >= 10);
+}
+
+#[test]
+fn proof_generator_keeps_source_domain_assumptions_explicit() {
+    let mut graph = NeuralGraph::default();
+    let src = graph.input(shape(&[3]), Domain::NonNegativeFinite);
+    let output = graph.reshape(src, shape(&[1, 3])).unwrap();
+    let proof = LeanProofEngine::default().generate(&graph, output).unwrap();
+    assert!(proof.source().contains("(h_0 : VeriNeural.Nonnegative x_0)"));
+    assert!(proof.source().contains("exact h_0"));
+    assert_eq!(
+        proof.assumptions(),
+        &[ProofAssumption {
+            input_node: 0,
+            domain: Domain::NonNegativeFinite
+        }]
+    );
+}
+
+#[test]
+fn proof_generator_rejects_unsupported_operations() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2, 3]), Domain::Any);
+    let b = graph.input(shape(&[3, 2]), Domain::Any);
+    let out = graph.matmul(a, b).unwrap();
+    let error = LeanProofEngine::default().generate(&graph, out).unwrap_err();
+    assert!(matches!(
+        error,
+        ProofError::UnsupportedOperation {
+            operation: "matmul",
+            ..
+        }
+    ));
+
+    let mut graph = NeuralGraph::default();
+    let input = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let out = graph.sqrt(input).unwrap();
+    assert!(matches!(
+        LeanProofEngine::default().generate(&graph, out),
+        Err(ProofError::UnsupportedOperation {
+            operation: "sqrt",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn proof_generator_checks_only_reachable_subgraph() {
+    let mut graph = NeuralGraph::default();
+    let input = graph.input(shape(&[2]), Domain::Finite);
+    let verified_path = graph.relu(input).unwrap();
+    let a = graph.input(shape(&[2, 2]), Domain::Any);
+    let b = graph.input(shape(&[2, 2]), Domain::Any);
+    let _unsupported = graph.matmul(a, b).unwrap();
+    // This test deliberately retains a sibling operation outside the proof slice.
+    let proof = LeanProofEngine::default().generate(&graph, verified_path).unwrap();
+    assert!(proof.source().contains("theorem node_1_nonnegative"));
+    assert!(!proof.source().contains("theorem node_2_shape"));
+}
+
+#[test]
+fn proof_generator_rejects_handles_from_other_graphs() {
+    let mut first = NeuralGraph::default();
+    let input = first.input(shape(&[2]), Domain::Any);
+    let second = NeuralGraph::default();
+    assert!(matches!(
+        LeanProofEngine::default().generate(&second, input),
+        Err(ProofError::InvalidGraph(NeuralError::InvalidNode))
+    ));
+}
