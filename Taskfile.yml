@@ -100,3 +100,8 @@ tasks:
     desc: Execute Stage 6 residual FFN via Lean + CUDA and produce an evidence bundle (developer-run)
     cmds:
       - cargo run -p verineural --example stage6_ffn
+
+  gpu-stage7:
+    desc: Compare controlled CUDA launches and experimental Relu fusion with Lean and CPU checks (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage7_fusion
