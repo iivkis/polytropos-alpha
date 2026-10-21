@@ -10,9 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{
-    GpuEngine, GpuError, LeanProofEngine, NeuralGraph, NodeId, ProofError, Tensor,
-};
+use crate::{GpuEngine, GpuError, LeanProofEngine, NeuralGraph, NodeId, ProofError, Tensor};
 
 const ARTIFACTS: [&str; 7] = [
     "graph.ir",
@@ -145,137 +143,135 @@ impl CertificateEngine {
         }
 
         let result: Result<Stage5Report, CertificateError> = (|| {
-        let model = self.proof.generate(graph, output)?;
-        let checked = self.proof.verify(&model, &directory.join("proof.lean"))?;
-        let program = self.gpu.compile(graph, output)?;
-        let actual = self.gpu.execute(&program, inputs, directory)?;
-        if actual.shape() != cpu_reference.shape() {
-            return Err(CertificateError::WrongOutputShape);
-        }
-        for (index, (&gpu, &cpu)) in actual
-            .values()
-            .iter()
-            .zip(cpu_reference.values())
-            .enumerate()
-        {
-            if gpu.to_bits() != cpu.to_bits() {
-                return Err(CertificateError::NumericalMismatch {
-                    index,
-                    gpu_bits: gpu.to_bits(),
-                    cpu_bits: cpu.to_bits(),
-                });
+            let model = self.proof.generate(graph, output)?;
+            let checked = self.proof.verify(&model, &directory.join("proof.lean"))?;
+            let program = self.gpu.compile(graph, output)?;
+            let actual = self.gpu.execute(&program, inputs, directory)?;
+            if actual.shape() != cpu_reference.shape() {
+                return Err(CertificateError::WrongOutputShape);
             }
-        }
-
-        fs::write(directory.join("graph.ir"), ir_snapshot(graph, output))?;
-        fs::write(directory.join("inputs.bits"), input_snapshot(graph, inputs))?;
-        fs::write(
-            directory.join("output.bits"),
-            actual
+            for (index, (&gpu, &cpu)) in actual
                 .values()
                 .iter()
                 .zip(cpu_reference.values())
                 .enumerate()
-                .map(|(i, (gpu, cpu))| {
-                    format!("{i} gpu={:08x} cpu={:08x}\n", gpu.to_bits(), cpu.to_bits())
-                })
-                .collect::<String>(),
-        )?;
+            {
+                if gpu.to_bits() != cpu.to_bits() {
+                    return Err(CertificateError::NumericalMismatch {
+                        index,
+                        gpu_bits: gpu.to_bits(),
+                        cpu_bits: cpu.to_bits(),
+                    });
+                }
+            }
 
-        let hashes = ARTIFACTS[..ARTIFACTS.len() - 1]
-            .iter()
-            .map(|name| Ok((*name, hash_file(&directory.join(name))?)))
-            .collect::<Result<Vec<_>, CertificateError>>()?;
-        let theorem_names = checked
-            .theorem_names
-            .iter()
-            .map(|name| format!("\"{}\"", escape_json(name)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let hypotheses = checked
-            .assumptions
-            .iter()
-            .map(|a| {
-                format!(
-                    "{{\"input_node\":{},\"domain\":\"{:?}\"}}",
-                    a.input_node, a.domain
-                )
+            fs::write(directory.join("graph.ir"), ir_snapshot(graph, output))?;
+            fs::write(directory.join("inputs.bits"), input_snapshot(graph, inputs))?;
+            fs::write(
+                directory.join("output.bits"),
+                actual
+                    .values()
+                    .iter()
+                    .zip(cpu_reference.values())
+                    .enumerate()
+                    .map(|(i, (gpu, cpu))| {
+                        format!("{i} gpu={:08x} cpu={:08x}\n", gpu.to_bits(), cpu.to_bits())
+                    })
+                    .collect::<String>(),
+            )?;
+
+            let hashes = ARTIFACTS[..ARTIFACTS.len() - 1]
+                .iter()
+                .map(|name| Ok((*name, hash_file(&directory.join(name))?)))
+                .collect::<Result<Vec<_>, CertificateError>>()?;
+            let theorem_names = checked
+                .theorem_names
+                .iter()
+                .map(|name| format!("\"{}\"", escape_json(name)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let hypotheses = checked
+                .assumptions
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{{\"input_node\":{},\"domain\":\"{:?}\"}}",
+                        a.input_node, a.domain
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let input_domains = program
+                .source_inputs()
+                .iter()
+                .map(|&id| {
+                    let node = &graph.nodes()[id.index()];
+                    format!(
+                        "{{\"node\":{},\"shape\":{:?},\"domain\":\"{:?}\"}}",
+                        id.index(),
+                        node.shape.dims(),
+                        node.domain
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let artifacts = hashes
+                .iter()
+                .map(|(name, hash)| format!("{{\"path\":\"{name}\",\"sha256\":\"{hash}\"}}"))
+                .collect::<Vec<_>>()
+                .join(",\n    ");
+            let report = format!(
+                concat!(
+                    "{{\n",
+                    "  \"schema\": \"verineural.stage5.v1\",\n",
+                    "  \"output_node\": {},\n",
+                    "  \"statuses\": {{\"mathematical\":\"{}\",\"composition\":\"{}\",",
+                    "\"numerical\":\"{}\",\"gpu_execution\":\"{}\",",
+                    "\"compilation\":\"{}\",\"fp32_semantics\":\"{}\",",
+                    "\"machine_code_correctness\":\"{}\"}},\n",
+                    "  \"proven_scope\": \"Lean 4 ideal Int model: shapes, per-node definitions, and applicable nonnegativity/module obligations only\",\n",
+                    "  \"numerical_scope\": \"bitwise CPU/GPU equality for the recorded concrete f32 inputs only\",\n",
+                    "  \"compilation_scope\": \"LLVM NVPTX/PTX generated and run; semantic preservation is trusted, not proved\",\n",
+                    "  \"certified_machine_code\": false,\n",
+                    "  \"theorems\": [{}],\n",
+                    "  \"lean_hypotheses\": [{}],\n",
+                    "  \"declared_input_domains\": [{}],\n",
+                    "  \"compared_fp32_values\": {},\n",
+                    "  \"artifacts\": [\n    {}\n  ],\n",
+                    "  \"tcb\": [\"Rust graph and certificate serializer\",",
+                    "\"Lean model generator\", \"Lean 4 executable and kernel\",",
+                    "\"LLVM llc NVPTX compiler\", \"CUDA driver/JIT/runtime\",",
+                    "\"NVIDIA hardware\", \"Rust f32 CPU reference\",",
+                    "\"coreutils sha256sum\"],\n",
+                    "  \"limitations\": [\"Hashes detect changes relative to a pinned digest; they do not authenticate the author\",",
+                    "\"Lean integer semantics is not linked by proof to GPU floating-point behavior\",",
+                    "\"Input domain declarations are caller assumptions checked for the concrete GPU inputs\",",
+                    "\"No verified GPU memory, compiler correctness, IEEE-754 or numerical error bound\"]\n",
+                    "}}\n"
+                ),
+                output.index(),
+                EvidenceStatus::Proven.as_str(),
+                EvidenceStatus::Proven.as_str(),
+                EvidenceStatus::Validated.as_str(),
+                EvidenceStatus::Validated.as_str(),
+                EvidenceStatus::Trusted.as_str(),
+                EvidenceStatus::Unsupported.as_str(),
+                EvidenceStatus::Unsupported.as_str(),
+                theorem_names,
+                hypotheses,
+                input_domains,
+                actual.values().len(),
+                artifacts,
+            );
+            fs::write(directory.join("report.json"), report)?;
+            fs::write(directory.join(MANIFEST), manifest_contents(directory)?)?;
+            self.verify_bundle(directory)?;
+            Ok(Stage5Report {
+                directory: directory.to_path_buf(),
+                manifest_sha256: hash_file(&directory.join(MANIFEST))?,
+                theorem_count: checked.theorem_names.len(),
+                compared_fp32_values: actual.values().len(),
             })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let input_domains = program
-            .source_inputs()
-            .iter()
-            .map(|&id| {
-                let node = &graph.nodes()[id.index()];
-                format!(
-                    "{{\"node\":{},\"shape\":{:?},\"domain\":\"{:?}\"}}",
-                    id.index(),
-                    node.shape.dims(),
-                    node.domain
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let artifacts = hashes
-            .iter()
-            .map(|(name, hash)| {
-                format!("{{\"path\":\"{name}\",\"sha256\":\"{hash}\"}}")
-            })
-            .collect::<Vec<_>>()
-            .join(",\n    ");
-        let report = format!(
-            concat!(
-                "{{\n",
-                "  \"schema\": \"verineural.stage5.v1\",\n",
-                "  \"output_node\": {},\n",
-                "  \"statuses\": {{\"mathematical\":\"{}\",\"composition\":\"{}\",",
-                "\"numerical\":\"{}\",\"gpu_execution\":\"{}\",",
-                "\"compilation\":\"{}\",\"fp32_semantics\":\"{}\",",
-                "\"machine_code_correctness\":\"{}\"}},\n",
-                "  \"proven_scope\": \"Lean 4 ideal Int model: shapes, per-node definitions, and applicable nonnegativity/module obligations only\",\n",
-                "  \"numerical_scope\": \"bitwise CPU/GPU equality for the recorded concrete f32 inputs only\",\n",
-                "  \"compilation_scope\": \"LLVM NVPTX/PTX generated and run; semantic preservation is trusted, not proved\",\n",
-                "  \"certified_machine_code\": false,\n",
-                "  \"theorems\": [{}],\n",
-                "  \"lean_hypotheses\": [{}],\n",
-                "  \"declared_input_domains\": [{}],\n",
-                "  \"compared_fp32_values\": {},\n",
-                "  \"artifacts\": [\n    {}\n  ],\n",
-                "  \"tcb\": [\"Rust graph and certificate serializer\",",
-                "\"Lean model generator\", \"Lean 4 executable and kernel\",",
-                "\"LLVM llc NVPTX compiler\", \"CUDA driver/JIT/runtime\",",
-                "\"NVIDIA hardware\", \"Rust f32 CPU reference\",",
-                "\"coreutils sha256sum\"],\n",
-                "  \"limitations\": [\"Hashes detect changes relative to a pinned digest; they do not authenticate the author\",",
-                "\"Lean integer semantics is not linked by proof to GPU floating-point behavior\",",
-                "\"Input domain declarations are caller assumptions checked for the concrete GPU inputs\",",
-                "\"No verified GPU memory, compiler correctness, IEEE-754 or numerical error bound\"]\n",
-                "}}\n"
-            ),
-            output.index(),
-            EvidenceStatus::Proven.as_str(),
-            EvidenceStatus::Proven.as_str(),
-            EvidenceStatus::Validated.as_str(),
-            EvidenceStatus::Validated.as_str(),
-            EvidenceStatus::Trusted.as_str(),
-            EvidenceStatus::Unsupported.as_str(),
-            EvidenceStatus::Unsupported.as_str(),
-            theorem_names,
-            hypotheses,
-            input_domains,
-            actual.values().len(),
-            artifacts,
-        );
-        fs::write(directory.join("report.json"), report)?;
-        fs::write(directory.join(MANIFEST), manifest_contents(directory)?)?;
-        self.verify_bundle(directory)?;
-        Ok(Stage5Report {
-            directory: directory.to_path_buf(),
-            manifest_sha256: hash_file(&directory.join(MANIFEST))?,
-            theorem_count: checked.theorem_names.len(),
-            compared_fp32_values: actual.values().len(),
-        })
         })();
         if result.is_err() {
             // A partially written report must never survive any failed run.
@@ -348,7 +344,11 @@ fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
         source.push_str(&format!(
             "module={};inputs={:?};output={};requires={:?};ensures={:?}\n",
             module.name,
-            module.inputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
+            module
+                .inputs
+                .iter()
+                .map(|id| id.index())
+                .collect::<Vec<_>>(),
             module.output.index(),
             module.contract.requires,
             module.contract.ensures,
@@ -461,7 +461,8 @@ mod tests {
 
     #[test]
     fn unsupported_proof_clears_stale_success_report() {
-        let dir = std::env::temp_dir().join(format!("verineural-stage5-fail-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("verineural-stage5-fail-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("report.json"), "stale").unwrap();
         fs::write(dir.join(MANIFEST), "stale").unwrap();
