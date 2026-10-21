@@ -116,6 +116,16 @@ impl Tensor<f32> {
         Self::new(shape, values)
     }
 
+    /// Add one rank-1 bias vector to every matrix row.
+    pub fn bias_add(&self, rhs: &Self) -> Result<Self, NeuralError> {
+        let shape = Operation::BiasAdd.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
+        let columns = shape.dims()[1];
+        let values = self.values.iter().enumerate()
+            .map(|(i, &x)| x + rhs.values[i % columns])
+            .collect();
+        Self::new(shape, values)
+    }
+
     /// Matrix multiplication of two rank-2 tensors. Accumulates left to right.
     pub fn matmul(&self, rhs: &Self) -> Result<Self, NeuralError> {
         let shape = Operation::MatMul.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;

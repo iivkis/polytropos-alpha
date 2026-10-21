@@ -90,6 +90,7 @@ pub enum Operation {
     Add,
     Mul,
     MatMul,
+    BiasAdd,
     Relu,
     Sqrt,
     Reshape(Shape),
@@ -102,6 +103,7 @@ impl Operation {
             Self::Add => "add",
             Self::Mul => "mul",
             Self::MatMul => "matmul",
+            Self::BiasAdd => "bias_add",
             Self::Relu => "relu",
             Self::Sqrt => "sqrt",
             Self::Reshape(_) => "reshape",
@@ -111,7 +113,7 @@ impl Operation {
     pub const fn arity(&self) -> usize {
         match self {
             Self::Input => 0,
-            Self::Add | Self::Mul | Self::MatMul => 2,
+            Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd => 2,
             Self::Relu | Self::Sqrt | Self::Reshape(_) => 1,
         }
     }
@@ -158,6 +160,29 @@ impl Operation {
                 }
                 Shape::new(vec![a[0], b[1]])
             }
+            Self::BiasAdd => {
+                if inputs[0].rank() != 2 {
+                    return Err(NeuralError::RankMismatch {
+                        operation: self.name(),
+                        expected: 2,
+                        actual: inputs[0].rank(),
+                    });
+                }
+                if inputs[1].rank() != 1 {
+                    return Err(NeuralError::RankMismatch {
+                        operation: self.name(),
+                        expected: 1,
+                        actual: inputs[1].rank(),
+                    });
+                }
+                if inputs[0].dims()[1] != inputs[1].dims()[0] {
+                    return Err(NeuralError::InnerDimensionMismatch {
+                        left: inputs[0].dims()[1],
+                        right: inputs[1].dims()[0],
+                    });
+                }
+                Ok(inputs[0].clone())
+            }
             Self::Relu | Self::Sqrt => Ok(inputs[0].clone()),
             Self::Reshape(output) => {
                 if inputs[0].element_count() != output.element_count() {
@@ -192,7 +217,7 @@ impl Operation {
             }
             Self::Sqrt => Domain::NonNegativeFinite,
             Self::Reshape(_) => inputs[0],
-            Self::Input | Self::Add | Self::Mul | Self::MatMul => Domain::Any,
+            Self::Input | Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd => Domain::Any,
         }
     }
 }
@@ -405,6 +430,11 @@ impl NeuralGraph {
 
     pub fn matmul(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, NeuralError> {
         self.apply(Operation::MatMul, &[a, b])
+    }
+
+    /// Add a length-N bias to each row of an MxN tensor (no arbitrary broadcast).
+    pub fn bias_add(&mut self, matrix: NodeId, bias: NodeId) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::BiasAdd, &[matrix, bias])
     }
 
     pub fn relu(&mut self, a: NodeId) -> Result<NodeId, NeuralError> {

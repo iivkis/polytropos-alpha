@@ -155,6 +155,8 @@ impl GpuEngine {
                 Operation::Input
                     | Operation::Add
                     | Operation::Mul
+                    | Operation::MatMul
+                    | Operation::BiasAdd
                     | Operation::Relu
                     | Operation::Reshape(_)
             ) {
@@ -185,7 +187,21 @@ impl GpuEngine {
             if matches!(node.operation, Operation::Input | Operation::Reshape(_)) {
                 continue;
             }
-            llvm_ir.push_str(&kernel_ir(index, &node.operation));
+            if matches!(node.operation, Operation::MatMul) {
+                let left = &graph.nodes()[node.inputs[0].index()];
+                llvm_ir.push_str(&matmul_kernel_ir(
+                    index,
+                    left.shape.dims()[1],
+                    node.shape.dims()[1],
+                ));
+            } else {
+                let columns = if matches!(node.operation, Operation::BiasAdd) {
+                    node.shape.dims()[1]
+                } else {
+                    0
+                };
+                llvm_ir.push_str(&kernel_ir(index, &node.operation, columns));
+            }
         }
         Ok(GpuProgram {
             graph: graph.clone(),
@@ -287,7 +303,7 @@ impl GpuEngine {
                     let ptr = buffers[&node.inputs[0].index()];
                     buffers.insert(index, ptr);
                 }
-                Operation::Add | Operation::Mul | Operation::Relu => {
+                Operation::Add | Operation::Mul | Operation::MatMul | Operation::BiasAdd | Operation::Relu => {
                     let first = buffers[&node.inputs[0].index()];
                     let second = if node.inputs.len() == 2 {
                         buffers[&node.inputs[1].index()]
@@ -316,7 +332,7 @@ impl GpuEngine {
     }
 }
 
-fn kernel_ir(index: usize, op: &Operation) -> String {
+fn kernel_ir(index: usize, op: &Operation, columns: usize) -> String {
     let computation = match op {
         Operation::Add => {
             "  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx\n\
@@ -328,6 +344,14 @@ fn kernel_ir(index: usize, op: &Operation) -> String {
                %y = load float, ptr addrspace(1) %bp, align 4\n\
                %result = fmul float %x, %y\n"
         }
+        Operation::BiasAdd => {
+            return pointwise_kernel_ir(index, &format!(
+                "  %col = urem i32 %idx, {columns}\\n\\
+                 %bp = getelementptr float, ptr addrspace(1) %b, i32 %col\\n\\
+                 %y = load float, ptr addrspace(1) %bp, align 4\\n\\
+                 %result = fadd float %x, %y\\n"
+            ));
+        }
         Operation::Relu => {
             "  %nan = fcmp uno float %x, %x\n\
                %positive = fcmp ogt float %x, 0.000000e+00\n\
@@ -336,6 +360,10 @@ fn kernel_ir(index: usize, op: &Operation) -> String {
         }
         _ => unreachable!("only arithmetic operations require kernels"),
     };
+    pointwise_kernel_ir(index, computation)
+}
+
+fn pointwise_kernel_ir(index: usize, computation: &str) -> String {
     format!(
         "define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{\n\
          entry:\n\
@@ -352,6 +380,51 @@ fn kernel_ir(index: usize, op: &Operation) -> String {
          {computation}\
            %op = getelementptr float, ptr addrspace(1) %out, i32 %idx\n\
            store float %result, ptr addrspace(1) %op, align 4\n\
+           br label %done\n\
+         done:\n\
+           ret void\n\
+         }}\n\n"
+    )
+}
+
+// Stage 6: simple one-output-per-thread row-major MatMul.
+// Deliberately no fusion, tiling, TF32 or fast-math. LLVM/CUDA remain TCB.
+fn matmul_kernel_ir(index: usize, inner: usize, columns: usize) -> String {
+    format!(
+        "define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{\n\
+         entry:\n\
+           %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()\n\
+           %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()\n\
+           %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()\n\
+           %base = mul i32 %block, %width\n\
+           %idx = add i32 %base, %tid\n\
+           %valid = icmp ult i32 %idx, %length\n\
+           br i1 %valid, label %compute, label %done\n\
+         compute:\n\
+           %row = udiv i32 %idx, {columns}\n\
+           %col = urem i32 %idx, {columns}\n\
+           br label %loop\n\
+         loop:\n\
+           %j = phi i32 [ 0, %compute ], [ %next, %body ]\n\
+           %sum = phi float [ 0.000000e+00, %compute ], [ %updated, %body ]\n\
+           %more = icmp ult i32 %j, {inner}\n\
+           br i1 %more, label %body, label %store\n\
+         body:\n\
+           %lhsBase = mul i32 %row, {inner}\n\
+           %lhsIdx = add i32 %lhsBase, %j\n\
+           %rhsBase = mul i32 %j, {columns}\n\
+           %rhsIdx = add i32 %rhsBase, %col\n\
+           %ap = getelementptr float, ptr addrspace(1) %a, i32 %lhsIdx\n\
+           %bp = getelementptr float, ptr addrspace(1) %b, i32 %rhsIdx\n\
+           %x = load float, ptr addrspace(1) %ap, align 4\n\
+           %y = load float, ptr addrspace(1) %bp, align 4\n\
+           %product = fmul float %x, %y\n\
+           %updated = fadd float %sum, %product\n\
+           %next = add i32 %j, 1\n\
+           br label %loop\n\
+         store:\n\
+           %op = getelementptr float, ptr addrspace(1) %out, i32 %idx\n\
+           store float %sum, ptr addrspace(1) %op, align 4\n\
            br label %done\n\
          done:\n\
            ret void\n\

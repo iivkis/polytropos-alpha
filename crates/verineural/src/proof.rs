@@ -149,6 +149,8 @@ impl LeanProofEngine {
                 Operation::Input
                 | Operation::Add
                 | Operation::Mul
+                | Operation::MatMul
+                | Operation::BiasAdd
                 | Operation::Relu
                 | Operation::Reshape(_) => {}
                 _ => {
@@ -236,6 +238,27 @@ impl LeanProofEngine {
                     call(node.inputs[0].index()),
                     call(node.inputs[1].index())
                 ),
+                Operation::MatMul => {
+                    let left = graph.node(node.inputs[0])?;
+                    let right = graph.node(node.inputs[1])?;
+                    let m = left.shape.dims()[0];
+                    let k = left.shape.dims()[1];
+                    let n = right.shape.dims()[1];
+                    format!(
+                        "VeriNeural.matmul (m := {m}) (k := {k}) (n := {n}) {} {}",
+                        call(node.inputs[0].index()),
+                        call(node.inputs[1].index())
+                    )
+                }
+                Operation::BiasAdd => {
+                    let m = node.shape.dims()[0];
+                    let n = node.shape.dims()[1];
+                    format!(
+                        "VeriNeural.biasAdd (m := {m}) (n := {n}) {} {}",
+                        call(node.inputs[0].index()),
+                        call(node.inputs[1].index())
+                    )
+                }
                 Operation::Relu => {
                     format!("VeriNeural.relu {}", call(node.inputs[0].index()))
                 }
@@ -282,7 +305,13 @@ impl LeanProofEngine {
             for (port, &input_id) in node.inputs.iter().enumerate() {
                 let predecessor = graph.node(input_id)?;
                 let name = format!("node_{index}_input_{port}_shape");
-                let premise = if matches!(node.operation, Operation::Reshape(_)) {
+                let premise = if matches!(node.operation, Operation::MatMul) {
+                    let left = graph.node(node.inputs[0])?;
+                    let right = graph.node(node.inputs[1])?;
+                    format!("{} = {}", left.shape.dims()[1], right.shape.dims()[0])
+                } else if matches!(node.operation, Operation::BiasAdd) && port == 1 {
+                    format!("{} = {}", predecessor.shape.dims()[0], node.shape.dims()[1])
+                } else if matches!(node.operation, Operation::Reshape(_)) {
                     format!(
                         "VeriNeural.shapeSize {} = VeriNeural.shapeSize {}",
                         shape_expr(&predecessor.shape),
