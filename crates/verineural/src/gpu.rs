@@ -466,6 +466,16 @@ impl GpuEngine {
             })
             .count();
         if kernel_count > 0 {
+            // Resolve CUDA module functions before capture (including lazy JIT).
+            for &index in &program.live_nodes {
+                if skipped.contains(&index) {
+                    continue;
+                }
+                let op = &program.graph.nodes()[index].operation;
+                if !matches!(op, Operation::Input | Operation::Reshape(_)) {
+                    session.prepare_kernel(&format!("vn_node_{index}"))?;
+                }
+            }
             session.begin_graph()?;
             for &index in &program.live_nodes {
                 if skipped.contains(&index) {

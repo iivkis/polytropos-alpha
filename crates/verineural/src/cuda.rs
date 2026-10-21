@@ -5,6 +5,7 @@
 
 #[cfg(target_os = "linux")]
 mod platform {
+    use std::collections::BTreeMap;
     use std::ffi::{CString, c_char, c_int, c_uint, c_void};
     use std::mem::transmute_copy;
     use std::ptr;
@@ -152,6 +153,7 @@ mod platform {
         module: Handle,
         allocations: Vec<DevicePtr>,
         pinned_buffers: Vec<*mut c_void>,
+        kernels: BTreeMap<String, Handle>,
         stream: Handle,
         graph: Handle,
         graph_exec: Handle,
@@ -181,6 +183,7 @@ mod platform {
                 module: ptr::null_mut(),
                 allocations: Vec::new(),
                 pinned_buffers: Vec::new(),
+                kernels: BTreeMap::new(),
                 stream: ptr::null_mut(),
                 graph: ptr::null_mut(),
                 graph_exec: ptr::null_mut(),
@@ -302,6 +305,28 @@ mod platform {
             })
         }
 
+        /// Resolve the CUDA function before capture. Lazy lookup/JIT is not
+        /// part of the captured stream's execution dependency graph.
+        pub fn prepare_kernel(&mut self, name: &str) -> Result<(), GpuError> {
+            if self.capturing {
+                return Err(GpuError::Driver(
+                    "kernel resolution during CUDA Graph capture is forbidden".into(),
+                ));
+            }
+            if self.kernels.contains_key(name) {
+                return Ok(());
+            }
+            let c_name = CString::new(name)
+                .map_err(|_| GpuError::Driver("kernel name contains NUL".into()))?;
+            let mut function = ptr::null_mut();
+            // SAFETY: module is loaded and the C string is NUL terminated.
+            check("cuModuleGetFunction", unsafe {
+                (self.functions.module_function)(&mut function, self.module, c_name.as_ptr())
+            })?;
+            self.kernels.insert(name.to_owned(), function);
+            Ok(())
+        }
+
         pub fn launch(
             &self,
             name: &str,
@@ -314,12 +339,8 @@ mod platform {
             if !self.capturing {
                 return Err(GpuError::Driver("direct kernel launch is forbidden; capture a CUDA Graph".into()));
             }
-            let name = CString::new(name)
-                .map_err(|_| GpuError::Driver("kernel name contains NUL".into()))?;
-            let mut function = ptr::null_mut();
-            // SAFETY: name is NUL-terminated and module remains loaded.
-            check("cuModuleGetFunction", unsafe {
-                (self.functions.module_function)(&mut function, self.module, name.as_ptr())
+            let function = *self.kernels.get(name).ok_or_else(|| {
+                GpuError::Driver("kernel function must be resolved before CUDA Graph capture".into())
             })?;
             let count = i32::try_from(length)
                 .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
@@ -442,6 +463,10 @@ mod platform {
         }
 
         pub fn launch_graph(&mut self) -> Result<(), GpuError> {
+            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+        }
+
+        pub fn prepare_kernel(&mut self, _: &str) -> Result<(), GpuError> {
             Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
         }
 
