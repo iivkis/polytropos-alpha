@@ -120,7 +120,10 @@ impl Tensor<f32> {
     pub fn bias_add(&self, rhs: &Self) -> Result<Self, NeuralError> {
         let shape = Operation::BiasAdd.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
         let columns = shape.dims()[1];
-        let values = self.values.iter().enumerate()
+        let values = self
+            .values
+            .iter()
+            .enumerate()
             .map(|(i, &x)| x + rhs.values[i % columns])
             .collect();
         Self::new(shape, values)

@@ -29,7 +29,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = engine.run(
         &graph,
         output,
-        &[(x_id, x), (w1_id, w1), (b1_id, b1), (w2_id, w2), (b2_id, b2)],
+        &[
+            (x_id, x),
+            (w1_id, w1),
+            (b1_id, b1),
+            (w2_id, w2),
+            (b2_id, b2),
+        ],
         &cpu,
         Path::new("target/verineural/stage6"),
     )?;

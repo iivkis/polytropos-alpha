@@ -3,7 +3,9 @@
 //! These modules have checked *shape* contracts; f32 overflow and backend
 //! lowering remain outside the current Lean proof boundary.
 
-use crate::{Domain, MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, PortContract, Shape};
+use crate::{
+    Domain, MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, PortContract, Shape,
+};
 
 fn any(shape: Shape) -> PortContract {
     PortContract::new(shape, Domain::Any)
@@ -50,10 +52,7 @@ pub struct ResidualAdd {
 impl ResidualAdd {
     pub fn new(shape: Shape) -> Self {
         Self {
-            contract: MathContract::new(
-                vec![any(shape.clone()), any(shape.clone())],
-                any(shape),
-            ),
+            contract: MathContract::new(vec![any(shape.clone()), any(shape.clone())], any(shape)),
         }
     }
 }

@@ -303,7 +303,11 @@ impl GpuEngine {
                     let ptr = buffers[&node.inputs[0].index()];
                     buffers.insert(index, ptr);
                 }
-                Operation::Add | Operation::Mul | Operation::MatMul | Operation::BiasAdd | Operation::Relu => {
+                Operation::Add
+                | Operation::Mul
+                | Operation::MatMul
+                | Operation::BiasAdd
+                | Operation::Relu => {
                     let first = buffers[&node.inputs[0].index()];
                     let second = if node.inputs.len() == 2 {
                         buffers[&node.inputs[1].index()]
@@ -345,12 +349,15 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize) -> String {
                %result = fmul float %x, %y\n"
         }
         Operation::BiasAdd => {
-            return pointwise_kernel_ir(index, &format!(
-                "  %col = urem i32 %idx, {columns}\n\
+            return pointwise_kernel_ir(
+                index,
+                &format!(
+                    "  %col = urem i32 %idx, {columns}\n\
                  %bp = getelementptr float, ptr addrspace(1) %b, i32 %col\n\
                  %y = load float, ptr addrspace(1) %bp, align 4\n\
                  %result = fadd float %x, %y\n"
-            ));
+                ),
+            );
         }
         Operation::Relu => {
             "  %nan = fcmp uno float %x, %x\n\

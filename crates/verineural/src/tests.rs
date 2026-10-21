@@ -419,12 +419,14 @@ fn gpu_input_validation_fails_before_toolchain_or_driver_is_required() {
     ));
 }
 
-
 #[test]
 fn stage6_bias_shape_validation_and_cpu_broadcast() {
     let matrix = Tensor::new(shape(&[2, 3]), vec![1_f32, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
     let bias = Tensor::new(shape(&[3]), vec![-1_f32, 0.0, 2.0]).unwrap();
-    assert_eq!(matrix.bias_add(&bias).unwrap().values(), &[0., 2., 5., 3., 5., 8.]);
+    assert_eq!(
+        matrix.bias_add(&bias).unwrap().values(),
+        &[0., 2., 5., 3., 5., 8.]
+    );
     assert!(matches!(
         matrix.bias_add(&Tensor::new(shape(&[2]), vec![1_f32, 2.0]).unwrap()),
         Err(NeuralError::BiasWidthMismatch { .. })
@@ -433,7 +435,10 @@ fn stage6_bias_shape_validation_and_cpu_broadcast() {
     let a = graph.input(shape(&[2, 3]), Domain::Finite);
     let wrong = graph.input(shape(&[2]), Domain::Finite);
     let old_len = graph.nodes().len();
-    assert!(matches!(graph.bias_add(a, wrong), Err(NeuralError::BiasWidthMismatch { .. })));
+    assert!(matches!(
+        graph.bias_add(a, wrong),
+        Err(NeuralError::BiasWidthMismatch { .. })
+    ));
     assert_eq!(graph.nodes().len(), old_len);
 }
 
@@ -451,8 +456,14 @@ fn stage6_dense_residual_ffn_composes_and_emits_matmul_proofs() {
     assert_eq!(graph.modules().len(), 1);
 
     let lean = LeanProofEngine::default().generate(&graph, output).unwrap();
-    assert!(lean.source().contains("VeriNeural.matmul (m := 2) (k := 2) (n := 3)"));
-    assert!(lean.source().contains("VeriNeural.biasAdd (m := 2) (n := 3)"));
+    assert!(
+        lean.source()
+            .contains("VeriNeural.matmul (m := 2) (k := 2) (n := 3)")
+    );
+    assert!(
+        lean.source()
+            .contains("VeriNeural.biasAdd (m := 2) (n := 3)")
+    );
     assert!(lean.source().contains("theorem module_0_output_shape"));
 
     let gpu = GpuEngine::default().compile(&graph, output).unwrap();
@@ -490,6 +501,8 @@ fn stage6_cpu_ffn_oracle_has_expected_concrete_values() {
     let w2 = Tensor::new(shape(&[3, 2]), vec![1_f32, 0., 0., 1., 1., 1.]).unwrap();
     let b2 = Tensor::new(shape(&[2]), vec![0_f32, 1.]).unwrap();
     let hidden = x.matmul(&w1).unwrap().bias_add(&b1).unwrap().relu();
-    let y = x.add(&hidden.matmul(&w2).unwrap().bias_add(&b2).unwrap()).unwrap();
+    let y = x
+        .add(&hidden.matmul(&w2).unwrap().bias_add(&b2).unwrap())
+        .unwrap();
     assert_eq!(y.values(), &[5., 9., 13., 17.]);
 }

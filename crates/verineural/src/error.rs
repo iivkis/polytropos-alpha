@@ -78,8 +78,14 @@ impl fmt::Display for NeuralError {
             Self::InnerDimensionMismatch { left, right } => {
                 write!(f, "matmul inner dimensions disagree: {left} vs {right}")
             }
-            Self::BiasWidthMismatch { columns, bias_length } => {
-                write!(f, "bias length {bias_length} does not equal matrix width {columns}")
+            Self::BiasWidthMismatch {
+                columns,
+                bias_length,
+            } => {
+                write!(
+                    f,
+                    "bias length {bias_length} does not equal matrix width {columns}"
+                )
             }
             Self::ElementCountMismatch { expected, actual } => {
                 write!(f, "reshape expects {expected} elements, received {actual}")
