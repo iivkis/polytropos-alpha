@@ -232,8 +232,8 @@ impl CertificateEngine {
                     "  \"proven_scope\": \"Lean 4 ideal Int model: shapes, per-node definitions, and applicable nonnegativity/module obligations only\",\n",
                     "  \"numerical_scope\": \"bitwise CPU/GPU equality for the recorded concrete f32 inputs only\",\n",
                     "  \"compilation_scope\": \"LLVM NVPTX/PTX generated and run; semantic preservation is trusted, not proved; experimental fusion is not FP32-certified\",\n",
-                    "  \"certified_machine_code\": false,\n",                    "  \"gpu_launch\": {{\"execution\":\"cuda_graph_capture_nonblocking_stream\",\"threads_per_block\":{},\"relu_fusion\":\"{}\",\"applied_fusions\":{}}},\n",
-
+                    "  \"certified_machine_code\": false,\n",
+                    "  \"gpu_launch\": {{\"execution\":\"cuda_graph_capture_nonblocking_stream\",\"threads_per_block\":{},\"relu_fusion\":\"{}\",\"applied_fusions\":{}}},\n",
                     "  \"theorems\": [{}],\n",
                     "  \"lean_hypotheses\": [{}],\n",
                     "  \"declared_input_domains\": [{}],\n",

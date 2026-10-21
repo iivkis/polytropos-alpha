@@ -15,11 +15,7 @@ use verineural::{
     ReluFusion, Shape, Tensor,
 };
 
-const STAGE7_ARTIFACTS: [&str; 3] = [
-    "fusion.lean",
-    "baseline/SHA256SUMS",
-    "fused/SHA256SUMS",
-];
+const STAGE7_ARTIFACTS: [&str; 3] = ["fusion.lean", "baseline/SHA256SUMS", "fused/SHA256SUMS"];
 
 fn digest(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let output = Command::new("sha256sum").arg(path).output()?;
@@ -50,7 +46,8 @@ fn verify_stage7(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Err(io::Error::other(format!(
             "Stage 7 manifest rejected: {}",
             String::from_utf8_lossy(&check.stderr)
-        )).into());
+        ))
+        .into());
     }
     let proof = LeanProofEngine::default();
     proof.check_file(&root.join("fusion.lean"))?;
@@ -99,12 +96,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // The intermediate bias-add node is exclusively consumed by the Relu.
-    let baseline = GpuEngine::default().with_launch_config(
-        GpuLaunchConfig::new(64, ReluFusion::Disabled)?,
-    );
-    let fused = GpuEngine::default().with_launch_config(
-        GpuLaunchConfig::new(256, ReluFusion::Experimental)?,
-    );
+    let baseline =
+        GpuEngine::default().with_launch_config(GpuLaunchConfig::new(64, ReluFusion::Disabled)?);
+    let fused = GpuEngine::default()
+        .with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Experimental)?);
     let unoptimized_plan = baseline.compile(&graph, output)?;
     let fused_plan = fused.compile(&graph, output)?;
     if fused_plan.fused_relus().len() != 1 {
@@ -125,17 +120,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // host transfers and CUDA work. They are NOT kernel-only benchmarks.
     let t0 = Instant::now();
     let baseline_cert = CertificateEngine::new(LeanProofEngine::default(), baseline);
-    let baseline_report = baseline_cert.run(
-        &graph, output, &inputs, &reference, &root.join("baseline"),
-    )?;
+    let baseline_report =
+        baseline_cert.run(&graph, output, &inputs, &reference, &root.join("baseline"))?;
     baseline_cert.verify_bundle(&baseline_report.directory)?;
     let baseline_duration = t0.elapsed();
 
     let t1 = Instant::now();
     let fused_cert = CertificateEngine::new(LeanProofEngine::default(), fused);
-    let fused_report = fused_cert.run(
-        &graph, output, &inputs, &reference, &root.join("fused"),
-    )?;
+    let fused_report = fused_cert.run(&graph, output, &inputs, &reference, &root.join("fused"))?;
     fused_cert.verify_bundle(&fused_report.directory)?;
     let fused_duration = t1.elapsed();
 
@@ -162,8 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Launch: baseline 64 threads, fused 256 threads per block");
     println!(
         "CPU comparisons: baseline {} / fused {} identical f32 values",
-        baseline_report.compared_fp32_values,
-        fused_report.compared_fp32_values
+        baseline_report.compared_fp32_values, fused_report.compared_fp32_values
     );
     println!("Lean ideal-Int rule checked: {}", fusion_lean.display());
     println!(
@@ -174,7 +165,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "SHA256SUMS digests: baseline {}, fused {}",
         baseline_report.manifest_sha256, fused_report.manifest_sha256
     );
-    println!("Pinned Stage 7 SHA256SUMS digest: {}", digest(&root.join("SHA256SUMS"))?);
+    println!(
+        "Pinned Stage 7 SHA256SUMS digest: {}",
+        digest(&root.join("SHA256SUMS"))?
+    );
     println!("Recheck without a GPU: task verify-gpu-stage7");
     println!("Stage 7 manifest covers fusion.lean and both Stage 5 evidence manifests.");
     println!("No certified PTX/FP32/machine-code equivalence is claimed.");

@@ -507,7 +507,6 @@ fn stage6_cpu_ffn_oracle_has_expected_concrete_values() {
     assert_eq!(y.values(), &[5., 9., 13., 17.]);
 }
 
-
 #[test]
 fn stage7_launch_config_rejects_invalid_threads() {
     for threads in [0, 1, 63, 65, 1024, u32::MAX] {
@@ -534,7 +533,11 @@ fn stage7_exclusive_bias_relu_fusion_removes_only_safe_producer() {
 
     let ordinary = GpuEngine::default().compile(&graph, result).unwrap();
     assert!(ordinary.fused_relus().is_empty());
-    assert!(ordinary.llvm_ir().contains(&format!("void @vn_node_{}", sum.index())));
+    assert!(
+        ordinary
+            .llvm_ir()
+            .contains(&format!("void @vn_node_{}", sum.index()))
+    );
 
     let launch = GpuLaunchConfig::new(128, ReluFusion::Experimental).unwrap();
     let fused = GpuEngine::default()
@@ -543,8 +546,16 @@ fn stage7_exclusive_bias_relu_fusion_removes_only_safe_producer() {
         .unwrap();
     assert_eq!(fused.launch_config(), launch);
     assert_eq!(fused.fused_relus().get(&result.index()), Some(&sum.index()));
-    assert!(!fused.llvm_ir().contains(&format!("void @vn_node_{}", sum.index())));
-    assert!(fused.llvm_ir().contains(&format!("void @vn_node_{}", result.index())));
+    assert!(
+        !fused
+            .llvm_ir()
+            .contains(&format!("void @vn_node_{}", sum.index()))
+    );
+    assert!(
+        fused
+            .llvm_ir()
+            .contains(&format!("void @vn_node_{}", result.index()))
+    );
     assert!(fused.llvm_ir().contains("urem i32 %idx, 3"));
     assert!(fused.llvm_ir().contains("%fused_result = select"));
     assert!(!fused.llvm_ir().contains("fast "));
@@ -569,8 +580,14 @@ fn stage7_shared_producer_is_not_fused_or_discarded() {
         .compile(&graph, output)
         .unwrap();
     assert!(gpu.fused_relus().is_empty());
-    assert!(gpu.llvm_ir().contains(&format!("void @vn_node_{}", product.index())));
-    assert!(gpu.llvm_ir().contains(&format!("void @vn_node_{}", positive.index())));
+    assert!(
+        gpu.llvm_ir()
+            .contains(&format!("void @vn_node_{}", product.index()))
+    );
+    assert!(
+        gpu.llvm_ir()
+            .contains(&format!("void @vn_node_{}", positive.index()))
+    );
 }
 
 #[test]
@@ -596,9 +613,11 @@ fn stage7_fusion_applies_to_add_and_mul_but_not_across_reshape() {
         .with_launch_config(GpuLaunchConfig::new(64, ReluFusion::Experimental).unwrap())
         .compile(&graph, direct)
         .unwrap();
-    assert_eq!(fused.fused_relus().get(&direct.index()), Some(&product.index()));
+    assert_eq!(
+        fused.fused_relus().get(&direct.index()),
+        Some(&product.index())
+    );
 }
-
 
 #[test]
 fn cuda_graph_only_runtime_regression_guard() {
@@ -612,8 +631,14 @@ fn cuda_graph_only_runtime_regression_guard() {
     assert!(source.contains("cuMemcpyHtoDAsync_v2"));
     assert!(source.contains("cuMemcpyDtoHAsync_v2"));
     // The GPU launch uses an owned stream, never null / stream 0.
-    assert!(source.contains("                    self.stream,\n                    args.as_mut_ptr()"));
-    assert!(!source.contains("                    ptr::null_mut(),\n                    args.as_mut_ptr()"));
+    assert!(
+        source.contains("                    self.stream,\n                    args.as_mut_ptr()")
+    );
+    assert!(
+        !source.contains(
+            "                    ptr::null_mut(),\n                    args.as_mut_ptr()"
+        )
+    );
     assert!(!source.contains("cuCtxSynchronize"));
     assert!(!source.contains("cuMemcpyHtoD_v2"));
     assert!(!source.contains("cuMemcpyDtoH_v2"));

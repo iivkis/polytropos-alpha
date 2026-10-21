@@ -42,9 +42,7 @@ impl GpuLaunchConfig {
     /// A deliberately narrow set of supported thread counts.
     pub fn new(threads_per_block: u32, relu_fusion: ReluFusion) -> Result<Self, GpuError> {
         if !matches!(threads_per_block, 64 | 128 | 256 | 512) {
-            return Err(GpuError::InvalidLaunch {
-                threads_per_block,
-            });
+            return Err(GpuError::InvalidLaunch { threads_per_block });
         }
         Ok(Self {
             threads_per_block,
@@ -116,7 +114,10 @@ impl fmt::Display for GpuError {
             }
             Self::InvalidInput { node, reason } => write!(f, "GPU input {node}: {reason}"),
             Self::MissingInput { node } => write!(f, "GPU input {node} is missing"),
-            Self::InvalidLaunch { threads_per_block } => write!(f, "unsupported CUDA threads per block: {threads_per_block} (use 64, 128, 256 or 512)"),
+            Self::InvalidLaunch { threads_per_block } => write!(
+                f,
+                "unsupported CUDA threads per block: {threads_per_block} (use 64, 128, 256 or 512)"
+            ),
             Self::Io(err) => write!(f, "GPU I/O failure: {err}"),
             Self::LlvmFailed { diagnostics } => write!(f, "NVPTX lowering failed: {diagnostics}"),
             Self::Driver(message) => write!(f, "CUDA driver unavailable: {message}"),
@@ -419,7 +420,11 @@ impl GpuEngine {
         let ptx = fs::read(ptx_path)?;
         let mut session = CudaSession::new(&ptx)?;
         let mut buffers: BTreeMap<usize, u64> = BTreeMap::new();
-        let skipped = program.fused_relus.values().copied().collect::<BTreeSet<_>>();
+        let skipped = program
+            .fused_relus
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>();
 
         // Stage all input uploads and allocate all output buffers *before*
         // graph capture. No CUDA allocation or host transfer is allowed while

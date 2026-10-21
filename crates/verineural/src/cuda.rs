@@ -103,7 +103,7 @@ mod platform {
             *mut *mut c_void,
             *mut *mut c_void,
         ) -> ResultCode,
-     }
+    }
 
     impl Functions {
         fn load(lib: &Library) -> Result<Self, GpuError> {
@@ -205,7 +205,9 @@ mod platform {
                 (session.functions.stream_create)(&mut session.stream, CU_STREAM_NON_BLOCKING)
             })?;
             if session.stream.is_null() {
-                return Err(GpuError::Driver("CUDA returned a null stream handle".into()));
+                return Err(GpuError::Driver(
+                    "CUDA returned a null stream handle".into(),
+                ));
             }
             Ok(session)
         }
@@ -225,7 +227,11 @@ mod platform {
 
         /// Stage input bytes in page-locked memory and enqueue on our explicit
         /// non-blocking stream. Pinned buffers stay owned until session teardown.
-        pub fn copy_to_device(&mut self, address: DevicePtr, values: &[f32]) -> Result<(), GpuError> {
+        pub fn copy_to_device(
+            &mut self,
+            address: DevicePtr,
+            values: &[f32],
+        ) -> Result<(), GpuError> {
             let bytes = std::mem::size_of_val(values);
             let mut pinned = ptr::null_mut();
             // SAFETY: pinned is a writable output pointer for CUDA's host allocation.
@@ -243,7 +249,11 @@ mod platform {
             })
         }
 
-        pub fn copy_to_host(&mut self, out: &mut [f32], address: DevicePtr) -> Result<(), GpuError> {
+        pub fn copy_to_host(
+            &mut self,
+            out: &mut [f32],
+            address: DevicePtr,
+        ) -> Result<(), GpuError> {
             let bytes = std::mem::size_of_val(out);
             let mut pinned = ptr::null_mut();
             // SAFETY: the CUDA allocation is valid and owned by this session.
@@ -257,9 +267,7 @@ mod platform {
             })?;
             self.synchronize()?;
             // SAFETY: the async transfer completed; Rust out is valid for out.len() f32s.
-            unsafe {
-                ptr::copy_nonoverlapping(pinned.cast::<f32>(), out.as_mut_ptr(), out.len())
-            };
+            unsafe { ptr::copy_nonoverlapping(pinned.cast::<f32>(), out.as_mut_ptr(), out.len()) };
             Ok(())
         }
 
@@ -337,10 +345,14 @@ mod platform {
             threads: u32,
         ) -> Result<(), GpuError> {
             if !self.capturing {
-                return Err(GpuError::Driver("direct kernel launch is forbidden; capture a CUDA Graph".into()));
+                return Err(GpuError::Driver(
+                    "direct kernel launch is forbidden; capture a CUDA Graph".into(),
+                ));
             }
             let function = *self.kernels.get(name).ok_or_else(|| {
-                GpuError::Driver("kernel function must be resolved before CUDA Graph capture".into())
+                GpuError::Driver(
+                    "kernel function must be resolved before CUDA Graph capture".into(),
+                )
             })?;
             let count = i32::try_from(length)
                 .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
@@ -459,15 +471,21 @@ mod platform {
         }
 
         pub fn begin_graph(&mut self) -> Result<(), GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn launch_graph(&mut self) -> Result<(), GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn prepare_kernel(&mut self, _: &str) -> Result<(), GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn launch(
