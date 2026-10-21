@@ -35,7 +35,7 @@
         ];
 
         shellHook = ''
-          echo "VeriGPU devShell: Rust / LLVM / Lean 4 / CUDA / Task"
+          echo "VeriNeural devShell: Rust / LLVM / Lean 4 / CUDA / Task"
           echo "GPU execution requires a compatible NVIDIA driver on the host."
           echo "Use 'task --list' to see local commands."
         '';
