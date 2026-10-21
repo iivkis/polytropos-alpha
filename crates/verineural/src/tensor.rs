@@ -10,7 +10,8 @@ impl Shape {
         if dims.contains(&0) {
             return Err(NeuralError::ZeroDimension);
         }
-        dims.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        dims.iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
             .ok_or(NeuralError::ElementCountOverflow)?;
         Ok(Self(dims))
     }
@@ -82,7 +83,10 @@ impl Tensor<f32> {
                 Domain::NonNegativeFinite => v.is_finite() && v >= 0.0,
             };
             if !valid {
-                return Err(NeuralError::ValueOutsideDomain { index, required: domain });
+                return Err(NeuralError::ValueOutsideDomain {
+                    index,
+                    required: domain,
+                });
             }
         }
         Ok(())
@@ -91,21 +95,33 @@ impl Tensor<f32> {
     /// Pure host reference calculation. Not a certified FP32 kernel.
     pub fn add(&self, rhs: &Self) -> Result<Self, NeuralError> {
         let shape = Operation::Add.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
-        let values = self.values.iter().zip(&rhs.values).map(|(&a, &b)| a + b).collect();
+        let values = self
+            .values
+            .iter()
+            .zip(&rhs.values)
+            .map(|(&a, &b)| a + b)
+            .collect();
         Self::new(shape, values)
     }
 
     /// Pure elementwise host reference calculation, without broadcasting.
     pub fn mul(&self, rhs: &Self) -> Result<Self, NeuralError> {
         let shape = Operation::Mul.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
-        let values = self.values.iter().zip(&rhs.values).map(|(&a, &b)| a * b).collect();
+        let values = self
+            .values
+            .iter()
+            .zip(&rhs.values)
+            .map(|(&a, &b)| a * b)
+            .collect();
         Self::new(shape, values)
     }
 
     /// Matrix multiplication of two rank-2 tensors. Accumulates left to right.
     pub fn matmul(&self, rhs: &Self) -> Result<Self, NeuralError> {
         let shape = Operation::MatMul.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
-        let [m, k] = self.shape.dims() else { unreachable!("shape checked above") };
+        let [m, k] = self.shape.dims() else {
+            unreachable!("shape checked above")
+        };
         let n = rhs.shape.dims()[1];
         let mut values = vec![0.0f32; shape.element_count()];
         for row in 0..*m {
@@ -124,21 +140,26 @@ impl Tensor<f32> {
     pub fn relu(&self) -> Self {
         Self {
             shape: self.shape.clone(),
-            values: self.values.iter().map(|&v| {
-                if v.is_nan() || v > 0.0 { v } else { 0.0 }
-            }).collect(),
+            values: self
+                .values
+                .iter()
+                .map(|&v| if v.is_nan() || v > 0.0 { v } else { 0.0 })
+                .collect(),
         }
     }
 
     /// Reject negative and non-finite arguments, as specified by the IR domain.
     pub fn sqrt(&self) -> Result<Self, NeuralError> {
         self.validate_domain(Domain::NonNegativeFinite)?;
-        Self::new(self.shape.clone(), self.values.iter().map(|v| v.sqrt()).collect())
+        Self::new(
+            self.shape.clone(),
+            self.values.iter().map(|v| v.sqrt()).collect(),
+        )
     }
 
     /// Same values, new dimensions with the same element count.
     pub fn reshape(self, shape: Shape) -> Result<Self, NeuralError> {
-        Operation::Reshape(shape.clone()).infer_shape(&[self.shape.clone()])?;
+        Operation::Reshape(shape.clone()).infer_shape(std::slice::from_ref(&self.shape))?;
         Self::new(shape, self.values)
     }
 }

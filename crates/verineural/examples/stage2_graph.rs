@@ -41,7 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let expected = input_values.relu().sqrt()?;
     assert_eq!(expected.values(), &[0.0, 2.0, 3.0, 4.0]);
-    println!("IR nodes: {}, output: {:?}", graph.nodes().len(), graph.node(output)?.shape);
+    println!(
+        "IR nodes: {}, output: {:?}",
+        graph.nodes().len(),
+        graph.node(output)?.shape
+    );
     println!("Host reference output: {:?}", expected.values());
     Ok(())
 }

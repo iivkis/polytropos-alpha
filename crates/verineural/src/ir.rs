@@ -19,7 +19,10 @@ impl Domain {
             (self, required),
             (_, Self::Any)
                 | (Self::Finite, Self::Finite)
-                | (Self::NonNegativeFinite, Self::Finite | Self::NonNegativeFinite)
+                | (
+                    Self::NonNegativeFinite,
+                    Self::Finite | Self::NonNegativeFinite
+                )
         )
     }
 }
@@ -139,7 +142,9 @@ impl Operation {
                 for shape in inputs {
                     if shape.rank() != 2 {
                         return Err(NeuralError::RankMismatch {
-                            operation: self.name(), expected: 2, actual: shape.rank(),
+                            operation: self.name(),
+                            expected: 2,
+                            actual: shape.rank(),
                         });
                     }
                 }
@@ -147,7 +152,8 @@ impl Operation {
                 let b = inputs[1].dims();
                 if a[1] != b[0] {
                     return Err(NeuralError::InnerDimensionMismatch {
-                        left: a[1], right: b[0],
+                        left: a[1],
+                        right: b[0],
                     });
                 }
                 Shape::new(vec![a[0], b[1]])
@@ -314,7 +320,10 @@ impl NeuralGraph {
     /// Declare a symbolic input and its caller-supplied domain assumption.
     /// The assumption must be checked for actual values before execution.
     pub fn input(&mut self, shape: Shape, domain: Domain) -> NodeId {
-        let id = NodeId { graph: self.identity, index: self.nodes.len() };
+        let id = NodeId {
+            graph: self.identity,
+            index: self.nodes.len(),
+        };
         self.nodes.push(Node {
             id,
             operation: Operation::Input,
@@ -323,7 +332,9 @@ impl NeuralGraph {
             domain,
             contract: MathContract::new(Vec::new(), PortContract::new(shape, domain)),
             semantics: OperationSemantics {
-                ideal: Operation::Input, fp32: self.policy, gpu: GpuSemantics::NotLowered,
+                ideal: Operation::Input,
+                fp32: self.policy,
+                gpu: GpuSemantics::NotLowered,
             },
         });
         id
@@ -336,12 +347,19 @@ impl NeuralGraph {
         }
         if inputs.len() != op.arity() {
             return Err(NeuralError::WrongArity {
-                operation: op.name(), expected: op.arity(), actual: inputs.len(),
+                operation: op.name(),
+                expected: op.arity(),
+                actual: inputs.len(),
             });
         }
-        let source_nodes = inputs.iter().map(|&id| self.node(id))
+        let source_nodes = inputs
+            .iter()
+            .map(|&id| self.node(id))
             .collect::<Result<Vec<_>, _>>()?;
-        let shapes = source_nodes.iter().map(|n| n.shape.clone()).collect::<Vec<_>>();
+        let shapes = source_nodes
+            .iter()
+            .map(|n| n.shape.clone())
+            .collect::<Vec<_>>();
         let domains = source_nodes.iter().map(|n| n.domain).collect::<Vec<_>>();
         let shape = op.infer_shape(&shapes)?;
         let required = op.required_domain();
@@ -351,10 +369,16 @@ impl NeuralGraph {
             }
         }
         let contract = MathContract::new(
-            shapes.into_iter().map(|shape| PortContract::new(shape, required)).collect(),
+            shapes
+                .into_iter()
+                .map(|shape| PortContract::new(shape, required))
+                .collect(),
             PortContract::new(shape.clone(), op.infer_domain(&domains)),
         );
-        let id = NodeId { graph: self.identity, index: self.nodes.len() };
+        let id = NodeId {
+            graph: self.identity,
+            index: self.nodes.len(),
+        };
         self.nodes.push(Node {
             id,
             operation: op.clone(),
@@ -363,7 +387,9 @@ impl NeuralGraph {
             domain: contract.ensures.domain,
             contract,
             semantics: OperationSemantics {
-                ideal: op, fp32: self.policy, gpu: GpuSemantics::NotLowered,
+                ideal: op,
+                fp32: self.policy,
+                gpu: GpuSemantics::NotLowered,
             },
         });
         Ok(id)
@@ -403,19 +429,22 @@ impl NeuralGraph {
         let contract = module.contract();
         if inputs.len() != contract.requires.len() {
             return Err(NeuralError::ContractViolation {
-                module: module.name(), detail: "incorrect number of inputs",
+                module: module.name(),
+                detail: "incorrect number of inputs",
             });
         }
         for (&id, required) in inputs.iter().zip(&contract.requires) {
             let actual = self.node(id)?;
             if actual.shape != required.shape {
                 return Err(NeuralError::ShapeMismatch {
-                    expected: required.shape.clone(), actual: actual.shape.clone(),
+                    expected: required.shape.clone(),
+                    actual: actual.shape.clone(),
                 });
             }
             if !actual.domain.satisfies(required.domain) {
                 return Err(NeuralError::DomainNotEstablished {
-                    required: required.domain, actual: actual.domain,
+                    required: required.domain,
+                    actual: actual.domain,
                 });
             }
         }
@@ -425,16 +454,21 @@ impl NeuralGraph {
         let actual = candidate.node(output)?;
         if actual.shape != contract.ensures.shape {
             return Err(NeuralError::ShapeMismatch {
-                expected: contract.ensures.shape.clone(), actual: actual.shape.clone(),
+                expected: contract.ensures.shape.clone(),
+                actual: actual.shape.clone(),
             });
         }
         if !actual.domain.satisfies(contract.ensures.domain) {
             return Err(NeuralError::DomainNotEstablished {
-                required: contract.ensures.domain, actual: actual.domain,
+                required: contract.ensures.domain,
+                actual: actual.domain,
             });
         }
         candidate.modules.push(ModuleInvocation {
-            name: module.name(), inputs: inputs.to_vec(), output, contract: contract.clone(),
+            name: module.name(),
+            inputs: inputs.to_vec(),
+            output,
+            contract: contract.clone(),
         });
         *self = candidate;
         Ok(output)
