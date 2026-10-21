@@ -30,19 +30,19 @@ def reshape {n : Nat} (a : Tensor n) : Tensor n := a
 
 /-- Total access to a flat tensor. For valid Rust shapes, MatMul addresses
     lie in range; proving that correspondence is a separate obligation. -/
-def at {n : Nat} (a : Tensor n) (index : Nat) : Int :=
+def flatGet {n : Nat} (a : Tensor n) (index : Nat) : Int :=
   if h : index < n then a ⟨index, h⟩ else 0
 
 /-- Ideal integer row-major matrix multiplication. -/
 def matmul {m k n : Nat} (a : Tensor (m * k))
     (b : Tensor (k * n)) : Tensor (m * n) :=
   fun i => (List.range k).foldl
-    (fun sum j => sum + at a ((i.val / n) * k + j) * at b (j * n + i.val % n)) 0
+    (fun sum j => sum + flatGet a ((i.val / n) * k + j) * flatGet b (j * n + i.val % n)) 0
 
 /-- Ideal integer addition of a length-n bias to each of m rows. -/
 def biasAdd {m n : Nat} (a : Tensor (m * n))
     (b : Tensor n) : Tensor (m * n) :=
-  fun i => a i + at b (i.val % n)
+  fun i => a i + flatGet b (i.val % n)
 
 def Nonnegative {n : Nat} (a : Tensor n) : Prop :=
   ∀ i : Fin n, 0 ≤ a i

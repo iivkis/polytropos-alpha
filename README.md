@@ -4,7 +4,7 @@
 
 ## Состояние
 
-**Этап 2/10 проверен локально пользователем:** форматирование, Rust check, 9 тестов, Clippy и пример прошли. **Этап 3/10: базовый Lean 4 proof backend подтверждён локальным запуском:** 14 Rust-тестов пройдены, Clippy и `cargo check` успешны, Lean проверил 25 обязательств. После корректировки `rustfmt` повторный `fmt-check` прошёл. **Этап 4/10: LLVM NVPTX/CUDA backend подтверждён пользователем на NVIDIA GPU: 6/6 FP32 значений совпали с CPU; 17 тестов, Lean 25 обязательств, fmt/check/clippy пройдены.** **Этап 5/10: объединённый отчёт реализован в коде, локальные проверки пока не подтверждены.** GPU и IEEE-754 формально не доказаны.
+**Этап 2/10 проверен локально пользователем:** форматирование, Rust check, 9 тестов, Clippy и пример прошли. **Этап 3/10: базовый Lean 4 proof backend подтверждён локальным запуском:** 14 Rust-тестов пройдены, Clippy и `cargo check` успешны, Lean проверил 25 обязательств. После корректировки `rustfmt` повторный `fmt-check` прошёл. **Этап 4/10: LLVM NVPTX/CUDA backend подтверждён пользователем на NVIDIA GPU: 6/6 FP32 значений совпали с CPU; 17 тестов, Lean 25 обязательств, fmt/check/clippy пройдены.** **Этап 5/10: объединённый отчёт локально подтверждён пользователем (Lean + NVIDIA GPU + SHA-256 evidence bundle).** **Этап 6/10: примитивы MatMul, BiasAdd, Dense и residual FFN добавлены в код; локальная проверка ожидается.** GPU и IEEE-754 формально не доказаны.
 
 - `crates/verineural/` — импортируемая Rust-библиотека, не приложение.
 - `Tensor<T, Shape>` — владеющий данными тензор, проверяющий размеры и длину буфера.
@@ -52,6 +52,7 @@ task proof-stage3
 task gpu-stage4
 task cert-stage5
 task verify-stage5
+task neural-stage6
 ```
 
 **Поведение `task fmt-check`:** только при полностью чистом рабочем дереве запускаются `cargo fmt --all` и `cargo fmt --all -- --check`. Если rustfmt изменил отслеживаемые `.rs`, команда проверяет `origin/<текущая-ветка>`, добавляет только Rust-файлы, создаёт коммит `style(verineural): apply cargo fmt` и выполняет обычный fast-forward `git push` без `--force`. При грязном дереве, отставшей/опережающей ветке, ошибке форматирования или push происходит отказ; при отсутствии изменений коммит и push не выполняются. Прямой вызов `cargo fmt` и `task fmt` ничего автоматически не отправляет. При отказе push созданный локальный коммит сохраняется.
@@ -120,6 +121,26 @@ VERINEURAL_STAGE5_SHA256=PASTE_DIGEST task verify-stage5
 
 Этот этап не включает доказательство корректности lowering, памяти GPU, IEEE-754, или авторства JSON. Неподдерживаемые операции/отвергнутый Lean/несовпадение результатов прерывают выпуск отчёта. Для чистой локальной проверки при необходимости удалите прежний каталог `target/verineural/stage5` перед повторным прогоном.
 
+## Neural primitives: этап 6 (локальный GPU-прогон ожидается)
+
+Rust DSL расширен rank-2 row-major MatMul (`graph.matmul`) и прибавлением rank-1 bias к каждой строке (`graph.bias_add`, без произвольного broadcasting). Реализованы `Dense`, `ResidualAdd` и `ResidualFfn` в `crates/verineural/src/modules.rs`. Контракты проверяют точные формы; неверное построение модуля не меняет граф. Параметры являются обычными входами, а не зашитыми в GPU-выполнение константами.
+
+`ResidualFfn::new(batch, features, hidden)` принимает `X [batch, features]`, `W1 [features, hidden]`, `b1 [hidden]`, `W2 [hidden, features]`, `b2 [features]`. Результат: `X + (ReLU(X × W1 + b1) × W2 + b2)`. CPU reference независимо вычисляет эти операции над `Tensor<f32>`.
+
+```sh
+git pull --ff-only
+task fmt-check
+task check
+task test
+task clippy
+task neural-stage6
+```
+
+`neural-stage6` выполняет тот же IR через Lean 4 и NVPTX → PTX → CUDA и создаёт отдельный bundle в `target/verineural/stage6/`. Старые артефакты `task cert-stage5` не затрагиваются.
+
+**Граница гарантии:** Lean фиксирует MatMul/BiasAdd над идеальными `Int`, проверяет формы, интерфейсы модулей и поузловые равенства по определениям. Для обращения по индексам идеальная модель использует `flatGet` (при выходе за границы возвращает ноль); формального доказательства всех адресов матричного ядра и соответствия модели Rust/GPU нет. Поузловые равенства не доказывают численную корректность GPU MatMul, memory safety, rounding/FMA/FTZ или машинный код. Накопление матричной суммы слева направо; оптимизации tensor cores не применяются намеренно, но strict FP32 не доказан.
+
+**Пока не поддерживаются:** Softmax, Attention, Causal Mask, RMSNorm/LayerNorm, GQA/MHA, MoE, Top-K, KV Cache, backward.
 ## Git-процесс
 
 Изменения интегрируются в `main` **только fast-forward**, без pull request, merge-коммитов, squash и force push. Полные правила для агентов — в корневом [AGENTS.md](AGENTS.md).

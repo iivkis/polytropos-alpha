@@ -95,3 +95,8 @@ tasks:
     desc: Recheck Stage 5 SHA-256 manifest and Lean source (developer-run)
     cmds:
       - cargo run -p verineural --example stage5_verify
+
+  neural-stage6:
+    desc: Execute Stage 6 residual FFN via Lean + CUDA and produce an evidence bundle (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage6_ffn
