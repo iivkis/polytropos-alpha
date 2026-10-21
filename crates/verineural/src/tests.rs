@@ -427,13 +427,13 @@ fn stage6_bias_shape_validation_and_cpu_broadcast() {
     assert_eq!(matrix.bias_add(&bias).unwrap().values(), &[0., 2., 5., 3., 5., 8.]);
     assert!(matches!(
         matrix.bias_add(&Tensor::new(shape(&[2]), vec![1_f32, 2.0]).unwrap()),
-        Err(NeuralError::InnerDimensionMismatch { .. })
+        Err(NeuralError::BiasWidthMismatch { .. })
     ));
     let mut graph = NeuralGraph::default();
     let a = graph.input(shape(&[2, 3]), Domain::Finite);
     let wrong = graph.input(shape(&[2]), Domain::Finite);
     let old_len = graph.nodes().len();
-    assert!(matches!(graph.bias_add(a, wrong), Err(NeuralError::InnerDimensionMismatch { .. })));
+    assert!(matches!(graph.bias_add(a, wrong), Err(NeuralError::BiasWidthMismatch { .. })));
     assert_eq!(graph.nodes().len(), old_len);
 }
 

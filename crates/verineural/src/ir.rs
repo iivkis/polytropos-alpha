@@ -176,9 +176,9 @@ impl Operation {
                     });
                 }
                 if inputs[0].dims()[1] != inputs[1].dims()[0] {
-                    return Err(NeuralError::InnerDimensionMismatch {
-                        left: inputs[0].dims()[1],
-                        right: inputs[1].dims()[0],
+                    return Err(NeuralError::BiasWidthMismatch {
+                        columns: inputs[0].dims()[1],
+                        bias_length: inputs[1].dims()[0],
                     });
                 }
                 Ok(inputs[0].clone())
