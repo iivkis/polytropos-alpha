@@ -14,7 +14,61 @@ use crate::{NeuralError, NeuralGraph, NodeId, Operation, Tensor};
 
 use super::cuda::CudaSession;
 
-const THREADS: usize = 256;
+/// Fusion is opt-in and experimental: Lean proves the ideal Int rewrite,
+/// while equivalence of LLVM/PTX/IEEE-754 machine execution is not proved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReluFusion {
+    Disabled,
+    Experimental,
+}
+
+impl ReluFusion {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Experimental => "experimental",
+        }
+    }
+}
+
+/// One-dimensional CUDA launch policy, validated before compilation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuLaunchConfig {
+    threads_per_block: u32,
+    relu_fusion: ReluFusion,
+}
+
+impl GpuLaunchConfig {
+    /// A deliberately narrow set of supported thread counts.
+    pub fn new(threads_per_block: u32, relu_fusion: ReluFusion) -> Result<Self, GpuError> {
+        if !matches!(threads_per_block, 64 | 128 | 256 | 512) {
+            return Err(GpuError::InvalidLaunch {
+                threads_per_block,
+            });
+        }
+        Ok(Self {
+            threads_per_block,
+            relu_fusion,
+        })
+    }
+
+    pub const fn threads_per_block(self) -> u32 {
+        self.threads_per_block
+    }
+
+    pub const fn relu_fusion(self) -> ReluFusion {
+        self.relu_fusion
+    }
+}
+
+impl Default for GpuLaunchConfig {
+    fn default() -> Self {
+        Self {
+            threads_per_block: 256,
+            relu_fusion: ReluFusion::Disabled,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum GpuError {
@@ -29,6 +83,9 @@ pub enum GpuError {
     InvalidInput {
         node: usize,
         reason: &'static str,
+    },
+    InvalidLaunch {
+        threads_per_block: u32,
     },
     MissingInput {
         node: usize,
@@ -59,6 +116,7 @@ impl fmt::Display for GpuError {
             }
             Self::InvalidInput { node, reason } => write!(f, "GPU input {node}: {reason}"),
             Self::MissingInput { node } => write!(f, "GPU input {node} is missing"),
+            Self::InvalidLaunch { threads_per_block } => write!(f, "unsupported CUDA threads per block: {threads_per_block} (use 64, 128, 256 or 512)"),
             Self::Io(err) => write!(f, "GPU I/O failure: {err}"),
             Self::LlvmFailed { diagnostics } => write!(f, "NVPTX lowering failed: {diagnostics}"),
             Self::Driver(message) => write!(f, "CUDA driver unavailable: {message}"),
@@ -97,6 +155,9 @@ pub struct GpuProgram {
     live_nodes: Vec<usize>,
     source_inputs: Vec<NodeId>,
     llvm_ir: String,
+    launch: GpuLaunchConfig,
+    // Relu index -> exclusive binary producer index. Only this producer is skipped.
+    fused_relus: BTreeMap<usize, usize>,
 }
 
 impl GpuProgram {
@@ -111,12 +172,34 @@ impl GpuProgram {
     pub fn output(&self) -> NodeId {
         self.output
     }
+
+    pub const fn launch_config(&self) -> GpuLaunchConfig {
+        self.launch
+    }
+
+    /// (consumer Relu node, producer binary node) pairs for the selected IR rewrite.
+    pub fn fused_relus(&self) -> &BTreeMap<usize, usize> {
+        &self.fused_relus
+    }
+
+    /// The Lean proof of the *ideal integer* fusion rule, not PTX/FP32 equivalence.
+    /// None when no fusion was actually applied.
+    pub fn fusion_lean_source(&self) -> Option<String> {
+        (!self.fused_relus.is_empty()).then(|| {
+            format!(
+                "{}\n\n{}",
+                include_str!("../../../lean/VeriNeural/Basic.lean"),
+                include_str!("../../../lean/VeriNeural/Fusion.lean"),
+            )
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct GpuEngine {
     llc: PathBuf,
     arch: String,
+    launch: GpuLaunchConfig,
 }
 
 impl Default for GpuEngine {
@@ -131,7 +214,14 @@ impl GpuEngine {
         Self {
             llc: llc.into(),
             arch: arch.into(),
+            launch: GpuLaunchConfig::default(),
         }
+    }
+
+    /// Select a checked launch policy. Fusion remains experimental.
+    pub fn with_launch_config(mut self, launch: GpuLaunchConfig) -> Self {
+        self.launch = launch;
+        self
     }
 
     /// Generate one kernel per arithmetic node in the reachable DAG.
@@ -175,6 +265,34 @@ impl GpuEngine {
                 matches!(node.operation, Operation::Input).then_some(node.id)
             })
             .collect::<Vec<_>>();
+        // A producer can be skipped only when its sole reachable use is the
+        // consuming Relu. Shared DAG nodes and Reshape aliases are left intact.
+        let mut uses = vec![0usize; graph.nodes().len()];
+        for &index in &live_nodes {
+            for id in &graph.nodes()[index].inputs {
+                uses[id.index()] += 1;
+            }
+        }
+        let mut fused_relus = BTreeMap::new();
+        if self.launch.relu_fusion == ReluFusion::Experimental {
+            for &index in &live_nodes {
+                let node = &graph.nodes()[index];
+                if !matches!(node.operation, Operation::Relu) {
+                    continue;
+                }
+                let producer_id = node.inputs[0];
+                let predecessor = graph.node(producer_id)?;
+                if uses[producer_id.index()] == 1
+                    && matches!(
+                        predecessor.operation,
+                        Operation::Add | Operation::Mul | Operation::BiasAdd
+                    )
+                {
+                    fused_relus.insert(index, producer_id.index());
+                }
+            }
+        }
+        let skipped = fused_relus.values().copied().collect::<BTreeSet<_>>();
         let mut llvm_ir = String::from(
             "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n\
              target triple = \"nvptx64-nvidia-cuda\"\n\n\
@@ -184,10 +302,20 @@ impl GpuEngine {
         );
         for &index in &live_nodes {
             let node = &graph.nodes()[index];
-            if matches!(node.operation, Operation::Input | Operation::Reshape(_)) {
+            if matches!(node.operation, Operation::Input | Operation::Reshape(_))
+                || skipped.contains(&index)
+            {
                 continue;
             }
-            if matches!(node.operation, Operation::MatMul) {
+            if let Some(&producer) = fused_relus.get(&index) {
+                let first = &graph.nodes()[producer];
+                let columns = if matches!(first.operation, Operation::BiasAdd) {
+                    first.shape.dims()[1]
+                } else {
+                    0
+                };
+                llvm_ir.push_str(&kernel_ir(index, &first.operation, columns, true));
+            } else if matches!(node.operation, Operation::MatMul) {
                 let left = &graph.nodes()[node.inputs[0].index()];
                 llvm_ir.push_str(&matmul_kernel_ir(
                     index,
@@ -200,7 +328,7 @@ impl GpuEngine {
                 } else {
                     0
                 };
-                llvm_ir.push_str(&kernel_ir(index, &node.operation, columns));
+                llvm_ir.push_str(&kernel_ir(index, &node.operation, columns, false));
             }
         }
         Ok(GpuProgram {
@@ -209,6 +337,8 @@ impl GpuEngine {
             live_nodes,
             source_inputs,
             llvm_ir,
+            launch: self.launch,
+            fused_relus,
         })
     }
 
@@ -289,8 +419,12 @@ impl GpuEngine {
         let ptx = fs::read(ptx_path)?;
         let mut session = CudaSession::new(&ptx)?;
         let mut buffers: BTreeMap<usize, u64> = BTreeMap::new();
+        let skipped = program.fused_relus.values().copied().collect::<BTreeSet<_>>();
 
         for &index in &program.live_nodes {
+            if skipped.contains(&index) {
+                continue;
+            }
             let node = &program.graph.nodes()[index];
             match node.operation {
                 Operation::Input => {
@@ -308,9 +442,14 @@ impl GpuEngine {
                 | Operation::MatMul
                 | Operation::BiasAdd
                 | Operation::Relu => {
-                    let first = buffers[&node.inputs[0].index()];
-                    let second = if node.inputs.len() == 2 {
-                        buffers[&node.inputs[1].index()]
+                    let inputs = if let Some(&producer) = program.fused_relus.get(&index) {
+                        &program.graph.nodes()[producer].inputs
+                    } else {
+                        &node.inputs
+                    };
+                    let first = buffers[&inputs[0].index()];
+                    let second = if inputs.len() == 2 {
+                        buffers[&inputs[1].index()]
                     } else {
                         0
                     };
@@ -321,7 +460,7 @@ impl GpuEngine {
                         second,
                         ptr,
                         node.shape.element_count(),
-                        THREADS as u32,
+                        program.launch.threads_per_block,
                     )?;
                     buffers.insert(index, ptr);
                 }
@@ -336,41 +475,47 @@ impl GpuEngine {
     }
 }
 
-fn kernel_ir(index: usize, op: &Operation, columns: usize) -> String {
+fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> String {
+    // This is a single output per CUDA thread, without shared memory or
+    // synchronization. The optional rewrite consumes two source buffers.
     let computation = match op {
-        Operation::Add => {
+        Operation::Add => String::from(
             "  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx\n\
                %y = load float, ptr addrspace(1) %bp, align 4\n\
-               %result = fadd float %x, %y\n"
-        }
-        Operation::Mul => {
+               %value = fadd float %x, %y\n",
+        ),
+        Operation::Mul => String::from(
             "  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx\n\
                %y = load float, ptr addrspace(1) %bp, align 4\n\
-               %result = fmul float %x, %y\n"
-        }
-        Operation::BiasAdd => {
-            return pointwise_kernel_ir(
-                index,
-                &format!(
-                    "  %col = urem i32 %idx, {columns}\n\
-                 %bp = getelementptr float, ptr addrspace(1) %b, i32 %col\n\
-                 %y = load float, ptr addrspace(1) %bp, align 4\n\
-                 %result = fadd float %x, %y\n"
-                ),
-            );
-        }
-        Operation::Relu => {
+               %value = fmul float %x, %y\n",
+        ),
+        Operation::BiasAdd => format!(
+            "  %col = urem i32 %idx, {columns}\n\
+               %bp = getelementptr float, ptr addrspace(1) %b, i32 %col\n\
+               %y = load float, ptr addrspace(1) %bp, align 4\n\
+               %value = fadd float %x, %y\n",
+        ),
+        Operation::Relu => String::from(
             "  %nan = fcmp uno float %x, %x\n\
                %positive = fcmp ogt float %x, 0.000000e+00\n\
                %keep = or i1 %nan, %positive\n\
-               %result = select i1 %keep, float %x, float 0.000000e+00\n"
-        }
-        _ => unreachable!("only arithmetic operations require kernels"),
+               %value = select i1 %keep, float %x, float 0.000000e+00\n",
+        ),
+        _ => unreachable!("only supported pointwise operations require this kernel"),
     };
-    pointwise_kernel_ir(index, computation)
+    let tail = if fuse_relu {
+        "  %nan_fused = fcmp uno float %value, %value\n\
+           %positive_fused = fcmp ogt float %value, 0.000000e+00\n\
+           %keep_fused = or i1 %nan_fused, %positive_fused\n\
+           %fused_result = select i1 %keep_fused, float %value, float 0.000000e+00\n"
+    } else {
+        ""
+    };
+    let result = if fuse_relu { "%fused_result" } else { "%value" };
+    pointwise_kernel_ir(index, &format!("{computation}{tail}"), result)
 }
 
-fn pointwise_kernel_ir(index: usize, computation: &str) -> String {
+fn pointwise_kernel_ir(index: usize, computation: &str, result: &str) -> String {
     format!(
         "define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{\n\
          entry:\n\
@@ -386,7 +531,7 @@ fn pointwise_kernel_ir(index: usize, computation: &str) -> String {
            %x = load float, ptr addrspace(1) %ap, align 4\n\
          {computation}\
            %op = getelementptr float, ptr addrspace(1) %out, i32 %idx\n\
-           store float %result, ptr addrspace(1) %op, align 4\n\
+           store float {result}, ptr addrspace(1) %op, align 4\n\
            br label %done\n\
          done:\n\
            ret void\n\
