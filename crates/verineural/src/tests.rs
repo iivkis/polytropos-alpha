@@ -498,3 +498,15 @@ fn stage6_dense_and_residual_contracts_are_checked() {
     assert_eq!(graph.nodes().len(), previous_nodes);
     assert!(ResidualFfn::new(2, 0, 3).is_err());
 }
+
+#[test]
+fn stage6_cpu_ffn_oracle_has_expected_concrete_values() {
+    let x = Tensor::new(shape(&[2, 2]), vec![1_f32, 2., 3., 4.]).unwrap();
+    let w1 = Tensor::new(shape(&[2, 3]), vec![1_f32, 0., 1., 0., 1., 1.]).unwrap();
+    let b1 = Tensor::new(shape(&[3]), vec![-1_f32, 0., 1.]).unwrap();
+    let w2 = Tensor::new(shape(&[3, 2]), vec![1_f32, 0., 0., 1., 1., 1.]).unwrap();
+    let b2 = Tensor::new(shape(&[2]), vec![0_f32, 1.]).unwrap();
+    let hidden = x.matmul(&w1).unwrap().bias_add(&b1).unwrap().relu();
+    let y = x.add(&hidden.matmul(&w2).unwrap().bias_add(&b2).unwrap()).unwrap();
+    assert_eq!(y.values(), &[5., 9., 13., 17.]);
+}

@@ -1,7 +1,7 @@
 //! Stage 6: Residual FFN from one Rust graph to Lean + NVIDIA GPU + evidence.
 use std::path::Path;
 
-use verineural::{CertificateEngine, Domain, NeuralGraph, NeuralModule, ResidualFfn, Shape, Tensor};
+use verineural::{CertificateEngine, Domain, NeuralGraph, ResidualFfn, Shape, Tensor};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shape = Shape::new(vec![2, 2])?;
