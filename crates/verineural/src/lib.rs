@@ -3,14 +3,18 @@
 //! Stage 3 adds Lean 4 proof generation and checker integration for a bounded
 //! ideal-integer fragment (Add, Mul, Relu, Reshape). Shape, pointwise semantics
 //! and compositional nonnegativity are verified under explicit input hypotheses.
-//! No IEEE-754, Rust executable, or GPU correctness is claimed.
+//! Stage 4 adds experimental LLVM NVPTX + CUDA Driver execution on NVIDIA GPUs.
+//! Neither IEEE-754 behavior nor the generated GPU binary is formally certified.
 
+mod cuda;
 mod error;
+mod gpu;
 mod ir;
 mod proof;
 mod tensor;
 
 pub use error::NeuralError;
+pub use gpu::{GpuEngine, GpuError, GpuProgram};
 pub use ir::{
     Domain, FP32Policy, FmaMode, GpuSemantics, MathContract, ModuleInvocation, NeuralGraph,
     NeuralModule, Node, NodeId, Operation, OperationSemantics, PortContract, ReductionOrder,

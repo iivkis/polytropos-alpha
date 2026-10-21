@@ -341,3 +341,77 @@ fn proof_generator_rejects_handles_from_other_graphs() {
         Err(ProofError::InvalidGraph(NeuralError::InvalidNode))
     ));
 }
+
+
+#[test]
+fn gpu_compiler_lowers_arithmetic_and_reshape_to_a_reachable_kernel_dag() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2, 2]), Domain::Finite);
+    let b = graph.input(shape(&[2, 2]), Domain::Finite);
+    let active = graph.relu(a).unwrap();
+    let flat = graph.reshape(active, shape(&[4])).unwrap();
+    let restored = graph.reshape(flat, shape(&[2, 2])).unwrap();
+    let sum = graph.add(restored, b).unwrap();
+    let product = graph.mul(sum, active).unwrap();
+
+    let program = GpuEngine::default().compile(&graph, product).unwrap();
+    assert_eq!(program.source_inputs(), &[a, b]);
+    let ir = program.llvm_ir();
+    assert!(ir.contains("target triple = \"nvptx64-nvidia-cuda\""));
+    assert!(ir.contains("define ptx_kernel void @vn_node_2"));
+    assert!(ir.contains("define ptx_kernel void @vn_node_5"));
+    assert!(ir.contains("define ptx_kernel void @vn_node_6"));
+    assert!(!ir.contains("define ptx_kernel void @vn_node_3"));
+    assert!(!ir.contains("define ptx_kernel void @vn_node_4"));
+    assert!(ir.contains("icmp ult i32 %idx, %length"));
+    assert!(ir.contains("fcmp uno float %x, %x"));
+    assert!(ir.contains("fadd float %x, %y"));
+    assert!(ir.contains("fmul float %x, %y"));
+    assert!(!ir.contains("fast "));
+}
+
+#[test]
+fn gpu_compiler_rejects_unsupported_operations_and_foreign_handles() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2, 2]), Domain::Any);
+    let b = graph.input(shape(&[2, 2]), Domain::Any);
+    let matmul = graph.matmul(a, b).unwrap();
+    assert!(matches!(
+        GpuEngine::default().compile(&graph, matmul),
+        Err(GpuError::UnsupportedOperation {
+            operation: "matmul",
+            ..
+        })
+    ));
+    let mut other = NeuralGraph::default();
+    let foreign = other.input(shape(&[2, 2]), Domain::Any);
+    assert!(matches!(
+        GpuEngine::default().compile(&graph, foreign),
+        Err(GpuError::InvalidGraph(NeuralError::InvalidNode))
+    ));
+}
+
+#[test]
+fn gpu_input_validation_fails_before_toolchain_or_driver_is_required() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let result = graph.relu(a).unwrap();
+    let engine = GpuEngine::new("missing-llc", "sm_52");
+    let program = engine.compile(&graph, result).unwrap();
+
+    let empty: Vec<(NodeId, Tensor<f32>)> = Vec::new();
+    assert!(matches!(
+        engine.execute(&program, &empty, std::path::Path::new("unused")),
+        Err(GpuError::MissingInput { .. })
+    ));
+    let invalid = Tensor::new(shape(&[2]), vec![-1.0f32, 2.0]).unwrap();
+    assert!(matches!(
+        engine.execute(&program, &[(a, invalid)], std::path::Path::new("unused")),
+        Err(GpuError::InvalidGraph(NeuralError::ValueOutsideDomain { .. }))
+    ));
+    let wrong = Tensor::new(shape(&[1]), vec![1.0f32]).unwrap();
+    assert!(matches!(
+        engine.execute(&program, &[(a, wrong)], std::path::Path::new("unused")),
+        Err(GpuError::InvalidGraph(NeuralError::ShapeMismatch { .. }))
+    ));
+}

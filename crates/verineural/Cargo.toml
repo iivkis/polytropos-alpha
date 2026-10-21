@@ -3,11 +3,12 @@ name = "verineural"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Importable Rust library for neural computation and formal verification (Semantic Neural IR and Lean proof stage)"
+description = "Importable Rust library for neural computation and formal verification (Semantic IR, Lean proof, and experimental LLVM NVPTX/CUDA stage)"
 publish = false
 
 [lib]
 name = "verineural"
 path = "src/lib.rs"
 
-# The stage-3 Lean proof engine uses only the Rust standard library.
+# Stage 4 still has no Rust dependencies; NVIDIA driver is loaded dynamically.
+# llc is supplied by flake.nix, and GPU execution requires a system NVIDIA driver.

@@ -52,3 +52,8 @@ tasks:
     desc: Generate and check the stage-3 Lean 4 proof (developer-run)
     cmds:
       - cargo run -p verineural --example stage3_proof
+
+  gpu-stage4:
+    desc: Lower IR to PTX and run the CUDA stage-4 example (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage4_gpu
