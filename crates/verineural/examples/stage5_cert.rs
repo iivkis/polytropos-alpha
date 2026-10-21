@@ -2,8 +2,8 @@
 use std::path::Path;
 
 use verineural::{
-    CertificateEngine, Domain, MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, PortContract,
-    Shape, Tensor,
+    CertificateEngine, Domain, MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId,
+    PortContract, Shape, Tensor,
 };
 
 struct ReluLayer {
@@ -64,6 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Report: {}/report.json", report.directory.display());
     println!("SHA256SUMS sha256: {}", report.manifest_sha256);
-    println!("Evidence: mathematical/composition=proven (ideal Int), numerical=validated, compilation=trusted, FP32/machine code=unsupported");
+    println!(
+        "Evidence: mathematical/composition=proven (ideal Int), numerical=validated, compilation=trusted, FP32/machine code=unsupported"
+    );
     Ok(())
 }
