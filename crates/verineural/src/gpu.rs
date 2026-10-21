@@ -421,6 +421,9 @@ impl GpuEngine {
         let mut buffers: BTreeMap<usize, u64> = BTreeMap::new();
         let skipped = program.fused_relus.values().copied().collect::<BTreeSet<_>>();
 
+        // Stage all input uploads and allocate all output buffers *before*
+        // graph capture. No CUDA allocation or host transfer is allowed while
+        // capture is active. Reshape remains a zero-copy alias.
         for &index in &program.live_nodes {
             if skipped.contains(&index) {
                 continue;
@@ -442,30 +445,57 @@ impl GpuEngine {
                 | Operation::MatMul
                 | Operation::BiasAdd
                 | Operation::Relu => {
-                    let inputs = if let Some(&producer) = program.fused_relus.get(&index) {
-                        &program.graph.nodes()[producer].inputs
-                    } else {
-                        &node.inputs
-                    };
-                    let first = buffers[&inputs[0].index()];
-                    let second = if inputs.len() == 2 {
-                        buffers[&inputs[1].index()]
-                    } else {
-                        0
-                    };
                     let ptr = session.allocate(node.shape.element_count())?;
-                    session.launch(
-                        &format!("vn_node_{index}"),
-                        first,
-                        second,
-                        ptr,
-                        node.shape.element_count(),
-                        program.launch.threads_per_block,
-                    )?;
                     buffers.insert(index, ptr);
                 }
                 _ => unreachable!("the compilation pass rejected unsupported nodes"),
             }
+        }
+
+        // Every actual kernel becomes a node in one CUDA Graph. For input-only
+        // graphs there are no kernels to launch, only explicit-stream copies.
+        let kernel_count = program
+            .live_nodes
+            .iter()
+            .filter(|&&index| {
+                !skipped.contains(&index)
+                    && !matches!(
+                        program.graph.nodes()[index].operation,
+                        Operation::Input | Operation::Reshape(_)
+                    )
+            })
+            .count();
+        if kernel_count > 0 {
+            session.begin_graph()?;
+            for &index in &program.live_nodes {
+                if skipped.contains(&index) {
+                    continue;
+                }
+                let node = &program.graph.nodes()[index];
+                if matches!(node.operation, Operation::Input | Operation::Reshape(_)) {
+                    continue;
+                }
+                let inputs = if let Some(&producer) = program.fused_relus.get(&index) {
+                    &program.graph.nodes()[producer].inputs
+                } else {
+                    &node.inputs
+                };
+                let first = buffers[&inputs[0].index()];
+                let second = if inputs.len() == 2 {
+                    buffers[&inputs[1].index()]
+                } else {
+                    0
+                };
+                session.launch(
+                    &format!("vn_node_{index}"),
+                    first,
+                    second,
+                    buffers[&index],
+                    node.shape.element_count(),
+                    program.launch.threads_per_block,
+                )?;
+            }
+            session.launch_graph()?;
         }
         session.synchronize()?;
         let last = program.graph.node(program.output)?;
