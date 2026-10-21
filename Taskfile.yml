@@ -58,3 +58,13 @@ tasks:
     desc: Lower IR to PTX and run the CUDA stage-4 example (developer-run)
     cmds:
       - cargo run -p verineural --example stage4_gpu
+
+  cert-stage5:
+    desc: Run Lean, CUDA and the Stage 5 evidence bundle (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage5_cert
+
+  verify-stage5:
+    desc: Recheck Stage 5 SHA-256 manifest and Lean source (developer-run)
+    cmds:
+      - cargo run -p verineural --example stage5_verify

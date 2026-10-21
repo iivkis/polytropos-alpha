@@ -4,8 +4,10 @@
 //! ideal-integer fragment (Add, Mul, Relu, Reshape). Shape, pointwise semantics
 //! and compositional nonnegativity are verified under explicit input hypotheses.
 //! Stage 4 adds experimental LLVM NVPTX + CUDA Driver execution on NVIDIA GPUs.
+//! Stage 5 emits an integrity-checked evidence bundle with separate assurance levels.
 //! Neither IEEE-754 behavior nor the generated GPU binary is formally certified.
 
+mod certificate;
 mod cuda;
 mod error;
 mod gpu;
@@ -13,6 +15,7 @@ mod ir;
 mod proof;
 mod tensor;
 
+pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
 pub use gpu::{GpuEngine, GpuError, GpuProgram};
 pub use ir::{

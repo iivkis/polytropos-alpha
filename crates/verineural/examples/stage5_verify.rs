@@ -1,0 +1,14 @@
+//! Recheck a saved Stage 5 bundle without requiring a GPU run.
+//! Pin the SHA256SUMS digest from the original run separately if authenticity matters.
+use std::path::Path;
+
+use verineural::CertificateEngine;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = Path::new("target/verineural/stage5");
+    CertificateEngine::default().verify_bundle(dir)?;
+    println!("Bundle hash consistency: PASS");
+    println!("Saved Lean source: rechecked by Lean 4");
+    println!("No PTX semantic-preservation or GPU execution proof is implied.");
+    Ok(())
+}

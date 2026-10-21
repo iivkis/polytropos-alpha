@@ -21,6 +21,7 @@
           clippy
 
           go-task
+          coreutils # sha256sum for Stage 5 evidence integrity
 
           llvmPackages.llvm
           llvmPackages.clang

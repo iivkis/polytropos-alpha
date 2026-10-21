@@ -399,7 +399,17 @@ impl LeanProofEngine {
             fs::create_dir_all(parent)?;
         }
         fs::write(output_file, program.source())?;
-        let output = Command::new(&self.executable).arg(output_file).output()?;
+        self.check_file(output_file)?;
+        Ok(CheckedLean {
+            path: output_file.to_path_buf(),
+            theorem_names: program.theorems.clone(),
+            assumptions: program.assumptions.clone(),
+        })
+    }
+
+    /// Rerun the trusted Lean checker for a saved file.
+    pub fn check_file(&self, source_file: &Path) -> Result<(), ProofError> {
+        let output = Command::new(&self.executable).arg(source_file).output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !output.status.success() || !stdout.trim().is_empty() || !stderr.trim().is_empty() {
@@ -410,13 +420,9 @@ impl LeanProofEngine {
                 ),
             });
         }
-        Ok(CheckedLean {
-            path: output_file.to_path_buf(),
-            theorem_names: program.theorems.clone(),
-            assumptions: program.assumptions.clone(),
-        })
+        Ok(())
     }
-}
+
 
 fn shape_expr(shape: &Shape) -> String {
     let dims = shape
