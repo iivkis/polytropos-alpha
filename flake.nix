@@ -1,5 +1,5 @@
 {
-  description = "polytropos-alpha: Rust, LLVM NVPTX, CUDA, Lean 4 and Task development environment";
+  description = "polytropos-alpha: Rust, LLVM NVPTX, CUDA, Lean 4, Graphviz and Task development environment";
 
   # Keep the project's existing nixpkgs / flake.lock pin.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -25,6 +25,7 @@
           go-task
           coreutils # sha256sum for evidence manifests
           binutils
+          graphviz # dot renderer for architecture.dot -> architecture.png
 
           llvmPackages.llvm
           llvmPackages.clang
@@ -81,10 +82,11 @@
           fi
           unset cuda_driver_dir
 
-          echo "VeriNeural devShell: Rust / LLVM / Lean 4 / CUDA / Task"
+          echo "VeriNeural devShell: Rust / LLVM / Lean 4 / CUDA / Graphviz / Task"
           echo "GPU execution requires a compatible host NVIDIA driver."
           echo "nsys=$(command -v nsys || echo unavailable)"
           echo "ncu=$(command -v ncu || echo unavailable)"
+          echo "dot=$(command -v dot || echo unavailable)"
           echo "Use 'task --list' to see local commands."
         '';
       };
