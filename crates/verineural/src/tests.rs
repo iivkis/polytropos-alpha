@@ -1635,3 +1635,182 @@ fn p0_p1_bounded_scan_invariant_fails_closed_without_actual_proof() {
         Err(ProofError::InvalidGoalName)
     ));
 }
+
+struct ParametricMatMul {
+    signature: ParametricSignature,
+}
+
+impl ParametricMatMul {
+    fn new() -> Self {
+        let symbolic = |dims: Vec<Dimension>| {
+            SymbolicPort::new(SymbolicShape::new(dims), Domain::NonNegativeFinite)
+        };
+        Self {
+            signature: ParametricSignature {
+                inputs: vec![
+                    symbolic(vec![Dimension::Symbol("batch"), Dimension::Symbol("inner")]),
+                    symbolic(vec![Dimension::Symbol("inner"), Dimension::Symbol("width")]),
+                ],
+                output: SymbolicPort::new(
+                    SymbolicShape::new(vec![
+                        Dimension::Symbol("batch"),
+                        Dimension::Symbol("width"),
+                    ]),
+                    Domain::Any,
+                ),
+                constraints: vec![
+                    DimensionConstraint::AtLeast("batch", 2),
+                    DimensionConstraint::AtMost("inner", 16),
+                    DimensionConstraint::MultipleOf("width", 2),
+                ],
+                claims: vec![ContractClaim::Nonnegative],
+            },
+        }
+    }
+}
+
+impl ParametricModule for ParametricMatMul {
+    fn name(&self) -> &'static str {
+        "consumer_generic_matmul"
+    }
+
+    fn semantic_version(&self) -> &'static str {
+        "1.0"
+    }
+
+    fn signature(&self) -> &ParametricSignature {
+        &self.signature
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.matmul(inputs[0], inputs[1])
+    }
+}
+
+#[test]
+fn p1_symbolic_specializations_share_lean_and_gpu_lowering_without_source_edits() {
+    let mut graph = NeuralGraph::default();
+    let module = ParametricMatMul::new();
+    let a0 = graph.input(shape(&[2, 3]), Domain::NonNegativeFinite);
+    let b0 = graph.input(shape(&[3, 4]), Domain::NonNegativeFinite);
+    let a1 = graph.input(shape(&[5, 3]), Domain::NonNegativeFinite);
+    let b1 = graph.input(shape(&[3, 2]), Domain::NonNegativeFinite);
+    let (out0, env0) = graph.apply_parametric_module(&module, &[a0, b0]).unwrap();
+    let (out1, env1) = graph.apply_parametric_module(&module, &[a1, b1]).unwrap();
+    assert_eq!(graph.node(out0).unwrap().shape, shape(&[2, 4]));
+    assert_eq!(graph.node(out1).unwrap().shape, shape(&[5, 2]));
+    assert_eq!(env0.get("batch"), Some(2));
+    assert_eq!(env1.get("batch"), Some(5));
+    assert_eq!(env0.get("inner"), Some(3));
+    assert_eq!(env1.get("width"), Some(2));
+    assert_eq!(env0.get("unknown"), None);
+    assert_eq!(graph.modules().len(), 2);
+    assert_eq!(graph.modules()[0].semantic_version, "1.0");
+    assert_eq!(graph.modules()[1].semantic_version, "1.0");
+    assert_eq!(graph.node(out0).unwrap().domain, Domain::Any);
+
+    let proof = LeanProofEngine::default()
+        .generate_outputs(&graph, &[out0, out1])
+        .unwrap();
+    for name in ["module_0_claim_0", "module_1_claim_0"] {
+        assert!(proof.theorem_names().iter().any(|n| n == name));
+    }
+    assert!(proof.source().contains("VeriNeural.matmul_nonnegative"));
+    let gpu = GpuEngine::default();
+    for output in [out0, out1] {
+        let program = gpu.compile(&graph, output).unwrap();
+        assert!(program.llvm_ir().contains("define"));
+        assert!(!program.translation_plan().unwrap().kernels.is_empty());
+    }
+}
+
+#[test]
+fn p1_symbolic_dimensions_fail_closed_on_axes_bounds_and_unbound_results() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(&[2, 3]), Domain::NonNegativeFinite);
+    let incompatible = graph.input(shape(&[4, 4]), Domain::NonNegativeFinite);
+    let too_wide = graph.input(shape(&[3, 5]), Domain::NonNegativeFinite);
+    let valid = graph.input(shape(&[3, 4]), Domain::NonNegativeFinite);
+    let module = ParametricMatMul::new();
+    let baseline = (graph.nodes().len(), graph.modules().len());
+    for inputs in [&[a, incompatible][..], &[a, too_wide][..]] {
+        assert!(matches!(
+            graph.apply_parametric_module(&module, inputs),
+            Err(NeuralError::ContractViolation { .. })
+        ));
+    }
+    assert_eq!((graph.nodes().len(), graph.modules().len()), baseline);
+
+    let mut unbound = ParametricMatMul::new();
+    unbound.signature.output.shape.dims[1] = Dimension::Symbol("never_bound");
+    assert!(matches!(
+        graph.apply_parametric_module(&unbound, &[a, valid]),
+        Err(NeuralError::ContractViolation {
+            detail: "output uses unbound dimension symbol",
+            ..
+        })
+    ));
+    let mut illegal_constraint = ParametricMatMul::new();
+    illegal_constraint.signature.constraints =
+        vec![DimensionConstraint::MultipleOf("width", 0)];
+    assert!(matches!(
+        graph.apply_parametric_module(&illegal_constraint, &[a, valid]),
+        Err(NeuralError::ContractViolation {
+            detail: "dimension constraint requires positive bound",
+            ..
+        })
+    ));
+    let mut unknown_constraint = ParametricMatMul::new();
+    unknown_constraint.signature.constraints =
+        vec![DimensionConstraint::AtLeast("unknown", 1)];
+    assert!(matches!(
+        graph.apply_parametric_module(&unknown_constraint, &[a, valid]),
+        Err(NeuralError::ContractViolation {
+            detail: "constraint uses unbound dimension symbol",
+            ..
+        })
+    ));
+    assert_eq!((graph.nodes().len(), graph.modules().len()), baseline);
+}
+
+#[test]
+fn p1_symbolic_specialization_rolls_back_wrong_output_and_preserves_provenance() {
+    struct WrongOutput {
+        signature: ParametricSignature,
+    }
+    impl ParametricModule for WrongOutput {
+        fn name(&self) -> &'static str { "wrong_symbolic_output" }
+        fn semantic_version(&self) -> &'static str { "v1" }
+        fn signature(&self) -> &ParametricSignature { &self.signature }
+        fn build(
+            &self,
+            graph: &mut NeuralGraph,
+            inputs: &[NodeId],
+        ) -> Result<NodeId, NeuralError> {
+            graph.reshape(inputs[0], shape(&[6]))
+        }
+    }
+
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2, 3]), Domain::Any);
+    let module = WrongOutput {
+        signature: ParametricSignature {
+            inputs: vec![SymbolicPort::new(
+                SymbolicShape::new(vec![Dimension::Symbol("b"), Dimension::Fixed(3)]),
+                Domain::Any,
+            )],
+            output: SymbolicPort::new(
+                SymbolicShape::new(vec![Dimension::Symbol("b"), Dimension::Fixed(3)]),
+                Domain::Any,
+            ),
+            constraints: vec![],
+            claims: vec![],
+        },
+    };
+    assert!(matches!(
+        graph.apply_parametric_module(&module, &[x]),
+        Err(NeuralError::ShapeMismatch { .. })
+    ));
+    assert_eq!(graph.nodes().len(), 1);
+    assert!(graph.modules().is_empty());
+}

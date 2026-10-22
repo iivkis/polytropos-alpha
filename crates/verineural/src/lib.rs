@@ -40,6 +40,7 @@ mod primitive;
 mod proof;
 mod special;
 mod subnormal;
+mod symbolic;
 mod tensor;
 mod translation;
 
@@ -71,6 +72,8 @@ pub use special::{
     special_mul_boundary, special_relu_boundary,
 };
 pub use subnormal::{subnormal_add_exact_bits, subnormal_mul_rne_bits, subnormal_relu_bits};
+pub use symbolic::{Dimension, DimensionBindings, DimensionConstraint, ParametricModule,
+    ParametricSignature, SymbolicPort, SymbolicShape};
 pub use tensor::{Shape, Tensor, TensorShape};
 pub use translation::{
     TranslationError, TranslationKernel, TranslationKind, TranslationPlan, TranslationReport,

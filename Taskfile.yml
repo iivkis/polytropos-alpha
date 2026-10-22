@@ -86,6 +86,11 @@ tasks:
     cmds:
       - cargo run -p verineural --example scan_invariant
 
+  symbolic-shapes:
+    desc: Verify two consumer symbolic-shape specializations with Lean and LLVM NVPTX (no GPU execution)
+    cmds:
+      - cargo run -p verineural --example symbolic_shapes
+
   gpu-stage4:
     desc: Lower IR to PTX and run the CUDA stage-4 example (developer-run)
     cmds:
