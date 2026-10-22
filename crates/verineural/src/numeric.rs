@@ -251,8 +251,12 @@ impl ExactFp32Plan {
                 .join(" ")
         };
         let call = |index: usize| format!("(node_{index} {args})");
-        let proof =
-            |index: usize| format!("(node_{index}_integer_range {args} {})", conditions_for(index));
+        let proof = |index: usize| {
+            format!(
+                "(node_{index}_integer_range {args} {})",
+                conditions_for(index)
+            )
+        };
 
         for &index in &self.reachable {
             let node = &self.graph.nodes()[index];
