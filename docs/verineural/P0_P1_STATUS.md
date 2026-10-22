@@ -7,7 +7,7 @@ Implemented API slices:
 - **P02**: versioned `PrimitiveSpec` expressions built from existing typed operations, lowered to ordinary IR and hence supported Lean/GPU paths; opaque callbacks and new atomic math are not accepted.
 - **P04**: module bodies cannot capture undeclared external nodes, return an output they do not own, or introduce hidden inputs. Nested module bindings and rollback are checked.
 - **P05**: `ProofGoal` supports independently named nonnegativity and equality goals with separate checks. Global nonnegativity still uses the existing restricted module-composition proof.
-- **P06**: `verify_certified` reruns the Lean kernel with `#print axioms`, requiring no axioms for each theorem; it records the checker version. Stage 5 issue/replay now enforce this audit and the saved Lean version. Other evidence paths still need integration.
+- **P06**: `verify_certified` reruns Lean `#print axioms`, checks the exact theorem identities, and records every transitive axiom dependency. Only foundational `propext` is allowlisted as explicit Lean TCB; `sorryAx`, user axioms, `Classical.choice` and unreviewed axioms fail closed. Stage 5 issue/replay compare the saved checker version, axiom policy and actual dependencies. Other evidence paths still need integration.
 - **P07**: atomic named multi-output module boundary with per-port contracts, provenance and claim obligations. Global theorem composition across multi-output module boundaries is not implemented.
 
 Open requirements:

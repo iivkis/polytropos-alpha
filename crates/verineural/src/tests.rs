@@ -1116,13 +1116,14 @@ fn p0_claim_is_not_marked_proven_for_unknown_nonnegativity() {
 #[test]
 fn p0_extensible_composite_primitive_reuses_ir_and_proof() {
     let mut graph = NeuralGraph::default();
-    let x = graph.input(shape(&[2]), Domain::Any);
+    // Finite input is necessary for the FP32 NonNegativeFinite guarantee.
+    let x = graph.input(shape(&[2]), Domain::Finite);
     let expr = crate::PrimitiveExpr::Apply(Operation::Relu, vec![crate::PrimitiveExpr::Port(0)]);
     let spec = crate::PrimitiveSpec::new(
         "consumer_relu",
         "1.0",
         MathContract::new(
-            vec![port(&[2], Domain::Any)],
+            vec![port(&[2], Domain::Finite)],
             port(&[2], Domain::NonNegativeFinite),
         )
         .with_claim(crate::ContractClaim::Nonnegative),
@@ -1131,6 +1132,15 @@ fn p0_extensible_composite_primitive_reuses_ir_and_proof() {
     .unwrap();
     let out = spec.apply(&mut graph, &[x]).unwrap();
     assert_eq!(graph.modules()[0].semantic_version, "1.0");
+    // Invalid inputs still fail closed instead of inventing FP32 finiteness.
+    let unspecified = graph.input(shape(&[2]), Domain::Any);
+    assert!(matches!(
+        spec.apply(&mut graph, &[unspecified]),
+        Err(NeuralError::DomainNotEstablished {
+            required: Domain::Finite,
+            actual: Domain::Any
+        })
+    ));
     assert!(
         LeanProofEngine::default()
             .generate(&graph, out)

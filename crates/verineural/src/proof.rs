@@ -114,11 +114,54 @@ pub struct ProofGoal {
     pub kind: ProofGoalKind,
 }
 
-/// Exact audit result for a pinned checker invocation. Zero admitted axioms.
+/// The certified policy admits Lean's foundational `propext` axiom as TCB.
+/// Additional axioms require an explicit policy review.
+const ALLOWED_LEAN_AXIOMS: &[&str] = &["propext"];
+
+/// Exact audit result, including allowed transitive axiom dependencies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeanAxiomAudit {
     pub lean_version: String,
     pub theorem_names: Vec<String>,
+    pub axiom_dependencies: BTreeMap<String, Vec<String>>,
+}
+
+
+/// Require one exact Lean response for every expected theorem.
+/// Fail closed on malformed output or any non-allowlisted dependency.
+fn parse_axiom_report(
+    stdout: &str,
+    theorems: &[String],
+) -> Result<BTreeMap<String, Vec<String>>, ProofError> {
+    let lines = stdout.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>();
+    if lines.len() != theorems.len() {
+        return Err(ProofError::LeanRejected { details: "unexpected axiom report length".into() });
+    }
+    let mut dependencies = BTreeMap::new();
+    for (name, line) in theorems.iter().zip(lines) {
+        let expected = format!("'VeriNeural.Generated.{name}'");
+        let rest = line.strip_prefix(&expected).ok_or_else(|| ProofError::LeanRejected {
+            details: format!("unexpected axiom theorem identity: {line}"),
+        })?;
+        let axioms = if rest == " does not depend on any axioms" {
+            Vec::new()
+        } else if let Some(items) = rest.strip_prefix(" depends on axioms: [")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            items.split(", ").map(str::to_owned).collect::<Vec<_>>()
+        } else {
+            return Err(ProofError::LeanRejected { details: format!("malformed axiom report: {line}") });
+        };
+        if axioms.iter().any(|name| name.is_empty() || !ALLOWED_LEAN_AXIOMS.contains(&name.as_str())) {
+            return Err(ProofError::LeanRejected {
+                details: format!("unapproved axiom dependencies for {name}: {axioms:?}"),
+            });
+        }
+        if dependencies.insert(name.clone(), axioms).is_some() {
+            return Err(ProofError::LeanRejected { details: format!("duplicate theorem: {name}") });
+        }
+    }
+    Ok(dependencies)
 }
 
 /// Generated Lean source and a list of obligations. Generation is not proof.
@@ -904,8 +947,8 @@ impl LeanProofEngine {
         }
     }
 
-    /// Stronger checker profile: all transitive axioms must be absent. Lean's
-    /// kernel, its imported library and executable version remain explicit TCB.
+    /// Certified profile: only explicitly allowlisted foundational Lean axioms
+    /// are admitted. Checker, kernel and imported library remain explicit TCB.
     pub fn verify_certified(
         &self,
         program: &LeanProgram,
@@ -916,8 +959,8 @@ impl LeanProofEngine {
         Ok((checked, audit))
     }
 
-    /// Recheck transitive axioms in a saved Lean artifact. No user axiom,
-    /// sorryAx, native_decide assumption or other axiom can be admitted here.
+    /// Recheck saved theorems and record actual axioms. User axioms, `sorryAx`
+    /// and unreviewed axioms remain forbidden; `propext` is declared TCB.
     pub fn audit_file(
         &self,
         source_file: &Path,
@@ -948,27 +991,16 @@ impl LeanProofEngine {
         let result = result?;
         let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
-        let lines = stdout
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect::<Vec<_>>();
-        if !result.status.success()
-            || !stderr.trim().is_empty()
-            || lines.len() != theorems.len()
-            || lines
-                .iter()
-                .any(|line| !line.contains("does not depend on any axioms"))
-        {
+        if !result.status.success() || !stderr.trim().is_empty() {
             return Err(ProofError::LeanRejected {
-                details: format!(
-                    "certified axiom audit failed; exit={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-                    result.status.code()
-                ),
+                details: format!("axiom audit failed: exit={:?}; stderr={stderr}", result.status.code()),
             });
         }
+        let axiom_dependencies = parse_axiom_report(&stdout, theorems)?;
         Ok(LeanAxiomAudit {
             lean_version: version,
             theorem_names: theorems.to_vec(),
+            axiom_dependencies,
         })
     }
 
@@ -1261,4 +1293,43 @@ fn emit_nonnegative_alias(
         "theorem {name} {proof_params} :\n  VeriNeural.Nonnegative {term} := by\n  exact {proof_term}\n\n"
     ));
     theorems.push(name);
+}
+
+#[cfg(test)]
+mod axiom_audit_tests {
+    use super::*;
+
+    fn names() -> Vec<String> {
+        vec!["node_2_nonnegative".into(), "node_3_shape".into()]
+    }
+
+    #[test]
+    fn propext_is_allowed_but_visible_in_dependencies() {
+        let stdout = "'VeriNeural.Generated.node_2_nonnegative' depends on axioms: [propext]\n\
+                      'VeriNeural.Generated.node_3_shape' does not depend on any axioms\n";
+        let deps = parse_axiom_report(stdout, &names()).unwrap();
+        assert_eq!(deps["node_2_nonnegative"], vec!["propext"]);
+        assert!(deps["node_3_shape"].is_empty());
+    }
+
+    #[test]
+    fn forbidden_axioms_and_forged_reports_fail_closed() {
+        for axiom in ["sorryAx", "user.hidden", "Classical.choice", "propext, sorryAx"] {
+            let stdout = format!(
+                "'VeriNeural.Generated.node_2_nonnegative' depends on axioms: [{axiom}]\n\
+                 'VeriNeural.Generated.node_3_shape' does not depend on any axioms\n"
+            );
+            assert!(parse_axiom_report(&stdout, &names()).is_err());
+        }
+        for stdout in [
+            "'VeriNeural.Generated.unexpected' does not depend on any axioms\n\
+             'VeriNeural.Generated.node_3_shape' does not depend on any axioms\n",
+            "'VeriNeural.Generated.node_2_nonnegative' does not depend on any axioms\n",
+            "'VeriNeural.Generated.node_2_nonnegative' does not depend on any axioms\n\
+             'VeriNeural.Generated.node_3_shape' does not depend on any axioms\n\
+             unexpected extra line\n",
+        ] {
+            assert!(parse_axiom_report(stdout, &names()).is_err());
+        }
+    }
 }

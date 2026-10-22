@@ -238,6 +238,9 @@ impl CertificateEngine {
                     "  \"gpu_launch\": {{\"execution\":\"cuda_graph_capture_nonblocking_stream\",\"threads_per_block\":{},\"relu_fusion\":\"{}\",\"applied_fusions\":{}}},\n",
                     "  \"theorems\": [{}],\n",
                     "  \"lean_hypotheses\": [{}],\n",
+                    "  \"lean_checker_version\": \"{}\",\n",
+                    "  \"lean_axiom_policy\": [\"propext\"],\n",
+                    "  \"lean_axiom_dependencies\": {{{}}},\n",
                     "  \"declared_input_domains\": [{}],\n",
                     "  \"compared_fp32_values\": {},\n",
                     "  \"artifacts\": [\n    {}\n  ],\n",
@@ -265,14 +268,11 @@ impl CertificateEngine {
                 program.fused_relus().len(),
                 theorem_names,
                 hypotheses,
+                escape_json(&audit.lean_version),
+                axiom_dependencies_json(&audit),
                 input_domains,
                 actual.values().len(),
                 artifacts,
-            );
-            let report = report.replace(
-                "\"lean_hypotheses\":",
-                &format!("\"lean_checker_version\": \"{}\",\n  \"lean_axiom_audit\": \"no-transitive-axioms\",\n  \"lean_hypotheses\":",
-                    escape_json(&audit.lean_version)),
             );
             fs::write(directory.join("report.json"), report)?;
             fs::write(directory.join(MANIFEST), manifest_contents(directory)?)?;
@@ -341,12 +341,19 @@ impl CertificateEngine {
             .collect::<Vec<_>>();
         let audit = self.proof.audit_file(&source_file, &names)?;
         let report = fs::read_to_string(directory.join("report.json"))?;
-        if !report.contains(&format!(
-            "\"lean_checker_version\": \"{}\"",
-            escape_json(&audit.lean_version),
-        )) {
+        let version = format!(
+            "\"lean_checker_version\": \"{}\"", escape_json(&audit.lean_version)
+        );
+        let policy = "\"lean_axiom_policy\": [\"propext\"]";
+        let dependencies = format!(
+            "\"lean_axiom_dependencies\": {{{}}}", axiom_dependencies_json(&audit)
+        );
+        if report.matches(&version).count() != 1
+            || report.matches(policy).count() != 1
+            || report.matches(&dependencies).count() != 1
+        {
             return Err(CertificateError::Integrity(
-                "saved report Lean version differs from current audited checker".into(),
+                "saved Lean version, axiom policy or dependencies disagree with audited proof".into(),
             ));
         }
         Ok(())
@@ -436,6 +443,14 @@ fn input_snapshot(graph: &NeuralGraph, inputs: &[(NodeId, Tensor<f32>)]) -> Stri
         text.push('\n');
     }
     text
+}
+
+fn axiom_dependencies_json(audit: &crate::LeanAxiomAudit) -> String {
+    audit.axiom_dependencies.iter().map(|(theorem, axioms)| {
+        let values = axioms.iter().map(|axiom| format!("\"{}\"", escape_json(axiom)))
+            .collect::<Vec<_>>().join(", ");
+        format!("\"{}\": [{}]", escape_json(theorem), values)
+    }).collect::<Vec<_>>().join(", ")
 }
 
 fn escape_json(value: &str) -> String {
