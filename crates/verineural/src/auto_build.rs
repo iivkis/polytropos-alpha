@@ -29,7 +29,10 @@ pub enum GpuRequirement {
 pub enum ArchitectureProofTask {
     Goal(ProofGoal),
     /// Prove every state of one explicitly unrolled finite scan.
-    FixedScanNonnegative { name: String, scan: FixedScan },
+    FixedScanNonnegative {
+        name: String,
+        scan: FixedScan,
+    },
 }
 
 impl ArchitectureProofTask {
@@ -76,16 +79,24 @@ impl Error for AutoBuildError {
     }
 }
 impl From<NeuralError> for AutoBuildError {
-    fn from(value: NeuralError) -> Self { Self::Graph(value) }
+    fn from(value: NeuralError) -> Self {
+        Self::Graph(value)
+    }
 }
 impl From<ProofError> for AutoBuildError {
-    fn from(value: ProofError) -> Self { Self::Proof(value) }
+    fn from(value: ProofError) -> Self {
+        Self::Proof(value)
+    }
 }
 impl From<GpuError> for AutoBuildError {
-    fn from(value: GpuError) -> Self { Self::Gpu(value) }
+    fn from(value: GpuError) -> Self {
+        Self::Gpu(value)
+    }
 }
 impl From<io::Error> for AutoBuildError {
-    fn from(value: io::Error) -> Self { Self::Io(value) }
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
 }
 
 /// The certified scope is the dependency closure of selected roots, including
@@ -136,7 +147,10 @@ fn check_port(
 ) -> Result<(), AutoBuildError> {
     let node = graph.node(id)?;
     if node.shape != port.shape || !node.domain.satisfies(port.domain) {
-        return Err(invalid(format!("{where_}: shape/domain mismatch at node {}", id.index())));
+        return Err(invalid(format!(
+            "{where_}: shape/domain mismatch at node {}",
+            id.index()
+        )));
     }
     Ok(())
 }
@@ -177,7 +191,12 @@ pub fn check_architecture_connectivity(
         for (&input, port) in node.inputs.iter().zip(&node.contract.requires) {
             check_port(graph, input, port, &format!("node {index} input"))?;
         }
-        check_port(graph, node.id, &node.contract.ensures, &format!("node {index} result"))?;
+        check_port(
+            graph,
+            node.id,
+            &node.contract.ensures,
+            &format!("node {index} result"),
+        )?;
     }
 
     for (index, module) in graph.modules().iter().enumerate() {
@@ -185,7 +204,9 @@ pub fn check_architecture_connectivity(
             || module.body_start >= graph.nodes().len()
             || module.output.index() < module.body_start
         {
-            return Err(invalid(format!("module {index} has malformed body or ports")));
+            return Err(invalid(format!(
+                "module {index} has malformed body or ports"
+            )));
         }
         for (&input, port) in module.inputs.iter().zip(&module.contract.requires) {
             if input.index() >= module.body_start {
@@ -194,11 +215,20 @@ pub fn check_architecture_connectivity(
             check_port(graph, input, port, &format!("module {index} input"))?;
             module_ports += 1;
         }
-        check_port(graph, module.output, &module.contract.ensures,
-            &format!("module {index} output"))?;
+        check_port(
+            graph,
+            module.output,
+            &module.contract.ensures,
+            &format!("module {index} output"),
+        )?;
         module_ports += 1;
-        check_body_edges(graph, module.body_start, module.output.index() + 1,
-            &module.inputs, &format!("module {index}"))?;
+        check_body_edges(
+            graph,
+            module.body_start,
+            module.output.index() + 1,
+            &module.inputs,
+            &format!("module {index}"),
+        )?;
     }
     for (index, module) in graph.multi_modules().iter().enumerate() {
         if module.inputs.len() != module.contract.inputs.len()
@@ -207,13 +237,22 @@ pub fn check_architecture_connectivity(
             || module.body_start >= module.body_end
             || module.body_end > graph.nodes().len()
         {
-            return Err(invalid(format!("multi-module {index} has malformed body or ports")));
+            return Err(invalid(format!(
+                "multi-module {index} has malformed body or ports"
+            )));
         }
         for (&input, port) in module.inputs.iter().zip(&module.contract.inputs) {
             if input.index() >= module.body_start {
-                return Err(invalid(format!("multi-module {index} captures a forward input")));
+                return Err(invalid(format!(
+                    "multi-module {index} captures a forward input"
+                )));
             }
-            check_port(graph, input, &port.port, &format!("multi-module {index} input"))?;
+            check_port(
+                graph,
+                input,
+                &port.port,
+                &format!("multi-module {index} input"),
+            )?;
             module_ports += 1;
         }
         let mut seen = BTreeSet::new();
@@ -222,13 +261,25 @@ pub fn check_architecture_connectivity(
                 || output.index() >= module.body_end
                 || !seen.insert(output.index())
             {
-                return Err(invalid(format!("multi-module {index} has invalid output identity")));
+                return Err(invalid(format!(
+                    "multi-module {index} has invalid output identity"
+                )));
             }
-            check_port(graph, output, &port.port, &format!("multi-module {index} output"))?;
+            check_port(
+                graph,
+                output,
+                &port.port,
+                &format!("multi-module {index} output"),
+            )?;
             module_ports += 1;
         }
-        check_body_edges(graph, module.body_start, module.body_end, &module.inputs,
-            &format!("multi-module {index}"))?;
+        check_body_edges(
+            graph,
+            module.body_start,
+            module.body_end,
+            &module.inputs,
+            &format!("multi-module {index}"),
+        )?;
     }
     Ok(ConnectivityEvidence {
         data_edges,
@@ -246,13 +297,17 @@ fn check_body_edges(
 ) -> Result<(), AutoBuildError> {
     for node in &graph.nodes()[start..end] {
         if matches!(node.operation, Operation::Input) {
-            return Err(invalid(format!("{instance}: hidden input {}", node.id.index())));
+            return Err(invalid(format!(
+                "{instance}: hidden input {}",
+                node.id.index()
+            )));
         }
         for &input in &node.inputs {
             if input.index() < start && !declared.contains(&input) {
                 return Err(invalid(format!(
                     "{instance}: undeclared capture {} -> {}",
-                    input.index(), node.id.index()
+                    input.index(),
+                    node.id.index()
                 )));
             }
         }
@@ -262,8 +317,14 @@ fn check_body_edges(
 
 #[derive(Clone, Debug)]
 pub enum PlannedGpu {
-    Supported { output: NodeId, program: Box<GpuProgram> },
-    Unsupported { output: NodeId, reason: String },
+    Supported {
+        output: NodeId,
+        program: Box<GpuProgram>,
+    },
+    Unsupported {
+        output: NodeId,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -327,12 +388,14 @@ impl ArchitectureAutoCompiler {
                 return Err(AutoBuildError::DuplicateTask(name.to_owned()));
             }
             let goals_in_scope = match task {
-                ArchitectureProofTask::Goal(goal) => scope.contains(&goal.output.index())
-                    && graph.node(goal.output).is_ok(),
-                ArchitectureProofTask::FixedScanNonnegative { scan, .. } =>
-                    scan.states.iter().chain(&scan.outputs).all(|id| {
-                        scope.contains(&id.index()) && graph.node(*id).is_ok()
-                    }),
+                ArchitectureProofTask::Goal(goal) => {
+                    scope.contains(&goal.output.index()) && graph.node(goal.output).is_ok()
+                }
+                ArchitectureProofTask::FixedScanNonnegative { scan, .. } => scan
+                    .states
+                    .iter()
+                    .chain(&scan.outputs)
+                    .all(|id| scope.contains(&id.index()) && graph.node(*id).is_ok()),
             };
             if !goals_in_scope {
                 return Err(invalid(format!(
@@ -340,17 +403,20 @@ impl ArchitectureAutoCompiler {
                 )));
             }
             let program = match task {
-                ArchitectureProofTask::Goal(goal) =>
-                    self.proof.generate_goal(graph, goal)?,
-                ArchitectureProofTask::FixedScanNonnegative { name, scan } =>
-                    self.proof.generate_fixed_scan_nonnegative(graph, scan, name)?,
+                ArchitectureProofTask::Goal(goal) => self.proof.generate_goal(graph, goal)?,
+                ArchitectureProofTask::FixedScanNonnegative { name, scan } => self
+                    .proof
+                    .generate_fixed_scan_nonnegative(graph, scan, name)?,
             };
             goals.push((name.to_owned(), program));
         }
         let mut gpu = Vec::new();
         for &output in outputs {
             match self.gpu.compile(graph, output) {
-                Ok(program) => gpu.push(PlannedGpu::Supported { output, program: Box::new(program) }),
+                Ok(program) => gpu.push(PlannedGpu::Supported {
+                    output,
+                    program: Box::new(program),
+                }),
                 Err(error @ (GpuError::UnsupportedOperation { .. } | GpuError::NoKernelGraph))
                     if gpu_requirement == GpuRequirement::AllowUnsupported =>
                 {
@@ -390,26 +456,28 @@ impl ArchitectureAutoCompiler {
         let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
         let lean_dir = directory.join("lean");
         fs::create_dir_all(&lean_dir)?;
-        let (checked, audit) = self.proof.verify_certified(
-            &plan.architecture, &lean_dir.join("architecture.lean"),
-        )?;
+        let (checked, audit) = self
+            .proof
+            .verify_certified(&plan.architecture, &lean_dir.join("architecture.lean"))?;
         let mut goal_theorems = Vec::new();
         let mut goal_hypotheses = Vec::new();
-        let mut axiom_dependencies = audit.axiom_dependencies.iter()
+        let mut axiom_dependencies = audit
+            .axiom_dependencies
+            .iter()
             .map(|(theorem, axioms)| (format!("architecture.{theorem}"), axioms.clone()))
             .collect::<BTreeMap<_, _>>();
         for (index, (name, program)) in plan.goals.iter().enumerate() {
             let file = lean_dir.join(format!("goal_{index}_{name}.lean"));
             let (proof, goal_audit) = self.proof.verify_certified(program, &file)?;
             if goal_audit.lean_version != audit.lean_version {
-                return Err(invalid("Lean version changed during the architecture build"));
+                return Err(invalid(
+                    "Lean version changed during the architecture build",
+                ));
             }
             goal_theorems.push((name.clone(), proof.theorem_names.len()));
             goal_hypotheses.push((name.clone(), proof.assumptions));
             for (theorem, axioms) in goal_audit.axiom_dependencies {
-                axiom_dependencies.insert(
-                    format!("goal_{index}_{name}.{theorem}"), axioms,
-                );
+                axiom_dependencies.insert(format!("goal_{index}_{name}.{theorem}"), axioms);
             }
         }
 
@@ -417,14 +485,20 @@ impl ArchitectureAutoCompiler {
         for (index, target) in plan.gpu.iter().enumerate() {
             match target {
                 PlannedGpu::Supported { output, program } => {
-                    let ptx = self.gpu.lower(program, &directory.join(format!("gpu_{index}")))?;
+                    let ptx = self
+                        .gpu
+                        .lower(program, &directory.join(format!("gpu_{index}")))?;
                     output_evidence.push(OutputBuildEvidence {
-                        node: output.index(), ptx: Some(ptx), reason: None,
+                        node: output.index(),
+                        ptx: Some(ptx),
+                        reason: None,
                     });
                 }
                 PlannedGpu::Unsupported { output, reason } => {
                     output_evidence.push(OutputBuildEvidence {
-                        node: output.index(), ptx: None, reason: Some(reason.clone()),
+                        node: output.index(),
+                        ptx: None,
+                        reason: Some(reason.clone()),
                     });
                 }
             }
@@ -457,9 +531,12 @@ impl ArchitectureAutoCompiler {
             report.source_hypotheses,
         );
         for (name, count) in &report.goal_theorems {
-            let assumptions = report.goal_hypotheses.iter()
+            let assumptions = report
+                .goal_hypotheses
+                .iter()
                 .find(|(goal, _)| goal == name)
-                .map(|(_, hypotheses)| hypotheses.as_slice()).unwrap_or(&[]);
+                .map(|(_, hypotheses)| hypotheses.as_slice())
+                .unwrap_or(&[]);
             text.push_str(&format!(
                 "goal={name};lean_theorems={count};status=proven-ideal-Int;hypotheses={assumptions:?}\n"
             ));
@@ -471,12 +548,14 @@ impl ArchitectureAutoCompiler {
             if let Some(ptx) = &item.ptx {
                 text.push_str(&format!(
                     "gpu_output={};status=structurally-translated;ptx={}\n",
-                    item.node, ptx.display()
+                    item.node,
+                    ptx.display()
                 ));
             } else {
                 text.push_str(&format!(
                     "gpu_output={};status=unsupported;reason={}\n",
-                    item.node, item.reason.as_deref().unwrap_or("unknown")
+                    item.node,
+                    item.reason.as_deref().unwrap_or("unknown")
                 ));
             }
         }

@@ -5,17 +5,23 @@ use std::path::Path;
 
 use verineural::{
     ArchitectureAutoCompiler, ArchitectureProofTask, ContractClaim, Domain, GpuRequirement,
-    MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, PortContract,
-    ProofGoal, ProofGoalKind, Shape,
+    MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, PortContract, ProofGoal,
+    ProofGoalKind, Shape,
 };
 
 struct Activated {
     contract: MathContract,
 }
 impl NeuralModule for Activated {
-    fn name(&self) -> &'static str { "consumer_activation" }
-    fn semantic_version(&self) -> &'static str { "1.0" }
-    fn contract(&self) -> &MathContract { &self.contract }
+    fn name(&self) -> &'static str {
+        "consumer_activation"
+    }
+    fn semantic_version(&self) -> &'static str {
+        "1.0"
+    }
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
     fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
         graph.relu(inputs[0])
     }
@@ -25,9 +31,15 @@ struct Merge {
     contract: MathContract,
 }
 impl NeuralModule for Merge {
-    fn name(&self) -> &'static str { "consumer_merge" }
-    fn semantic_version(&self) -> &'static str { "1.0" }
-    fn contract(&self) -> &MathContract { &self.contract }
+    fn name(&self) -> &'static str {
+        "consumer_merge"
+    }
+    fn semantic_version(&self) -> &'static str {
+        "1.0"
+    }
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
     fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
         graph.add(inputs[0], inputs[1])
     }
@@ -43,9 +55,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_claim(ContractClaim::Nonnegative),
     };
     let merge = Merge {
-        contract: MathContract::new(
-            vec![nonnegative.clone(), nonnegative], any,
-        ).with_claim(ContractClaim::Nonnegative),
+        contract: MathContract::new(vec![nonnegative.clone(), nonnegative], any)
+            .with_claim(ContractClaim::Nonnegative),
     };
 
     let mut graph = NeuralGraph::default();
@@ -63,7 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     })];
     let report = ArchitectureAutoCompiler::default().build(
-        &graph, &[left, right, output], &tasks,
+        &graph,
+        &[left, right, output],
+        &tasks,
         GpuRequirement::AllOutputs,
         Path::new("target/verineural/auto-architecture"),
     )?;
@@ -80,6 +93,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("GPU output {}: {:?}", artifact.node, artifact.ptx);
     }
     println!("Report: {}", report.directory.join("report.txt").display());
-    println!("Assurance: Lean ideal-Int and structural PTX translation only; GPU machine semantics not proven");
+    println!(
+        "Assurance: Lean ideal-Int and structural PTX translation only; GPU machine semantics not proven"
+    );
     Ok(())
 }
