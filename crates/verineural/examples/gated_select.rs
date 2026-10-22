@@ -4,9 +4,9 @@
 use std::path::Path;
 
 use verineural::{
-    ContractClaim, Domain, GpuEngine, GpuError, LeanProofEngine,
-    MultiOutputContract, MultiOutputModule, NamedPortContract,
-    NeuralError, NeuralGraph, NodeId, PortContract, Shape, Tensor,
+    ContractClaim, Domain, GpuEngine, GpuError, LeanProofEngine, MultiOutputContract,
+    MultiOutputModule, NamedPortContract, NeuralError, NeuralGraph, NodeId, PortContract, Shape,
+    Tensor,
 };
 
 struct GatedUpdate {
@@ -14,12 +14,20 @@ struct GatedUpdate {
 }
 
 impl MultiOutputModule for GatedUpdate {
-    fn name(&self) -> &'static str { "consumer_gated_update" }
-    fn contract(&self) -> &MultiOutputContract { &self.interface }
-    fn semantic_version(&self) -> &'static str { "1.0" }
+    fn name(&self) -> &'static str {
+        "consumer_gated_update"
+    }
+    fn contract(&self) -> &MultiOutputContract {
+        &self.interface
+    }
+    fn semantic_version(&self) -> &'static str {
+        "1.0"
+    }
 
     fn build(
-        &self, graph: &mut NeuralGraph, inputs: &[NodeId],
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
     ) -> Result<Vec<NodeId>, NeuralError> {
         let mask = graph.positive_mask(inputs[1])?;
         let next_state = graph.select_positive(mask, inputs[1], inputs[0])?;
@@ -73,7 +81,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Lean checked {} theorems (H=2); assumptions={}; axioms={:?}",
         checked.theorem_names.len(),
         checked.assumptions.len(),
-        audit.axiom_dependencies.values().flatten()
+        audit
+            .axiom_dependencies
+            .values()
+            .flatten()
             .collect::<std::collections::BTreeSet<_>>()
     );
     println!(

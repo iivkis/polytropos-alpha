@@ -230,8 +230,7 @@ impl Operation {
                     && inputs[2].satisfies(Domain::NonNegativeFinite)
                 {
                     Domain::NonNegativeFinite
-                } else if inputs[1].satisfies(Domain::Finite)
-                    && inputs[2].satisfies(Domain::Finite)
+                } else if inputs[1].satisfies(Domain::Finite) && inputs[2].satisfies(Domain::Finite)
                 {
                     Domain::Finite
                 } else {

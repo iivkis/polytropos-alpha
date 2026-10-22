@@ -154,7 +154,11 @@ impl Tensor<f32> {
     pub fn positive_mask(&self) -> Self {
         Self {
             shape: self.shape.clone(),
-            values: self.values.iter().map(|&v| if v > 0.0 { 1.0 } else { 0.0 }).collect(),
+            values: self
+                .values
+                .iter()
+                .map(|&v| if v > 0.0 { 1.0 } else { 0.0 })
+                .collect(),
         }
     }
 
@@ -166,10 +170,17 @@ impl Tensor<f32> {
             yes.shape.clone(),
             no.shape.clone(),
         ])?;
-        let values = self.values.iter().zip(&yes.values).zip(&no.values)
-            .map(|((&mask, &on_true), &on_false)| {
-                if mask > 0.0 { on_true } else { on_false }
-            }).collect();
+        let values = self
+            .values
+            .iter()
+            .zip(&yes.values)
+            .zip(&no.values)
+            .map(
+                |((&mask, &on_true), &on_false)| {
+                    if mask > 0.0 { on_true } else { on_false }
+                },
+            )
+            .collect();
         Self::new(shape, values)
     }
 
