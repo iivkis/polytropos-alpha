@@ -82,7 +82,7 @@ theorem flatGet_nonnegative {n : Nat} (a : Tensor n)
   split
   · rename_i h
     exact ha ⟨index, h⟩
-  · exact le_refl 0
+  · decide
 
 /-- Every left-to-right partial sum of row-major MatMul is nonnegative. -/
 theorem matmul_nonnegative {m k n : Nat} (a : Tensor (m * k))
@@ -106,7 +106,7 @@ theorem matmul_nonnegative {m k n : Nat} (a : Tensor (m * k))
           (Int.mul_nonneg
             (flatGet_nonnegative a ha _)
             (flatGet_nonnegative b hb _))
-  exact fold_nonnegative (List.range k) 0 (le_refl 0)
+  exact fold_nonnegative (List.range k) 0 (by decide)
 
 /-- BiasAdd uses the same row-major broadcast as the semantic IR. -/
 theorem biasAdd_nonnegative {m n : Nat} (a : Tensor (m * n))
