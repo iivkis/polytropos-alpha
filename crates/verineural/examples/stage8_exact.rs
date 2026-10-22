@@ -409,7 +409,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     fs::write(
         root.join("range_contract.txt"),
         format!(
-            "module={}\nsource_fraction_bits={}\nsource_bound_ticks={}\n\
+            "module={}\nglobal_theorem=module_0_global_contract\n\
+             source_fraction_bits={}\nsource_bound_ticks={}\n\
              output_fraction_bits={}\nideal_bound_ticks={}\nepsilon_ticks={}\n\
              actual_bound_ticks={}\nepsilon={:.12e}\n",
             range_modules[0].name(),
@@ -500,7 +501,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, and reusable bounded scalar transfer rules; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, and a whole-ResidualFfn elementwise composition theorem; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }

@@ -191,6 +191,8 @@ fn modules_compose_by_output_contracts() {
         Domain::NonNegativeFinite
     );
     assert_eq!(graph.modules().len(), 2);
+    assert_eq!(graph.modules()[0].body_start, 1);
+    assert_eq!(graph.modules()[1].body_start, 2);
     assert_eq!(graph.nodes().len(), 3);
 }
 

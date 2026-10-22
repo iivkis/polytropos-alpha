@@ -319,11 +319,11 @@ impl CertificateEngine {
     }
 }
 
-/// Canonical within the v1 format: graph identity and process-global IDs do
+/// Canonical within the v2 format: graph identity and process-global IDs do
 /// not contribute to the fingerprint; complete semantics and interfaces do.
 fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
     let mut source = format!(
-        "verineural-ir-v1\noutput={}\nfp32={:?}\n",
+        "verineural-ir-v2\noutput={}\nfp32={:?}\n",
         output.index(),
         graph.policy()
     );
@@ -346,13 +346,14 @@ fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
     }
     for module in graph.modules() {
         source.push_str(&format!(
-            "module={};inputs={:?};output={};requires={:?};ensures={:?}\n",
+            "module={};inputs={:?};body_start={};output={};requires={:?};ensures={:?}\n",
             module.name,
             module
                 .inputs
                 .iter()
                 .map(|id| id.index())
                 .collect::<Vec<_>>(),
+            module.body_start,
             module.output.index(),
             module.contract.requires,
             module.contract.ensures,

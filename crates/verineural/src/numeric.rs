@@ -19,7 +19,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use crate::{LeanProofEngine, NeuralError, NeuralGraph, NodeId, Operation, ProofError, Tensor};
+use crate::{
+    LeanProofEngine, ModuleInvocation, NeuralError, NeuralGraph, NodeId, Operation, ProofError,
+    Tensor,
+};
 
 const EXACT_F32_INTEGER_LIMIT: i64 = 1 << 24;
 const SOURCE_INTEGER_LIMIT: i64 = 1 << 20;
@@ -1596,6 +1599,13 @@ enum RneRangeRule {
 }
 
 #[derive(Clone, Debug)]
+struct RneGlobalElement {
+    ideal: String,
+    actual: String,
+    proof: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct RneRangePlan {
     graph: NeuralGraph,
     output: NodeId,
@@ -2002,6 +2012,426 @@ impl RneRangePlan {
             .collect()
     }
 
+    fn module_in_slice(&self, module: &ModuleInvocation) -> bool {
+        self.contracts.contains_key(&module.output.index())
+            && module
+                .inputs
+                .iter()
+                .all(|input| self.contracts.contains_key(&input.index()))
+    }
+
+    fn module_internal_nodes(
+        &self,
+        module: &ModuleInvocation,
+    ) -> Result<Vec<usize>, NumericError> {
+        let boundary = module
+            .inputs
+            .iter()
+            .map(|node| node.index())
+            .collect::<BTreeSet<_>>();
+        let mut stack = vec![module.output.index()];
+        let mut internal = BTreeSet::new();
+
+        while let Some(index) = stack.pop() {
+            if boundary.contains(&index) {
+                continue;
+            }
+            if !self.contracts.contains_key(&index) {
+                return Err(NumericError::InvalidInput {
+                    node: index,
+                    reason: "module global range proof leaves the compiled output slice",
+                });
+            }
+            if index < module.body_start {
+                return Err(NumericError::InvalidInput {
+                    node: index,
+                    reason: "module global range proof reaches an undeclared preexisting node",
+                });
+            }
+            let node = &self.graph.nodes()[index];
+            if matches!(node.operation, Operation::Input) {
+                return Err(NumericError::InvalidInput {
+                    node: index,
+                    reason: "module global range proof reaches an undeclared input",
+                });
+            }
+            if internal.insert(index) {
+                stack.extend(node.inputs.iter().map(|input| input.index()));
+            }
+        }
+
+        Ok(internal.into_iter().collect())
+    }
+
+    fn global_element(
+        elements: &BTreeMap<(usize, usize), RneGlobalElement>,
+        node: NodeId,
+        element: usize,
+    ) -> Result<RneGlobalElement, NumericError> {
+        elements
+            .get(&(node.index(), element))
+            .cloned()
+            .ok_or(NumericError::InvalidInput {
+                node: node.index(),
+                reason: "module global range proof is missing an element dependency",
+            })
+    }
+
+    fn lean_conjunction(items: &[String]) -> String {
+        match items {
+            [] => "True".to_owned(),
+            [one] => one.clone(),
+            [first, rest @ ..] => {
+                format!("{first} /\\ ({})", Self::lean_conjunction(rest))
+            }
+        }
+    }
+
+    fn lean_conjunction_proof(items: &[String]) -> String {
+        match items {
+            [] => "True.intro".to_owned(),
+            [one] => one.clone(),
+            [first, rest @ ..] => {
+                format!("⟨{first}, {}⟩", Self::lean_conjunction_proof(rest))
+            }
+        }
+    }
+
+    fn module_global_source(
+        &self,
+        module_index: usize,
+        module: &ModuleInvocation,
+    ) -> Result<String, NumericError> {
+        let internal = self.module_internal_nodes(module)?;
+        let mut source = format!(
+            "-- Whole-module numerical composition for {}. Every flattened output element\n\
+             -- is derived from declared module-input contracts and explicit RNE witnesses.\n\
+             -- Dependencies before body_start={} are rejected unless declared as inputs.\n\
+             theorem module_{module_index}_global_contract\n",
+            module.name,
+            module.body_start
+        );
+        let mut elements = BTreeMap::<(usize, usize), RneGlobalElement>::new();
+        let mut seen_inputs = BTreeSet::new();
+
+        for &input in &module.inputs {
+            if !seen_inputs.insert(input.index()) {
+                continue;
+            }
+            let node = &self.graph.nodes()[input.index()];
+            let contract = self.contracts[&input.index()];
+            for element in 0..node.shape.element_count() {
+                let ideal = format!("ideal_{}_{}", input.index(), element);
+                let actual = format!("actual_{}_{}", input.index(), element);
+                let proof = format!("h_{}_{}", input.index(), element);
+                source.push_str(&format!(
+                    "    {{{ideal} {actual} : Int}}\n    \
+                     ({proof} : VeriNeural.ApproxContract {} {} {ideal} {actual})\n",
+                    contract.ideal_bound_ticks, contract.epsilon_ticks
+                ));
+                elements.insert(
+                    (input.index(), element),
+                    RneGlobalElement {
+                        ideal,
+                        actual,
+                        proof,
+                    },
+                );
+            }
+        }
+
+        for &index in &internal {
+            let node = &self.graph.nodes()[index];
+            match &self.rules[&index] {
+                RneRangeRule::Input => {
+                    return Err(NumericError::InvalidInput {
+                        node: index,
+                        reason: "module global range proof contains an internal Input node",
+                    });
+                }
+                RneRangeRule::Add {
+                    left_shift,
+                    right_shift,
+                    ..
+                }
+                | RneRangeRule::BiasAdd {
+                    left_shift,
+                    right_shift,
+                    ..
+                } => {
+                    let left_factor =
+                        binary32_step_i64(*left_shift).expect("validated range scale");
+                    let right_factor =
+                        binary32_step_i64(*right_shift).expect("validated range scale");
+                    let bias_columns = node.shape.dims().get(1).copied();
+                    for element in 0..node.shape.element_count() {
+                        let left =
+                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let right_index = if matches!(node.operation, Operation::BiasAdd) {
+                            element % bias_columns.expect("validated BiasAdd rank")
+                        } else {
+                            element
+                        };
+                        let right =
+                            Self::global_element(&elements, node.inputs[1], right_index)?;
+                        let actual = format!("actual_{index}_{element}");
+                        let shift = format!("shift_{index}_{element}");
+                        let proof = format!("h_{index}_{element}");
+                        source.push_str(&format!(
+                            "    {{{actual} : Int}} {{{shift} : Nat}}\n    \
+                             (hrne_{index}_{element} : VeriNeural.Binary32RneTick\n      \
+                               (({}) * {left_factor} + ({}) * {right_factor}) \
+                               {actual} {shift})\n",
+                            left.actual, right.actual
+                        ));
+                        elements.insert(
+                            (index, element),
+                            RneGlobalElement {
+                                ideal: format!(
+                                    "(({}) * {left_factor} + ({}) * {right_factor})",
+                                    left.ideal, right.ideal
+                                ),
+                                actual,
+                                proof,
+                            },
+                        );
+                    }
+                }
+                RneRangeRule::Mul { .. } => {
+                    for element in 0..node.shape.element_count() {
+                        let left =
+                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let right =
+                            Self::global_element(&elements, node.inputs[1], element)?;
+                        let actual = format!("actual_{index}_{element}");
+                        let shift = format!("shift_{index}_{element}");
+                        let proof = format!("h_{index}_{element}");
+                        source.push_str(&format!(
+                            "    {{{actual} : Int}} {{{shift} : Nat}}\n    \
+                             (hrne_{index}_{element} : VeriNeural.Binary32RneTick\n      \
+                               (({}) * ({})) {actual} {shift})\n",
+                            left.actual, right.actual
+                        ));
+                        elements.insert(
+                            (index, element),
+                            RneGlobalElement {
+                                ideal: format!("(({}) * ({}))", left.ideal, right.ideal),
+                                actual,
+                                proof,
+                            },
+                        );
+                    }
+                }
+                RneRangeRule::MatMul { .. } => {
+                    let left_shape = &self.graph.nodes()[node.inputs[0].index()].shape;
+                    let right_shape = &self.graph.nodes()[node.inputs[1].index()].shape;
+                    let inner = left_shape.dims()[1];
+                    let columns = right_shape.dims()[1];
+                    for element in 0..node.shape.element_count() {
+                        let row = element / columns;
+                        let column = element % columns;
+                        let mut ideal_sum = String::new();
+                        for j in 0..inner {
+                            let left_index = row * inner + j;
+                            let right_index = j * columns + column;
+                            let left =
+                                Self::global_element(&elements, node.inputs[0], left_index)?;
+                            let right =
+                                Self::global_element(&elements, node.inputs[1], right_index)?;
+                            let product = format!("product_{index}_{element}_{j}");
+                            let sum = format!("sum_{index}_{element}_{j}");
+                            let product_shift = format!("productShift_{index}_{element}_{j}");
+                            let sum_shift = format!("sumShift_{index}_{element}_{j}");
+                            let previous = if j == 0 {
+                                "0".to_owned()
+                            } else {
+                                format!("sum_{index}_{element}_{}", j - 1)
+                            };
+                            source.push_str(&format!(
+                                "    {{{product} {sum} : Int}}\n    \
+                                 {{{product_shift} {sum_shift} : Nat}}\n    \
+                                 (hproduct_{index}_{element}_{j} : \
+                                   VeriNeural.Binary32RneTick\n      \
+                                   (({}) * ({})) {product} {product_shift})\n    \
+                                 (hsum_{index}_{element}_{j} : \
+                                   VeriNeural.Binary32RneTick\n      \
+                                   ({previous} + {product}) {sum} {sum_shift})\n",
+                                left.actual, right.actual
+                            ));
+                            let term = format!("(({}) * ({}))", left.ideal, right.ideal);
+                            ideal_sum = if ideal_sum.is_empty() {
+                                term
+                            } else {
+                                format!("({ideal_sum} + {term})")
+                            };
+                        }
+                        elements.insert(
+                            (index, element),
+                            RneGlobalElement {
+                                ideal: ideal_sum,
+                                actual: format!("sum_{index}_{element}_{}", inner - 1),
+                                proof: format!("h_{index}_{element}"),
+                            },
+                        );
+                    }
+                }
+                RneRangeRule::Relu | RneRangeRule::Reshape => {
+                    for element in 0..node.shape.element_count() {
+                        let parent =
+                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let (ideal, actual) = if matches!(node.operation, Operation::Relu) {
+                            (
+                                format!("(max ({}) 0)", parent.ideal),
+                                format!("(max ({}) 0)", parent.actual),
+                            )
+                        } else {
+                            (parent.ideal, parent.actual)
+                        };
+                        elements.insert(
+                            (index, element),
+                            RneGlobalElement {
+                                ideal,
+                                actual,
+                                proof: format!("h_{index}_{element}"),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        let output_contract = self.contracts[&module.output.index()];
+        let output_node = &self.graph.nodes()[module.output.index()];
+        let mut goals = Vec::with_capacity(output_node.shape.element_count());
+        let mut output_proofs = Vec::with_capacity(output_node.shape.element_count());
+        for element in 0..output_node.shape.element_count() {
+            let output = Self::global_element(&elements, module.output, element)?;
+            goals.push(format!(
+                "VeriNeural.ApproxContract {} {} ({}) ({})",
+                output_contract.ideal_bound_ticks,
+                output_contract.epsilon_ticks,
+                output.ideal,
+                output.actual
+            ));
+            output_proofs.push(output.proof);
+        }
+        source.push_str(&format!(
+            "    : {} := by\n",
+            Self::lean_conjunction(&goals)
+        ));
+
+        for &index in &internal {
+            let node = &self.graph.nodes()[index];
+            let contract = self.contracts[&index];
+            match &self.rules[&index] {
+                RneRangeRule::Input => unreachable!("rejected above"),
+                RneRangeRule::Add { .. } | RneRangeRule::BiasAdd { .. } => {
+                    let bias_columns = node.shape.dims().get(1).copied();
+                    for element in 0..node.shape.element_count() {
+                        let left =
+                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let right_index = if matches!(node.operation, Operation::BiasAdd) {
+                            element % bias_columns.expect("validated BiasAdd rank")
+                        } else {
+                            element
+                        };
+                        let right =
+                            Self::global_element(&elements, node.inputs[1], right_index)?;
+                        let output = Self::global_element(&elements, node.id, element)?;
+                        source.push_str(&format!(
+                            "  have {} : VeriNeural.ApproxContract {} {} ({}) ({}) := by\n    \
+                             exact node_{index}_range_rule {} {} hrne_{index}_{element}\n",
+                            output.proof,
+                            contract.ideal_bound_ticks,
+                            contract.epsilon_ticks,
+                            output.ideal,
+                            output.actual,
+                            left.proof,
+                            right.proof
+                        ));
+                    }
+                }
+                RneRangeRule::Mul { .. } => {
+                    for element in 0..node.shape.element_count() {
+                        let left =
+                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let right =
+                            Self::global_element(&elements, node.inputs[1], element)?;
+                        let output = Self::global_element(&elements, node.id, element)?;
+                        source.push_str(&format!(
+                            "  have {} : VeriNeural.ApproxContract {} {} ({}) ({}) := by\n    \
+                             exact node_{index}_range_rule {} {} hrne_{index}_{element}\n",
+                            output.proof,
+                            contract.ideal_bound_ticks,
+                            contract.epsilon_ticks,
+                            output.ideal,
+                            output.actual,
+                            left.proof,
+                            right.proof
+                        ));
+                    }
+                }
+                RneRangeRule::MatMul { .. } => {
+                    let left_shape = &self.graph.nodes()[node.inputs[0].index()].shape;
+                    let right_shape = &self.graph.nodes()[node.inputs[1].index()].shape;
+                    let inner = left_shape.dims()[1];
+                    let columns = right_shape.dims()[1];
+                    for element in 0..node.shape.element_count() {
+                        let row = element / columns;
+                        let column = element % columns;
+                        let mut args = String::new();
+                        for j in 0..inner {
+                            let left =
+                                Self::global_element(&elements, node.inputs[0], row * inner + j)?;
+                            let right = Self::global_element(
+                                &elements,
+                                node.inputs[1],
+                                j * columns + column,
+                            )?;
+                            args.push_str(&format!(
+                                " {} {} hproduct_{index}_{element}_{j} hsum_{index}_{element}_{j}",
+                                left.proof, right.proof
+                            ));
+                        }
+                        let output = Self::global_element(&elements, node.id, element)?;
+                        source.push_str(&format!(
+                            "  have {} : VeriNeural.ApproxContract {} {} ({}) ({}) := by\n    \
+                             exact node_{index}_range_rule{args}\n",
+                            output.proof,
+                            contract.ideal_bound_ticks,
+                            contract.epsilon_ticks,
+                            output.ideal,
+                            output.actual
+                        ));
+                    }
+                }
+                RneRangeRule::Relu | RneRangeRule::Reshape => {
+                    for element in 0..node.shape.element_count() {
+                        let parent =
+                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let output = Self::global_element(&elements, node.id, element)?;
+                        source.push_str(&format!(
+                            "  have {} : VeriNeural.ApproxContract {} {} ({}) ({}) := by\n    \
+                             exact node_{index}_range_rule {}\n",
+                            output.proof,
+                            contract.ideal_bound_ticks,
+                            contract.epsilon_ticks,
+                            output.ideal,
+                            output.actual,
+                            parent.proof
+                        ));
+                    }
+                }
+            }
+        }
+
+        source.push_str(&format!(
+            "  exact {}\n\n",
+            Self::lean_conjunction_proof(&output_proofs)
+        ));
+        Ok(source)
+    }
+
     fn add_rule_source(
         &self,
         index: usize,
@@ -2273,21 +2703,25 @@ impl RneRangePlan {
              decide\n\n",
             output.ideal_bound_ticks, output.epsilon_ticks
         ));
-        for (module_index, module) in self.module_contracts().iter().enumerate() {
-            let contract = module.contract();
+        for (module_index, module) in self.graph.modules().iter().enumerate() {
+            if !self.module_in_slice(module) {
+                continue;
+            }
+            let contract = self.contracts[&module.output.index()];
             source.push_str(&format!(
                 "-- Module {} (output node {}) exports q={}, ideal bound {}, epsilon {} ticks.\n\
                  theorem module_{module_index}_contract_well_formed :\n  \
                    (0 : Int) <= {} /\\ (0 : Int) <= {} := by\n  \
                    decide\n\n",
-                module.name(),
-                module.output().index(),
+                module.name,
+                module.output.index(),
                 contract.fraction_bits,
                 contract.ideal_bound_ticks,
                 contract.epsilon_ticks,
                 contract.ideal_bound_ticks,
                 contract.epsilon_ticks,
             ));
+            source.push_str(&self.module_global_source(module_index, module)?);
         }
         source.push_str("end VeriNeural.Generated.RneRange\n");
         Ok(source)

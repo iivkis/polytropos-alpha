@@ -289,6 +289,9 @@ pub struct Node {
 pub struct ModuleInvocation {
     pub name: &'static str,
     pub inputs: Vec<NodeId>,
+    /// First node index that did not exist before this module body was built.
+    /// Proof generators use it to reject undeclared captures from the outer graph.
+    pub body_start: usize,
     pub output: NodeId,
     pub contract: MathContract,
 }
@@ -479,6 +482,7 @@ impl NeuralGraph {
             }
         }
 
+        let body_start = self.nodes.len();
         let mut candidate = self.clone();
         let output = module.build(&mut candidate, inputs)?;
         let actual = candidate.node(output)?;
@@ -497,6 +501,7 @@ impl NeuralGraph {
         candidate.modules.push(ModuleInvocation {
             name: module.name(),
             inputs: inputs.to_vec(),
+            body_start,
             output,
             contract: contract.clone(),
         });

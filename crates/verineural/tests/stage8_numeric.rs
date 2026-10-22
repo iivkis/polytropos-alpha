@@ -1,6 +1,6 @@
 use verineural::{
-    Domain, ExactFp32Plan, NeuralGraph, NumericError, ResidualFfn, RneFp32Plan, RneRangePlan,
-    Shape, Tensor,
+    Domain, ExactFp32Plan, MathContract, NeuralGraph, NeuralModule, NodeId, NumericError,
+    PortContract, ResidualFfn, RneFp32Plan, RneRangePlan, Shape, Tensor,
 };
 
 fn plan() -> (NeuralGraph, verineural::NodeId, [verineural::NodeId; 3]) {
@@ -559,11 +559,65 @@ fn stage8_rne_range_contract_crosses_residual_ffn_module_boundary() {
     let source = plan.lean_source().unwrap();
     assert!(source.contains("ApproxContract 256 2\n      (idealA_0 * idealB_0) sum_0"));
     assert!(source.contains("module_0_contract_well_formed"));
+    assert!(source.contains("theorem module_0_global_contract"));
+    assert!(source.contains(
+        "(h_0_0 : VeriNeural.ApproxContract 16 0 ideal_0_0 actual_0_0)"
+    ));
+    assert!(source.contains(
+        "have h_10_0 : VeriNeural.ApproxContract 34095104 170"
+    ));
+    assert!(source.contains(
+        "have h_10_1 : VeriNeural.ApproxContract 34095104 170"
+    ));
     assert!(source.contains("exports q=30, ideal bound 34095104, epsilon 170 ticks"));
     assert!(source.contains("approx_contract_mul_rne"));
     assert!(source.contains("approx_contract_add_rne"));
     assert!(!source.contains("sorry"));
     assert!(!source.contains("admit"));
+}
+
+struct CapturedDependencyModule {
+    captured: NodeId,
+    contract: MathContract,
+}
+
+impl NeuralModule for CapturedDependencyModule {
+    fn name(&self) -> &'static str {
+        "captured_dependency"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, verineural::NeuralError> {
+        graph.add(inputs[0], self.captured)
+    }
+}
+
+#[test]
+fn stage8_module_global_range_theorem_rejects_undeclared_graph_capture() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![1]).unwrap();
+    let declared = graph.input(shape.clone(), Domain::Finite);
+    let captured = graph.input(shape.clone(), Domain::Finite);
+    let module = CapturedDependencyModule {
+        captured,
+        contract: MathContract::new(
+            vec![PortContract::new(shape.clone(), Domain::Finite)],
+            PortContract::new(shape, Domain::Any),
+        ),
+    };
+    let output = graph.apply_module(&module, &[declared]).unwrap();
+    let plan = RneRangePlan::compile(&graph, output, 10, 16).unwrap();
+
+    assert!(matches!(
+        plan.lean_source(),
+        Err(NumericError::InvalidInput {
+            reason: "module global range proof reaches an undeclared preexisting node",
+            ..
+        })
+    ));
 }
 
 #[test]
