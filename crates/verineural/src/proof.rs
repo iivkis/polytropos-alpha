@@ -749,6 +749,12 @@ fn module_contains(graph: &NeuralGraph, parent_index: usize, child_index: usize)
         && child.output.index() <= parent.output.index()
 }
 
+#[derive(Default)]
+struct NonnegativeTraversal {
+    required_ports: BTreeSet<usize>,
+    cache: BTreeMap<usize, String>,
+}
+
 fn build_module_nonnegative_proof(
     graph: &NeuralGraph,
     module_index: usize,
@@ -765,20 +771,18 @@ fn build_module_nonnegative_proof(
         .enumerate()
         .map(|(port, input)| (input.index(), port))
         .collect::<BTreeMap<_, _>>();
-    let mut required_ports = BTreeSet::new();
-    let mut cache = BTreeMap::new();
+    let mut traversal = NonnegativeTraversal::default();
     let proof_term = prove_module_node_nonnegative(
         graph,
         module_index,
         module.output.index(),
         arguments,
         &boundary,
-        &mut required_ports,
-        &mut cache,
+        &mut traversal,
         module_proofs,
     )?;
     let proof = ModuleNonnegativeProof {
-        required_ports: required_ports.into_iter().collect(),
+        required_ports: traversal.required_ports.into_iter().collect(),
         proof_term,
     };
     module_proofs.insert(module_index, proof.clone());
@@ -791,15 +795,14 @@ fn prove_module_node_nonnegative(
     index: usize,
     arguments: &str,
     boundary: &BTreeMap<usize, usize>,
-    required_ports: &mut BTreeSet<usize>,
-    cache: &mut BTreeMap<usize, String>,
+    traversal: &mut NonnegativeTraversal,
     module_proofs: &mut BTreeMap<usize, ModuleNonnegativeProof>,
 ) -> Result<String, ProofError> {
-    if let Some(proof) = cache.get(&index) {
+    if let Some(proof) = traversal.cache.get(&index) {
         return Ok(proof.clone());
     }
     if let Some(&port) = boundary.get(&index) {
-        required_ports.insert(port);
+        traversal.required_ports.insert(port);
         return Ok(format!("h_module_{module_index}_input_{port}"));
     }
 
@@ -836,8 +839,7 @@ fn prove_module_node_nonnegative(
                 child_input,
                 arguments,
                 boundary,
-                required_ports,
-                cache,
+                traversal,
                 module_proofs,
             )?;
             args.push(format!("({input_proof})"));
@@ -846,7 +848,7 @@ fn prove_module_node_nonnegative(
             "(module_{child_index}_global_nonnegative {})",
             args.join(" ")
         );
-        cache.insert(index, result.clone());
+        traversal.cache.insert(index, result.clone());
         return Ok(result);
     }
 
@@ -862,8 +864,7 @@ fn prove_module_node_nonnegative(
                 left,
                 arguments,
                 boundary,
-                required_ports,
-                cache,
+                traversal,
                 module_proofs,
             )?;
             let right_proof = prove_module_node_nonnegative(
@@ -872,8 +873,7 @@ fn prove_module_node_nonnegative(
                 right,
                 arguments,
                 boundary,
-                required_ports,
-                cache,
+                traversal,
                 module_proofs,
             )?;
             let theorem = if matches!(node.operation, Operation::Add) {
@@ -901,8 +901,7 @@ fn prove_module_node_nonnegative(
                 input,
                 arguments,
                 boundary,
-                required_ports,
-                cache,
+                traversal,
                 module_proofs,
             )?;
             format!(
@@ -912,7 +911,7 @@ fn prove_module_node_nonnegative(
         }
         _ => return Err(ProofError::UnsupportedGuarantee { node: index }),
     };
-    cache.insert(index, proof.clone());
+    traversal.cache.insert(index, proof.clone());
     Ok(proof)
 }
 
