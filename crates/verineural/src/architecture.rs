@@ -122,6 +122,45 @@ fn cluster_theme(depth: usize) -> (&'static str, &'static str) {
     }
 }
 
+/// Presentation-only edge routing. Distinct compass ports stop Graphviz from
+/// stacking every incoming dependency onto the same short line segment.
+fn edge_tail_port(role: &str, input_port: usize) -> &'static str {
+    if role == "parameter" {
+        "e"
+    } else {
+        match input_port {
+            0 => "ne",
+            1 => "se",
+            _ => "e",
+        }
+    }
+}
+
+fn edge_head_port(operation: &Operation, input_port: usize) -> &'static str {
+    match operation {
+        Operation::BiasAdd if input_port == 1 => "s",
+        Operation::Add | Operation::Mul | Operation::MatMul => match input_port {
+            0 => "nw",
+            1 => "sw",
+            _ => "w",
+        },
+        _ => "w",
+    }
+}
+
+fn edge_theme(role: &str, input_port: usize) -> (&'static str, &'static str, &'static str, &'static str) {
+    if role == "parameter" {
+        ("#C58A3A", "1.35", "1", "2")
+    } else {
+        let color = match input_port {
+            0 => "#7489A8",
+            1 => "#95A3B5",
+            _ => "#8496AD",
+        };
+        (color, "1.15", "4", "1")
+    }
+}
+
 impl ArchitectureSnapshot {
     /// Re-render the pinned DOT with Graphviz into architecture.png.
     /// Only the configured artifact root receives writes.
@@ -343,13 +382,14 @@ pub fn snapshot_architecture(
     // DPI belongs in DOT so rerendering via plain "dot -Tpng" is consistent.
     let mut dot = String::from(
         r##"digraph verineural {
-  graph [rankdir=LR, compound=true, newrank=true, splines=ortho, outputorder=edgesfirst,
-         nodesep=0.65, ranksep=1.05, pad=0.50, margin=0.18, dpi=180,
+  graph [rankdir=LR, compound=true, newrank=true, splines=polyline,
+         concentrate=false, outputorder=edgesfirst,
+         nodesep=0.85, ranksep=1.20, pad=0.55, margin=0.18, dpi=180,
          bgcolor="#FFFFFF", fontname="DejaVu Sans", fontcolor="#24324B",
          labelloc=t, labeljust=l];
   node [shape=box, style="rounded,filled", fontname="DejaVu Sans",
         fontsize=12, fontcolor="#24324B", penwidth=1.5, margin="0.17,0.13"];
-  edge [color="#8796AA", penwidth=1.2, arrowsize=0.65];
+  edge [color="#8796AA", penwidth=1.1, arrowsize=0.72];
 "##,
     );
     writeln!(
@@ -618,19 +658,20 @@ pub fn snapshot_architecture(
                 .map(String::as_str)
                 .filter(|r| *r == "parameter")
                 .unwrap_or("data");
+            let (edge_color, edge_width, edge_weight, edge_minlen) =
+                edge_theme(role, port);
+            let tailport = edge_tail_port(role, port);
+            let headport = edge_head_port(&node.operation, port);
             let data = [
+                ("color", edge_color.into()),
+                ("penwidth", edge_width.into()),
+                ("tailport", tailport.into()),
+                ("headport", headport.into()),
+                ("weight", edge_weight.into()),
+                ("minlen", edge_minlen.into()),
                 (
-                    "color",
-                    if role == "parameter" {
-                        "#C69B5D"
-                    } else {
-                        "#8A98AD"
-                    }
-                    .into(),
-                ),
-                (
-                    "penwidth",
-                    if role == "parameter" { "1.35" } else { "1.15" }.into(),
+                    "constraint",
+                    if role == "parameter" { "false" } else { "true" }.into(),
                 ),
                 ("vn_src_port", "output".into()),
                 ("vn_dst_port", format!("input_{port}")),
@@ -692,8 +733,16 @@ mod tests {
         assert!(!a.dot.contains(r#"style="dashed""#));
         assert!(!a.dot.contains("vn_input_port_")); // no modules in this graph
         assert!(a.dot.contains("rank=same; n0; n1;"));
-        assert!(a.dot.contains("splines=ortho"));
-        assert!(a.dot.contains("nodesep=0.65"));
+        assert!(a.dot.contains("splines=polyline"));
+        assert!(a.dot.contains("concentrate=false"));
+        assert!(a.dot.contains("nodesep=0.85"));
+        assert!(a.dot.contains("ranksep=1.20"));
+        assert!(a.dot.contains("tailport=\"ne\""));
+        assert!(a.dot.contains("headport=\"nw\""));
+        assert!(a.dot.contains("tailport=\"e\""));
+        assert!(a.dot.contains("headport=\"sw\""));
+        assert!(a.dot.contains("constraint=\"false\""));
+        assert!(a.dot.contains("minlen=\"2\""));
         assert!(a.dot.contains("dpi=180"));
         assert!(a.dot.contains("fillcolor=\"#FFF1DB\""));
         // Labels must be multi-line, not a literal printed backslash-n.

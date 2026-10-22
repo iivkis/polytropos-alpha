@@ -357,6 +357,15 @@ mod tests {
         assert!(snapshot.dot.contains("fillcolor=\"#FFF1DB\""));
         assert!(snapshot.dot.contains(r#"style="rounded,filled""#));
         assert!(snapshot.dot.contains("dpi=180"));
+        assert!(snapshot.dot.contains("splines=polyline"));
+        assert!(snapshot.dot.contains("concentrate=false"));
+        // Parameter/bias edges are deliberately routed away from the primary
+        // left-to-right data flow, while binary data inputs use separate ports.
+        assert!(snapshot.dot.contains("headport=\"s\""));
+        assert!(snapshot.dot.contains("constraint=\"false\""));
+        assert!(snapshot.dot.contains("minlen=\"2\""));
+        assert!(snapshot.dot.contains("headport=\"nw\""));
+        assert!(snapshot.dot.contains("headport=\"sw\""));
         assert!(snapshot.dot.contains("vn_ir_sha256="));
     }
 
