@@ -27,27 +27,27 @@ theorem signed_zeros_have_distinct_bits :
 
 theorem signed_zeros_are_finite :
     isFinite 0 ∧ isFinite 2147483648 := by
-  decide
+  simp [isFinite, exponent]
 
 theorem both_infinities_are_encoded :
     isInfinity 2139095040 ∧ isInfinity 4286578688 := by
-  decide
+  simp [isInfinity, exponent, fraction]
 
 theorem quiet_nan_encodings_differ_from_infinity :
     isQuietNaN 2143289344 ∧ isQuietNaN 4290772992 ∧
     ¬ isInfinity 2143289344 ∧ ¬ isInfinity 4290772992 := by
-  decide
+  simp [isQuietNaN, isInfinity, exponent, fraction]
 
 theorem signaling_nan_is_not_quiet :
     ¬ isQuietNaN 2139095041 := by
-  decide
+  simp [isQuietNaN, exponent, fraction]
 
 theorem maximum_finite_is_finite :
     isFinite 2139095039 := by
-  decide
+  simp [isFinite, exponent]
 
 theorem smallest_subnormal_is_finite :
     isFinite 1 ∧ isFinite 2147483649 := by
-  decide
+  simp [isFinite, exponent]
 
 end VeriNeural.Special
