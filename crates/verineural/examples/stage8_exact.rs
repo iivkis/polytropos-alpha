@@ -10,11 +10,12 @@ use std::path::Path;
 use std::process::Command;
 
 use verineural::{
-    Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, NeuralGraph, ReluFusion,
-    ResidualFfn, RneFp32Plan, RneRangePlan, Shape, Tensor,
+    Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, MathContract, NeuralGraph,
+    NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd, ResidualFfn, RneFp32Plan,
+    RneRangePlan, Shape, Tensor,
 };
 
-const FILES: [&str; 34] = [
+const FILES: [&str; 38] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -49,6 +50,10 @@ const FILES: [&str; 34] = [
     "range_contract.txt",
     "numeric_architecture.lean",
     "architecture_contract.txt",
+    "numeric_architecture_dag.lean",
+    "architecture_dag_contract.txt",
+    "numeric_nested.lean",
+    "nested_contract.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -88,6 +93,8 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_rne_matmul.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_range.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_architecture.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_architecture_dag.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_nested.lean"))?;
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
         "Scope: ideal integer ranges, concrete dyadic RNE traces, and reusable bounded RNE/module contracts; not machine FP32 certification"
@@ -101,6 +108,61 @@ fn write_checked_lean(path: &Path, source: &str) -> Result<(), Box<dyn Error>> {
     fs::write(path, source)?;
     LeanProofEngine::default().check_file(path)?;
     Ok(())
+}
+
+struct NestedResidualPair {
+    contract: MathContract,
+}
+
+impl NestedResidualPair {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        let x = Shape::new(vec![1, 2])?;
+        let matrix = Shape::new(vec![2, 2])?;
+        let bias = Shape::new(vec![2])?;
+        let finite = |shape| PortContract::new(shape, Domain::Finite);
+        Ok(Self {
+            contract: MathContract::new(
+                vec![
+                    finite(x.clone()),
+                    finite(matrix.clone()),
+                    finite(bias.clone()),
+                    finite(matrix.clone()),
+                    finite(bias.clone()),
+                    finite(matrix.clone()),
+                    finite(bias.clone()),
+                    finite(matrix),
+                    finite(bias),
+                ],
+                PortContract::new(x, Domain::Any),
+            ),
+        })
+    }
+}
+
+impl NeuralModule for NestedResidualPair {
+    fn name(&self) -> &'static str {
+        "nested_residual_pair"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        let block = ResidualFfn::new(1, 2, 2)?;
+        let hidden = graph.apply_module(
+            &block,
+            &[inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]],
+        )?;
+        graph.apply_module(
+            &block,
+            &[hidden, inputs[5], inputs[6], inputs[7], inputs[8]],
+        )
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -486,6 +548,126 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Branching architecture DAG: two independent ResidualFfn branches fan in
+    // through a checked ResidualAdd module. The architecture theorem must consume
+    // both producer module contracts before the join.
+    let mut dag_graph = NeuralGraph::default();
+    let dag_x = dag_graph.input(Shape::new(vec![1, 2])?, Domain::Finite);
+    let dag_w1a = dag_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let dag_b1a = dag_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let dag_w2a = dag_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let dag_b2a = dag_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let dag_w1b = dag_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let dag_b1b = dag_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let dag_w2b = dag_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let dag_b2b = dag_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let dag_block = ResidualFfn::new(1, 2, 2)?;
+    let dag_left = dag_graph.apply_module(
+        &dag_block,
+        &[dag_x, dag_w1a, dag_b1a, dag_w2a, dag_b2a],
+    )?;
+    let dag_right = dag_graph.apply_module(
+        &dag_block,
+        &[dag_x, dag_w1b, dag_b1b, dag_w2b, dag_b2b],
+    )?;
+    let dag_join = ResidualAdd::new(Shape::new(vec![1, 2])?);
+    let dag_output = dag_graph.apply_module(&dag_join, &[dag_left, dag_right])?;
+    let dag_plan = RneRangePlan::compile(&dag_graph, dag_output, 10, 16)?;
+    let dag_contract = dag_plan.output_contract();
+    if dag_contract.fraction_bits() != 30
+        || dag_contract.ideal_bound_ticks() != 68_190_208
+        || dag_contract.epsilon_ticks() != 348
+    {
+        return Err(io::Error::other("unexpected Stage 8 architecture DAG contract").into());
+    }
+    let dag_source = dag_plan.lean_source()?;
+    if !dag_source.contains(
+        "-- Architecture-level numerical composition over the reachable module DAG.",
+    ) || !dag_source.contains("have arch_module_0 := module_0_global_contract")
+        || !dag_source.contains("have arch_module_1 := module_1_global_contract")
+        || !dag_source.contains("have arch_module_2 := module_2_global_contract")
+    {
+        return Err(io::Error::other("missing Stage 8 fork/fan-in architecture theorem").into());
+    }
+    write_checked_lean(&root.join("numeric_architecture_dag.lean"), &dag_source)?;
+    fs::write(
+        root.join("architecture_dag_contract.txt"),
+        format!(
+            "modules=3\nshape=fork-fan-in\nglobal_theorem=architecture_global_contract\n\
+             source_fraction_bits={}\nsource_bound_ticks={}\n\
+             output_fraction_bits={}\nideal_bound_ticks={}\nepsilon_ticks={}\n\
+             actual_bound_ticks={}\nepsilon={:.12e}\n",
+            dag_plan.source_fraction_bits(),
+            dag_plan.source_bound_ticks(),
+            dag_contract.fraction_bits(),
+            dag_contract.ideal_bound_ticks(),
+            dag_contract.epsilon_ticks(),
+            dag_contract.actual_bound_ticks(),
+            dag_contract.epsilon(),
+        ),
+    )?;
+
+    // Nested hierarchy: the outer user module invokes two ResidualFfn children.
+    // Its generated theorem must reuse the two child whole-module theorems.
+    let mut nested_graph = NeuralGraph::default();
+    let nested_x = nested_graph.input(Shape::new(vec![1, 2])?, Domain::Finite);
+    let nested_w1a = nested_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let nested_b1a = nested_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let nested_w2a = nested_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let nested_b2a = nested_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let nested_w1b = nested_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let nested_b1b = nested_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let nested_w2b = nested_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let nested_b2b = nested_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let nested_module = NestedResidualPair::new()?;
+    let nested_output = nested_graph.apply_module(
+        &nested_module,
+        &[
+            nested_x,
+            nested_w1a,
+            nested_b1a,
+            nested_w2a,
+            nested_b2a,
+            nested_w1b,
+            nested_b1b,
+            nested_w2b,
+            nested_b2b,
+        ],
+    )?;
+    let nested_plan = RneRangePlan::compile(&nested_graph, nested_output, 10, 16)?;
+    let nested_contract = nested_plan.output_contract();
+    if nested_contract.fraction_bits() != 50
+        || nested_contract.ideal_bound_ticks() != 53_928_163_016_704
+        || nested_contract.epsilon_ticks() != 184_963_072
+    {
+        return Err(io::Error::other("unexpected Stage 8 nested-module contract").into());
+    }
+    let nested_source = nested_plan.lean_source()?;
+    if !nested_source.contains("theorem module_2_global_contract")
+        || !nested_source.contains("have nested_module_0 := module_0_global_contract")
+        || !nested_source.contains("have nested_module_1 := module_1_global_contract")
+    {
+        return Err(io::Error::other("missing Stage 8 nested whole-module composition").into());
+    }
+    write_checked_lean(&root.join("numeric_nested.lean"), &nested_source)?;
+    fs::write(
+        root.join("nested_contract.txt"),
+        format!(
+            "outer_module=nested_residual_pair\nchild_modules=2\n\
+             theorem=module_2_global_contract\nsource_fraction_bits={}\n\
+             source_bound_ticks={}\noutput_fraction_bits={}\n\
+             ideal_bound_ticks={}\nepsilon_ticks={}\nactual_bound_ticks={}\n\
+             epsilon={:.12e}\n",
+            nested_plan.source_fraction_bits(),
+            nested_plan.source_bound_ticks(),
+            nested_contract.fraction_bits(),
+            nested_contract.ideal_bound_ticks(),
+            nested_contract.epsilon_ticks(),
+            nested_contract.actual_bound_ticks(),
+            nested_contract.epsilon(),
+        ),
+    )?;
+
     let input_snapshot = inputs
         .iter()
         .map(|(id, tensor)| {
@@ -565,11 +747,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         architecture_contract.epsilon_ticks()
     );
     println!(
+        "Stage 8 architecture DAG: fork/fan-in modules=3, q_out={}, ideal_bound={}, epsilon={} ticks",
+        dag_contract.fraction_bits(),
+        dag_contract.ideal_bound_ticks(),
+        dag_contract.epsilon_ticks()
+    );
+    println!(
+        "Stage 8 nested hierarchy: child_modules=2, q_out={}, ideal_bound={}, epsilon={} ticks",
+        nested_contract.fraction_bits(),
+        nested_contract.ideal_bound_ticks(),
+        nested_contract.epsilon_ticks()
+    );
+    println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, and a two-module architecture composition theorem; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, and nested-module theorem reuse; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }

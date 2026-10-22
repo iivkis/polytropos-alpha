@@ -2027,6 +2027,116 @@ impl RneRangePlan {
                 .all(|input| self.contracts.contains_key(&input.index()))
     }
 
+    fn module_contains(&self, parent_index: usize, child_index: usize) -> bool {
+        if child_index >= parent_index {
+            return false;
+        }
+        let modules = self.graph.modules();
+        let parent = &modules[parent_index];
+        let child = &modules[child_index];
+        self.module_in_slice(parent)
+            && self.module_in_slice(child)
+            && child.body_start >= parent.body_start
+            && child.output.index() >= parent.body_start
+            && child.output.index() <= parent.output.index()
+    }
+
+    fn direct_nested_module_indices(
+        &self,
+        parent_index: usize,
+    ) -> Result<Vec<usize>, NumericError> {
+        let modules = self.graph.modules();
+        let parent = &modules[parent_index];
+        let parent_internal = self
+            .module_internal_nodes(parent)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let nested = (0..parent_index)
+            .filter(|&child_index| {
+                self.module_contains(parent_index, child_index)
+                    && parent_internal.contains(&modules[child_index].output.index())
+            })
+            .collect::<Vec<_>>();
+
+        Ok(nested
+            .iter()
+            .copied()
+            .filter(|&child_index| {
+                !nested.iter().copied().any(|container_index| {
+                    container_index != child_index
+                        && self.module_contains(container_index, child_index)
+                })
+            })
+            .collect())
+    }
+
+    fn architecture_module_indices(&self) -> Result<Option<Vec<usize>>, NumericError> {
+        let modules = self.graph.modules();
+        let eligible = modules
+            .iter()
+            .enumerate()
+            .filter_map(|(index, module)| self.module_in_slice(module).then_some(index))
+            .collect::<Vec<_>>();
+        let top_level = eligible
+            .iter()
+            .copied()
+            .filter(|&child_index| {
+                !eligible
+                    .iter()
+                    .copied()
+                    .any(|parent_index| self.module_contains(parent_index, child_index))
+            })
+            .collect::<Vec<_>>();
+
+        let mut producers = BTreeMap::<usize, usize>::new();
+        for module_index in top_level {
+            let output = modules[module_index].output.index();
+            if producers.insert(output, module_index).is_some() {
+                return Err(NumericError::InvalidInput {
+                    node: output,
+                    reason: "architecture range proof has multiple top-level module producers",
+                });
+            }
+        }
+        let Some(&final_module) = producers.get(&self.output.index()) else {
+            return Ok(None);
+        };
+
+        let source_inputs = self
+            .inputs
+            .iter()
+            .map(|input| input.index())
+            .collect::<BTreeSet<_>>();
+        let mut selected = BTreeSet::new();
+        let mut stack = vec![final_module];
+        while let Some(module_index) = stack.pop() {
+            if !selected.insert(module_index) {
+                continue;
+            }
+            let module = &modules[module_index];
+            for input in &module.inputs {
+                if source_inputs.contains(&input.index()) {
+                    continue;
+                }
+                let Some(&producer_index) = producers.get(&input.index()) else {
+                    return Ok(None);
+                };
+                if producer_index >= module_index {
+                    return Err(NumericError::InvalidInput {
+                        node: input.index(),
+                        reason: "architecture module dependency is not topologically ordered",
+                    });
+                }
+                stack.push(producer_index);
+            }
+        }
+
+        if selected.len() < 2 {
+            return Ok(None);
+        }
+        Ok(Some(selected.into_iter().collect()))
+    }
+
     fn module_internal_nodes(&self, module: &ModuleInvocation) -> Result<Vec<usize>, NumericError> {
         let boundary = module
             .inputs
@@ -2107,9 +2217,26 @@ impl RneRangePlan {
         module: &ModuleInvocation,
     ) -> Result<String, NumericError> {
         let internal = self.module_internal_nodes(module)?;
+        let nested_modules = self.direct_nested_module_indices(module_index)?;
+        let mut nested_by_output = BTreeMap::<usize, usize>::new();
+        let mut nested_internal = BTreeSet::new();
+        for &nested_index in &nested_modules {
+            let nested = &self.graph.modules()[nested_index];
+            if nested_by_output
+                .insert(nested.output.index(), nested_index)
+                .is_some()
+            {
+                return Err(NumericError::InvalidInput {
+                    node: nested.output.index(),
+                    reason: "module range proof has ambiguous nested module output",
+                });
+            }
+            nested_internal.extend(self.module_internal_nodes(nested)?);
+        }
         let mut source = format!(
-            "-- Whole-module numerical composition for {}. Every flattened output element\n\
+            "-- Whole-module numerical composition for {}. Every output element\n\
              -- is derived from declared module-input contracts and explicit RNE witnesses.\n\
+             -- Direct nested modules are consumed through their checked whole-module theorems.\n\
              -- Dependencies before body_start={} are rejected unless declared as inputs.\n\
              theorem module_{module_index}_global_contract\n",
             module.name, module.body_start
@@ -2315,6 +2442,55 @@ impl RneRangePlan {
         source.push_str(&format!("    : {} := by\n", Self::lean_conjunction(&goals)));
 
         for &index in &internal {
+            if let Some(&nested_index) = nested_by_output.get(&index) {
+                let nested = &self.graph.modules()[nested_index];
+                let mut args = Vec::new();
+                let mut seen_inputs = BTreeSet::new();
+                for &input in &nested.inputs {
+                    if !seen_inputs.insert(input.index()) {
+                        continue;
+                    }
+                    let input_node = &self.graph.nodes()[input.index()];
+                    for element in 0..input_node.shape.element_count() {
+                        args.push(Self::global_element(&elements, input, element)?.proof);
+                    }
+                }
+                for nested_node in self.module_internal_nodes(nested)? {
+                    args.extend(self.architecture_witness_args(nested_node));
+                }
+                let call_args = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", args.join(" "))
+                };
+                let nested_result = format!("nested_module_{nested_index}");
+                source.push_str(&format!(
+                    "  have {nested_result} := module_{nested_index}_global_contract{call_args}\n"
+                ));
+                let output_node = &self.graph.nodes()[nested.output.index()];
+                let output_proofs = (0..output_node.shape.element_count())
+                    .map(|element| {
+                        Self::global_element(&elements, nested.output, element)
+                            .map(|output| output.proof)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if output_proofs.len() == 1 {
+                    source.push_str(&format!(
+                        "  have {} := {nested_result}\n",
+                        output_proofs[0]
+                    ));
+                } else {
+                    source.push_str(&format!(
+                        "  rcases {nested_result} with {}\n",
+                        Self::lean_conjunction_pattern(&output_proofs)
+                    ));
+                }
+                continue;
+            }
+            if nested_internal.contains(&index) {
+                continue;
+            }
+
             let node = &self.graph.nodes()[index];
             let contract = self.contracts[&index];
             match &self.rules[&index] {
@@ -2613,21 +2789,13 @@ impl RneRangePlan {
     }
 
     fn architecture_global_source(&self) -> Result<Option<String>, NumericError> {
-        let modules = self
-            .graph
-            .modules()
-            .iter()
-            .enumerate()
-            .filter(|(_, module)| self.module_in_slice(module))
-            .collect::<Vec<_>>();
-        if modules.len() < 2 || modules.last().map(|(_, module)| module.output) != Some(self.output)
-        {
+        let Some(module_indices) = self.architecture_module_indices()? else {
             return Ok(None);
-        }
+        };
 
         let mut source = String::from(
-            "-- Architecture-level numerical composition across module boundaries.\n\
-             -- Each module theorem is consumed as the contract source for the next module.\n\
+            "-- Architecture-level numerical composition over the reachable module DAG.\n\
+             -- Producer module theorems feed every dependent branch and fan-in boundary.\n\
              theorem architecture_global_contract\n",
         );
         let mut elements = BTreeMap::<(usize, usize), RneGlobalElement>::new();
@@ -2656,7 +2824,8 @@ impl RneRangePlan {
 
         let mut declared_nodes = BTreeSet::new();
         let mut steps = Vec::<RneArchitectureStep>::new();
-        for &(module_index, module) in &modules {
+        for &module_index in &module_indices {
+            let module = &self.graph.modules()[module_index];
             let mut args = Vec::new();
             let mut seen_inputs = BTreeSet::new();
             for &input in &module.inputs {

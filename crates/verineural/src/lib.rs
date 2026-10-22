@@ -13,8 +13,9 @@
 //! Reshape, including explicit separate multiply/add MatMul reductions. Reusable
 //! range/error contracts summarize arbitrary bounded dyadic inputs and module
 //! boundaries. Generated whole-module theorems compose each supported
-//! ModuleInvocation elementwise, and architecture-level range theorems can chain
-//! compatible module boundaries under the same formal RNE target relation.
+//! ModuleInvocation elementwise, including direct nested-module theorem reuse.
+//! Architecture-level range theorems compose the reachable top-level module DAG,
+//! including fork/fan-in boundaries, under the same formal RNE target relation.
 //! The LLVM/PTX/GPU link is still trusted rather than formally certified.
 
 mod certificate;

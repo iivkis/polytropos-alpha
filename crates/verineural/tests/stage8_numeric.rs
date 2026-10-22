@@ -1,6 +1,6 @@
 use verineural::{
     Domain, ExactFp32Plan, MathContract, NeuralGraph, NeuralModule, NodeId, NumericError,
-    PortContract, ResidualFfn, RneFp32Plan, RneRangePlan, Shape, Tensor,
+    PortContract, ResidualAdd, ResidualFfn, RneFp32Plan, RneRangePlan, Shape, Tensor,
 };
 
 fn plan() -> (NeuralGraph, verineural::NodeId, [verineural::NodeId; 3]) {
@@ -300,6 +300,10 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
     assert!(after_rne.contains("range_plan.lean_source()?"));
     assert!(after_rne.contains("numeric_architecture.lean"));
     assert!(after_rne.contains("architecture_plan.lean_source()?"));
+    assert!(after_rne.contains("numeric_architecture_dag.lean"));
+    assert!(after_rne.contains("dag_plan.lean_source()?"));
+    assert!(after_rne.contains("numeric_nested.lean"));
+    assert!(after_rne.contains("nested_plan.lean_source()?"));
 }
 
 #[test]
@@ -606,6 +610,149 @@ fn stage8_architecture_range_theorem_composes_two_module_boundaries() {
     assert!(source.contains("have arch_module_1 := module_1_global_contract"));
     assert!(source.contains("arch_h_14_0 arch_h_14_1"));
     assert!(source.contains("exact ⟨arch_h_20_0, arch_h_20_1⟩"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+#[test]
+fn stage8_architecture_range_theorem_composes_fork_and_fan_in_dag() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![1, 2]).unwrap(), Domain::Finite);
+    let w1a = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2a = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w1b = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2b = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let block = ResidualFfn::new(1, 2, 2).unwrap();
+    let left = graph
+        .apply_module(&block, &[x, w1a, b1a, w2a, b2a])
+        .unwrap();
+    let right = graph
+        .apply_module(&block, &[x, w1b, b1b, w2b, b2b])
+        .unwrap();
+    let join = ResidualAdd::new(Shape::new(vec![1, 2]).unwrap());
+    let output = graph.apply_module(&join, &[left, right]).unwrap();
+
+    let plan = RneRangePlan::compile(&graph, output, 10, 16).unwrap();
+    let contract = plan.output_contract();
+    assert_eq!(contract.fraction_bits(), 30);
+    assert_eq!(contract.ideal_bound_ticks(), 68_190_208);
+    assert_eq!(contract.epsilon_ticks(), 348);
+
+    let source = plan.lean_source().unwrap();
+    assert!(source.contains(
+        "-- Architecture-level numerical composition over the reachable module DAG."
+    ));
+    assert!(source.contains("have arch_module_0 := module_0_global_contract"));
+    assert!(source.contains("have arch_module_1 := module_1_global_contract"));
+    assert!(source.contains("have arch_module_2 := module_2_global_contract"));
+    assert!(source.contains("arch_h_14_0 arch_h_14_1"));
+    assert!(source.contains("arch_h_20_0 arch_h_20_1"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+struct NestedResidualPair {
+    contract: MathContract,
+}
+
+impl NestedResidualPair {
+    fn new() -> Self {
+        let x = Shape::new(vec![1, 2]).unwrap();
+        let matrix = Shape::new(vec![2, 2]).unwrap();
+        let bias = Shape::new(vec![2]).unwrap();
+        let finite = |shape| PortContract::new(shape, Domain::Finite);
+        Self {
+            contract: MathContract::new(
+                vec![
+                    finite(x.clone()),
+                    finite(matrix.clone()),
+                    finite(bias.clone()),
+                    finite(matrix.clone()),
+                    finite(bias.clone()),
+                    finite(matrix.clone()),
+                    finite(bias.clone()),
+                    finite(matrix),
+                    finite(bias),
+                ],
+                PortContract::new(x, Domain::Any),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for NestedResidualPair {
+    fn name(&self) -> &'static str {
+        "nested_residual_pair"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        let block = ResidualFfn::new(1, 2, 2)?;
+        let hidden = graph.apply_module(
+            &block,
+            &[inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]],
+        )?;
+        graph.apply_module(
+            &block,
+            &[hidden, inputs[5], inputs[6], inputs[7], inputs[8]],
+        )
+    }
+}
+
+#[test]
+fn stage8_whole_module_theorem_composes_direct_nested_module_theorems() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![1, 2]).unwrap(), Domain::Finite);
+    let w1a = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2a = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w1b = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2b = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let nested = NestedResidualPair::new();
+    let output = graph
+        .apply_module(
+            &nested,
+            &[x, w1a, b1a, w2a, b2a, w1b, b1b, w2b, b2b],
+        )
+        .unwrap();
+
+    assert_eq!(graph.modules().len(), 3);
+    assert_eq!(graph.modules()[0].name, "residual_ffn");
+    assert_eq!(graph.modules()[1].name, "residual_ffn");
+    assert_eq!(graph.modules()[2].name, "nested_residual_pair");
+
+    let plan = RneRangePlan::compile(&graph, output, 10, 16).unwrap();
+    let contract = plan.output_contract();
+    assert_eq!(contract.fraction_bits(), 50);
+    assert_eq!(contract.ideal_bound_ticks(), 53_928_163_016_704);
+    assert_eq!(contract.epsilon_ticks(), 184_963_072);
+
+    let source = plan.lean_source().unwrap();
+    assert!(source.contains("theorem module_2_global_contract"));
+    assert!(source.contains("have nested_module_0 := module_0_global_contract"));
+    assert!(source.contains("have nested_module_1 := module_1_global_contract"));
+    assert!(!source.contains("theorem architecture_global_contract"));
+    let outer = source
+        .split("theorem module_2_global_contract")
+        .nth(1)
+        .unwrap();
+    assert!(outer.contains("have nested_module_0 := module_0_global_contract"));
+    assert!(outer.contains("have nested_module_1 := module_1_global_contract"));
+    assert!(!outer.contains("exact node_9_range_rule"));
     assert!(!source.contains("sorry"));
     assert!(!source.contains("admit"));
 }
