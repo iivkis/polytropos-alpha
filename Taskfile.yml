@@ -81,6 +81,11 @@ tasks:
     cmds:
       - cargo run -p verineural --example stage3_proof
 
+  proof-scan-invariant:
+    desc: Check consumer-owned ideal-Int step claims and the bounded recurrent invariant with Lean
+    cmds:
+      - cargo run -p verineural --example scan_invariant
+
   gpu-stage4:
     desc: Lower IR to PTX and run the CUDA stage-4 example (developer-run)
     cmds:

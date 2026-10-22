@@ -1497,3 +1497,128 @@ fn p1_fixed_scan_rolls_back_when_later_step_violates_contract() {
         })
     ));
 }
+
+struct ConsumerAccumulation {
+    contract: MultiOutputContract,
+}
+
+impl ConsumerAccumulation {
+    fn new() -> Self {
+        let any = port(&[2], Domain::Any);
+        Self {
+            contract: MultiOutputContract {
+                inputs: vec![
+                    NamedPortContract::new("state", any.clone()),
+                    NamedPortContract::new("input", any.clone()),
+                ],
+                outputs: vec![
+                    NamedPortContract {
+                        name: "next_state",
+                        port: any.clone(),
+                        claims: vec![ContractClaim::Nonnegative],
+                    },
+                    NamedPortContract {
+                        name: "output",
+                        port: any,
+                        claims: vec![ContractClaim::Nonnegative],
+                    },
+                ],
+            },
+        }
+    }
+}
+
+impl MultiOutputModule for ConsumerAccumulation {
+    fn name(&self) -> &'static str {
+        "consumer_accumulation"
+    }
+    fn contract(&self) -> &MultiOutputContract {
+        &self.contract
+    }
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<Vec<NodeId>, NeuralError> {
+        let next = graph.add(inputs[0], inputs[1])?;
+        let readout = graph.relu(next)?;
+        Ok(vec![next, readout])
+    }
+}
+
+#[test]
+fn p0_p1_ideal_claim_and_bounded_scan_invariant_compose_without_fp32_claim() {
+    let mut graph = NeuralGraph::default();
+    let state = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let x0 = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let x1 = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let scan = graph.scan_fixed(&ConsumerAccumulation::new(), state, &[x0, x1]).unwrap();
+    // The graph conservatively refuses to treat finite source addition as
+    // proven finite in FP32. The ideal-Int property is independently provable.
+    assert_eq!(graph.node(scan.states[1]).unwrap().domain, Domain::Any);
+    assert_eq!(graph.node(scan.states[2]).unwrap().domain, Domain::Any);
+
+    let proof = LeanProofEngine::default()
+        .generate_fixed_scan_nonnegative(&graph, &scan, "accumulate")
+        .unwrap();
+    for name in [
+        "multi_0_port_0_claim_0",
+        "multi_0_port_1_claim_0",
+        "multi_1_port_0_claim_0",
+        "multi_1_port_1_claim_0",
+        "scan_accumulate_global_nonnegative",
+    ] {
+        assert!(proof.theorem_names().iter().any(|theorem| theorem == name), "{name}");
+    }
+    assert!(proof.source().contains("VeriNeural.add_nonnegative"));
+    assert!(proof.source().contains("exact multi_0_port_0_claim_0"));
+    assert!(proof.source().contains("exact multi_1_port_0_claim_0"));
+    assert!(proof.source().contains("And.intro scan_state_0"));
+    assert_eq!(proof.assumptions().len(), 3);
+    assert!(!proof.source().contains("sorry"));
+    assert!(!proof.source().contains("admit"));
+}
+
+#[test]
+fn p0_p1_bounded_scan_invariant_fails_closed_without_actual_proof() {
+    let mut graph = NeuralGraph::default();
+    let state = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let allowed = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let unknown = graph.input(shape(&[2]), Domain::Any);
+    let transition = ConsumerAccumulation::new();
+    // Construction succeeds because the numerical domain is Any. The
+    // user-claimed ideal nonnegativity is *not* granted automatically.
+    let scan = graph.scan_fixed(&transition, state, &[allowed, unknown]).unwrap();
+    assert!(matches!(
+        LeanProofEngine::default().generate_fixed_scan_nonnegative(&graph, &scan, "bad"),
+        Err(ProofError::UnsupportedGuarantee { .. })
+    ));
+
+    let mut invalid = scan.clone();
+    invalid.module_indices[1] = invalid.module_indices[0];
+    assert!(matches!(
+        LeanProofEngine::default().generate_fixed_scan_nonnegative(&graph, &invalid, "bad"),
+        Err(ProofError::InvalidScan)
+    ));
+
+    // A transition must explicitly request its invariant. Structural ports
+    // with Domain::Any are not substitutes for mathematical claims.
+    let mut no_claim = ConsumerAccumulation::new();
+    no_claim.contract.outputs[0].claims.clear();
+    let mut second_graph = NeuralGraph::default();
+    let second_state = second_graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let second_x = second_graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let second_scan = second_graph.scan_fixed(&no_claim, second_state, &[second_x]).unwrap();
+    assert!(matches!(
+        LeanProofEngine::default().generate_fixed_scan_nonnegative(
+            &second_graph, &second_scan, "missing",
+        ),
+        Err(ProofError::InvalidScan)
+    ));
+    assert!(matches!(
+        LeanProofEngine::default().generate_fixed_scan_nonnegative(
+            &second_graph, &second_scan, "not-valid!",
+        ),
+        Err(ProofError::InvalidGoalName)
+    ));
+}
