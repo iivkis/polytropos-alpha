@@ -86,6 +86,11 @@ tasks:
     cmds:
       - cargo run -p verineural --example scan_invariant
 
+  auto-architecture:
+    desc: Generate and audit all ideal-Int architecture/goal proofs and lower each supported output to NVPTX
+    cmds:
+      - cargo run -p verineural --example auto_architecture
+
   proof-gated-select:
     desc: Check generic positive mask and conditional select with bounded Lean state invariant (GPU fail-closed)
     cmds:

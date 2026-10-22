@@ -1,0 +1,229 @@
+//! Pure Rust regression tests for the architecture-wide auto builder.
+//! External Lean/LLVM execution is covered by the consumer example task.
+use verineural::{
+    ArchitectureAutoCompiler, ArchitectureProofTask, AutoBuildError, ContractClaim, Domain,
+    GpuRequirement, MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId,
+    PlannedGpu, PortContract, ProofError, ProofGoal, ProofGoalKind, Shape,
+    MultiOutputContract, MultiOutputModule, NamedPortContract,
+};
+
+fn shape(n: usize) -> Shape { Shape::new(vec![n]).unwrap() }
+
+struct ConsumerBlock {
+    spec: MathContract,
+    claimed: bool,
+}
+impl NeuralModule for ConsumerBlock {
+    fn name(&self) -> &'static str { "consumer_block" }
+    fn contract(&self) -> &MathContract { &self.spec }
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        if self.claimed {
+            graph.add(inputs[0], inputs[1])
+        } else {
+            graph.relu(inputs[0])
+        }
+    }
+}
+
+#[test]
+fn auto_build_plans_all_supported_outputs_and_separate_user_goal() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(4), Domain::NonNegativeFinite);
+    let y = graph.input(shape(4), Domain::NonNegativeFinite);
+    let relu = graph.relu(x).unwrap();
+    let merged = graph.add(relu, y).unwrap();
+    let task = ArchitectureProofTask::Goal(ProofGoal {
+        name: "root".into(),
+        output: merged,
+        kind: ProofGoalKind::Nonnegative { assumptions: vec![x, y] },
+    });
+    let plan = ArchitectureAutoCompiler::default()
+        .plan(&graph, &[relu, merged], &[task], GpuRequirement::AllOutputs)
+        .unwrap_err();
+    // A bare Add output does not have a top-level module theorem, so the
+    // global composition API must reject the unsupported architecture goal.
+    assert!(matches!(plan, AutoBuildError::Proof(ProofError::UnsupportedGuarantee { .. })));
+
+    let plan = ArchitectureAutoCompiler::default()
+        .plan(&graph, &[relu, merged], &[], GpuRequirement::AllOutputs).unwrap();
+    assert_eq!(plan.connectivity.data_edges, 3);
+    assert_eq!(plan.connectivity.module_instances, 0);
+    assert_eq!(plan.gpu.len(), 2);
+    assert!(plan.gpu.iter().all(|x| matches!(x, PlannedGpu::Supported { .. })));
+    assert!(plan.architecture.theorem_names().iter().any(|n| n == "node_3_semantics"));
+}
+
+#[test]
+fn auto_build_tracks_unsupported_outputs_without_mislabeling_gpu() {
+    let mut graph = NeuralGraph::default();
+    let condition = graph.input(shape(2), Domain::Any);
+    let on_true = graph.input(shape(2), Domain::NonNegativeFinite);
+    let on_false = graph.input(shape(2), Domain::NonNegativeFinite);
+    let relu = graph.relu(on_true).unwrap();
+    let gate = graph.positive_mask(condition).unwrap();
+    let selected = graph.select_positive(gate, relu, on_false).unwrap();
+    let auto = ArchitectureAutoCompiler::default();
+    let plan = auto.plan(
+        &graph, &[relu, selected], &[], GpuRequirement::AllowUnsupported
+    ).unwrap();
+    assert!(matches!(plan.gpu[0], PlannedGpu::Supported { .. }));
+    assert!(matches!(plan.gpu[1], PlannedGpu::Unsupported { .. }));
+    assert!(plan.architecture.source().contains("VeriNeural.selectPositive"));
+    assert!(matches!(
+        auto.plan(&graph, &[relu, selected], &[], GpuRequirement::AllOutputs),
+        Err(AutoBuildError::Gpu(verineural::GpuError::UnsupportedOperation {
+            operation: "select_positive", ..
+        }))
+    ));
+}
+
+#[test]
+fn auto_build_rejects_false_component_claims_and_invalid_output_handles() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(2), Domain::Any);
+    let b = graph.input(shape(2), Domain::Any);
+    let port = PortContract::new(shape(2), Domain::Any);
+    let faulty = ConsumerBlock {
+        spec: MathContract::new(vec![port.clone(), port.clone()], port)
+            .with_claim(ContractClaim::Nonnegative),
+        claimed: true,
+    };
+    let out = graph.apply_module(&faulty, &[a, b]).unwrap();
+    assert!(matches!(
+        ArchitectureAutoCompiler::default().plan(
+            &graph, &[out], &[], GpuRequirement::AllowUnsupported,
+        ),
+        Err(AutoBuildError::Proof(ProofError::UnsupportedGuarantee { .. }))
+    ));
+
+    let mut foreign_graph = NeuralGraph::default();
+    let foreign = foreign_graph.input(shape(2), Domain::Any);
+    assert!(matches!(
+        ArchitectureAutoCompiler::default().plan(
+            &graph, &[foreign], &[], GpuRequirement::AllowUnsupported,
+        ),
+        Err(AutoBuildError::Proof(ProofError::InvalidGraph(NeuralError::InvalidNode)))
+    ));
+}
+
+#[test]
+fn auto_build_deduplicates_goals_and_catches_invalid_module_capture() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(shape(2), Domain::Any);
+    let b = graph.input(shape(2), Domain::Any);
+    let c = graph.relu(a).unwrap();
+    let task = || ArchitectureProofTask::Goal(ProofGoal {
+        name: "same".into(),
+        output: c,
+        kind: ProofGoalKind::EqualTo { other: c },
+    });
+    assert!(matches!(
+        ArchitectureAutoCompiler::default().plan(
+            &graph, &[c], &[task(), task()], GpuRequirement::AllowUnsupported,
+        ),
+        Err(AutoBuildError::DuplicateTask(name)) if name == "same"
+    ));
+
+    struct Hidden {
+        spec: MathContract,
+        capture: NodeId,
+    }
+    impl NeuralModule for Hidden {
+        fn name(&self) -> &'static str { "hidden_capture" }
+        fn contract(&self) -> &MathContract { &self.spec }
+        fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId])
+            -> Result<NodeId, NeuralError> {
+            graph.add(inputs[0], self.capture)
+        }
+    }
+    let port = PortContract::new(shape(2), Domain::Any);
+    let module = Hidden {
+        spec: MathContract::new(vec![port.clone()], port),
+        capture: b,
+    };
+    let before = graph.nodes().len();
+    assert!(matches!(
+        graph.apply_module(&module, &[a]),
+        Err(NeuralError::ContractViolation {
+            detail: "undeclared external capture", ..
+        })
+    ));
+    assert_eq!(graph.nodes().len(), before);
+}
+
+
+#[test]
+fn auto_build_plans_named_multi_output_state_transition_and_global_scan_theorem() {
+    struct Step {
+        contract: MultiOutputContract,
+    }
+    impl MultiOutputModule for Step {
+        fn name(&self) -> &'static str { "external_step" }
+        fn contract(&self) -> &MultiOutputContract { &self.contract }
+        fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId])
+            -> Result<Vec<NodeId>, NeuralError> {
+            let mask = graph.positive_mask(inputs[1])?;
+            let next = graph.select_positive(mask, inputs[1], inputs[0])?;
+            let readout = graph.relu(next)?;
+            Ok(vec![next, readout])
+        }
+    }
+
+    let port = PortContract::new(shape(3), Domain::NonNegativeFinite);
+    let named = |name| NamedPortContract::new(name, port.clone());
+    let step = Step {
+        contract: MultiOutputContract {
+            inputs: vec![named("state"), named("input")],
+            outputs: vec![
+                NamedPortContract {
+                    name: "next_state",
+                    port: port.clone(),
+                    claims: vec![ContractClaim::Nonnegative],
+                },
+                named("output"),
+            ],
+        },
+    };
+    let mut graph = NeuralGraph::default();
+    let initial = graph.input(shape(3), Domain::NonNegativeFinite);
+    let first = graph.input(shape(3), Domain::NonNegativeFinite);
+    let second = graph.input(shape(3), Domain::NonNegativeFinite);
+    let scan = graph.scan_fixed(&step, initial, &[first, second]).unwrap();
+    let plan = ArchitectureAutoCompiler::default()
+        .plan(
+            &graph, &scan.proof_outputs(),
+            &[ArchitectureProofTask::FixedScanNonnegative {
+                name: "consumer_state".into(),
+                scan,
+            }],
+            GpuRequirement::AllowUnsupported,
+        ).unwrap();
+    assert_eq!(plan.connectivity.module_instances, 2);
+    assert_eq!(plan.connectivity.module_ports, 8);
+    assert_eq!(plan.goals.len(), 1);
+    assert!(plan.goals[0].1.theorem_names().iter().any(|n| {
+        n == "scan_consumer_state_global_nonnegative"
+    }));
+    assert!(plan.gpu.iter().all(|item| matches!(item, PlannedGpu::Unsupported { .. })));
+}
+
+
+#[test]
+fn auto_build_refuses_successful_but_disconnected_property() {
+    let mut graph = NeuralGraph::default();
+    let input = graph.input(shape(2), Domain::Any);
+    let detached = graph.input(shape(2), Domain::Any);
+    let output = graph.relu(input).unwrap();
+    let task = ArchitectureProofTask::Goal(ProofGoal {
+        name: "irrelevant".into(),
+        output: detached,
+        kind: ProofGoalKind::EqualTo { other: detached },
+    });
+    assert!(matches!(
+        ArchitectureAutoCompiler::default().plan(
+            &graph, &[output], &[task], GpuRequirement::AllOutputs,
+        ),
+        Err(AutoBuildError::InvalidConnection(message))
+            if message.contains("not connected")
+    ));
+}

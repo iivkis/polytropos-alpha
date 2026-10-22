@@ -29,6 +29,7 @@
 //! structural validation is distinct from semantic proof or JIT/SASS assurance.
 
 mod architecture;
+mod auto_build;
 mod certificate;
 mod cuda;
 mod error;
@@ -45,6 +46,11 @@ mod tensor;
 mod translation;
 
 pub use architecture::{ArchitectureMetadata, ArchitectureSnapshot, snapshot_architecture};
+pub use auto_build::{
+    ArchitectureAutoCompiler, ArchitectureProofTask, AutoBuildError, AutoBuildPlan,
+    AutoBuildReport, ConnectivityEvidence, GpuRequirement, OutputBuildEvidence, PlannedGpu,
+    check_architecture_connectivity,
+};
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
 pub use gpu::{
