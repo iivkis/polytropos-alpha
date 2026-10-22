@@ -15,7 +15,7 @@ use verineural::{
     RneRangePlan, Shape, Tensor,
 };
 
-const FILES: [&str; 42] = [
+const FILES: [&str; 44] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -58,6 +58,8 @@ const FILES: [&str; 42] = [
     "nested_deep_contract.txt",
     "architecture_property.lean",
     "architecture_property_contract.txt",
+    "architecture_property_nested.lean",
+    "architecture_property_nested_contract.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -101,6 +103,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_nested.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_nested_deep.lean"))?;
     LeanProofEngine::default().check_file(&root.join("architecture_property.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("architecture_property_nested.lean"))?;
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
         "Scope: ideal integer ranges, concrete dyadic RNE traces, and reusable bounded RNE/module contracts; not machine FP32 certification"
@@ -175,6 +178,74 @@ impl NeuralModule for GlobalMulModule {
         inputs: &[NodeId],
     ) -> Result<NodeId, verineural::NeuralError> {
         graph.mul(inputs[0], inputs[1])
+    }
+}
+
+struct NestedGlobalProperty {
+    contract: MathContract,
+}
+
+impl NestedGlobalProperty {
+    fn new(shape: Shape) -> Self {
+        let any = |shape| PortContract::new(shape, Domain::Any);
+        Self {
+            contract: MathContract::new(
+                vec![any(shape.clone()), any(shape.clone()), any(shape.clone())],
+                any(shape),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for NestedGlobalProperty {
+    fn name(&self) -> &'static str {
+        "nested_global_property"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        let add = GlobalAddModule::new(Shape::new(vec![3])?);
+        let mul = GlobalMulModule::new(Shape::new(vec![3])?);
+        let left = graph.apply_module(&add, &[inputs[0], inputs[1]])?;
+        let right = graph.apply_module(&mul, &[inputs[0], inputs[2]])?;
+        graph.add(left, right)
+    }
+}
+
+struct OuterGlobalProperty {
+    contract: MathContract,
+}
+
+impl OuterGlobalProperty {
+    fn new(shape: Shape) -> Self {
+        Self {
+            contract: NestedGlobalProperty::new(shape).contract,
+        }
+    }
+}
+
+impl NeuralModule for OuterGlobalProperty {
+    fn name(&self) -> &'static str {
+        "outer_global_property"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        graph.apply_module(&NestedGlobalProperty::new(Shape::new(vec![3])?), inputs)
     }
 }
 
@@ -864,6 +935,67 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Recursive global ideal-Int property: the architecture has one outer
+    // wrapper, one nested DAG module, and two leaf Add/Mul child modules.
+    // Each theorem must consume only its immediate child boundary proofs.
+    let mut nested_property_graph = NeuralGraph::default();
+    let nested_property_shape = Shape::new(vec![3])?;
+    let nested_property_x =
+        nested_property_graph.input(nested_property_shape.clone(), Domain::Finite);
+    let nested_property_y =
+        nested_property_graph.input(nested_property_shape.clone(), Domain::Finite);
+    let nested_property_z =
+        nested_property_graph.input(nested_property_shape.clone(), Domain::Finite);
+    let nested_property_output = nested_property_graph.apply_module(
+        &OuterGlobalProperty::new(nested_property_shape),
+        &[nested_property_x, nested_property_y, nested_property_z],
+    )?;
+    let nested_property_program = LeanProofEngine::default().generate_global_nonnegative(
+        &nested_property_graph,
+        nested_property_output,
+        &[nested_property_x, nested_property_y, nested_property_z],
+    )?;
+    let nested_property_source = nested_property_program.source();
+    let nested_inner = nested_property_source
+        .split("theorem module_2_global_nonnegative")
+        .nth(1)
+        .and_then(|remainder| {
+            remainder
+                .split("theorem module_3_global_nonnegative")
+                .next()
+        })
+        .ok_or_else(|| io::Error::other("missing nested property theorem"))?;
+    let nested_outer = nested_property_source
+        .split("theorem module_3_global_nonnegative")
+        .nth(1)
+        .ok_or_else(|| io::Error::other("missing outer property theorem"))?;
+    if !nested_inner.contains("module_0_global_nonnegative")
+        || !nested_inner.contains("module_1_global_nonnegative")
+        || !nested_outer.contains("module_2_global_nonnegative")
+        || nested_outer.contains("module_0_global_nonnegative")
+        || nested_outer.contains("module_1_global_nonnegative")
+        || !nested_property_source
+            .contains("have arch_module_3 := module_3_global_nonnegative")
+    {
+        return Err(io::Error::other("invalid recursive global property composition").into());
+    }
+    write_checked_lean(
+        &root.join("architecture_property_nested.lean"),
+        nested_property_source,
+    )?;
+    fs::write(
+        root.join("architecture_property_nested_contract.txt"),
+        format!(
+            "property=output_nonnegative\nmodel=ideal-int\nmodules=4\nrecursive_depth=3\n\
+             hierarchy=outer_global_property>nested_global_property>global_add,global_mul\n\
+             assumptions=node:{},node:{},node:{}\n\
+             theorem=architecture_global_nonnegative\nfp32_gpu_claim=false\n",
+            nested_property_x.index(),
+            nested_property_y.index(),
+            nested_property_z.index(),
+        ),
+    )?;
+
     let input_snapshot = inputs
         .iter()
         .map(|(id, tensor)| {
@@ -964,11 +1096,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Stage 8 global property: architecture_global_nonnegative over a 3-module Add/Mul fan-in DAG (ideal-Int only)"
     );
     println!(
+        "Stage 8 nested global property: architecture_global_nonnegative with recursive_depth=3 and child theorem reuse (ideal-Int only)"
+    );
+    println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and an explicit global ideal-Int nonnegativity property; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and recursive global ideal-Int nonnegativity properties; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }

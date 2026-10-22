@@ -542,15 +542,12 @@ impl LeanProofEngine {
             if !selected.insert(module_index) {
                 continue;
             }
-            if (0..module_index)
-                .any(|child_index| module_contains(graph, module_index, child_index))
-            {
-                return Err(ProofError::UnsupportedGuarantee {
-                    node: modules[module_index].output.index(),
-                });
-            }
-
-            let proof = build_module_nonnegative_proof(graph, module_index, &arguments)?;
+            let proof = build_module_nonnegative_proof(
+                graph,
+                module_index,
+                &arguments,
+                &mut module_proofs,
+            )?;
             for &port in &proof.required_ports {
                 let input = modules[module_index].inputs[port];
                 if assumption_set.contains(&input.index()) {
@@ -569,7 +566,6 @@ impl LeanProofEngine {
                 }
                 pending.push(producer_index);
             }
-            module_proofs.insert(module_index, proof);
         }
 
         let namespace_end = "end VeriNeural.Generated\n";
@@ -582,9 +578,8 @@ impl LeanProofEngine {
             .source
             .truncate(program.source.len() - namespace_end.len());
 
-        for &module_index in &selected {
+        for (&module_index, proof) in &module_proofs {
             let module = &modules[module_index];
-            let proof = &module_proofs[&module_index];
             let proof_params = proof
                 .required_ports
                 .iter()
@@ -758,7 +753,11 @@ fn build_module_nonnegative_proof(
     graph: &NeuralGraph,
     module_index: usize,
     arguments: &str,
+    module_proofs: &mut BTreeMap<usize, ModuleNonnegativeProof>,
 ) -> Result<ModuleNonnegativeProof, ProofError> {
+    if let Some(proof) = module_proofs.get(&module_index) {
+        return Ok(proof.clone());
+    }
     let module = &graph.modules()[module_index];
     let boundary = module
         .inputs
@@ -776,11 +775,14 @@ fn build_module_nonnegative_proof(
         &boundary,
         &mut required_ports,
         &mut cache,
+        module_proofs,
     )?;
-    Ok(ModuleNonnegativeProof {
+    let proof = ModuleNonnegativeProof {
         required_ports: required_ports.into_iter().collect(),
         proof_term,
-    })
+    };
+    module_proofs.insert(module_index, proof.clone());
+    Ok(proof)
 }
 
 fn prove_module_node_nonnegative(
@@ -791,6 +793,7 @@ fn prove_module_node_nonnegative(
     boundary: &BTreeMap<usize, usize>,
     required_ports: &mut BTreeSet<usize>,
     cache: &mut BTreeMap<usize, String>,
+    module_proofs: &mut BTreeMap<usize, ModuleNonnegativeProof>,
 ) -> Result<String, ProofError> {
     if let Some(proof) = cache.get(&index) {
         return Ok(proof.clone());
@@ -801,9 +804,52 @@ fn prove_module_node_nonnegative(
     }
 
     let module = &graph.modules()[module_index];
-    if index < module.body_start {
+    if index < module.body_start || index > module.output.index() {
         return Err(ProofError::UnsupportedGuarantee { node: index });
     }
+
+    // A direct child is selected by IR body ranges. Grandchildren cannot
+    // bypass their immediate parent theorem even when outputs are identical.
+    let children = (0..module_index)
+        .filter(|&child_index| {
+            module_contains(graph, module_index, child_index)
+                && graph.modules()[child_index].output.index() == index
+                && !(0..module_index).any(|parent_index| {
+                    parent_index != child_index
+                        && module_contains(graph, module_index, parent_index)
+                        && module_contains(graph, parent_index, child_index)
+                })
+        })
+        .collect::<Vec<_>>();
+    if children.len() > 1 {
+        return Err(ProofError::UnsupportedGuarantee { node: index });
+    }
+    if let Some(&child_index) = children.first() {
+        let child_proof =
+            build_module_nonnegative_proof(graph, child_index, arguments, module_proofs)?;
+        let mut args = vec![arguments.to_owned()];
+        for &port in &child_proof.required_ports {
+            let child_input = graph.modules()[child_index].inputs[port].index();
+            let input_proof = prove_module_node_nonnegative(
+                graph,
+                module_index,
+                child_input,
+                arguments,
+                boundary,
+                required_ports,
+                cache,
+                module_proofs,
+            )?;
+            args.push(format!("({input_proof})"));
+        }
+        let result = format!(
+            "(module_{child_index}_global_nonnegative {})",
+            args.join(" ")
+        );
+        cache.insert(index, result.clone());
+        return Ok(result);
+    }
+
     let node = &graph.nodes()[index];
     let call = |node_index: usize| format!("(node_{node_index} {arguments})");
     let proof = match node.operation {
@@ -811,22 +857,12 @@ fn prove_module_node_nonnegative(
             let left = node.inputs[0].index();
             let right = node.inputs[1].index();
             let left_proof = prove_module_node_nonnegative(
-                graph,
-                module_index,
-                left,
-                arguments,
-                boundary,
-                required_ports,
-                cache,
+                graph, module_index, left, arguments, boundary,
+                required_ports, cache, module_proofs,
             )?;
             let right_proof = prove_module_node_nonnegative(
-                graph,
-                module_index,
-                right,
-                arguments,
-                boundary,
-                required_ports,
-                cache,
+                graph, module_index, right, arguments, boundary,
+                required_ports, cache, module_proofs,
             )?;
             let theorem = if matches!(node.operation, Operation::Add) {
                 "VeriNeural.add_nonnegative"
@@ -848,13 +884,8 @@ fn prove_module_node_nonnegative(
         Operation::Reshape(_) => {
             let input = node.inputs[0].index();
             let input_proof = prove_module_node_nonnegative(
-                graph,
-                module_index,
-                input,
-                arguments,
-                boundary,
-                required_ports,
-                cache,
+                graph, module_index, input, arguments, boundary,
+                required_ports, cache, module_proofs,
             )?;
             format!(
                 "VeriNeural.reshape_nonnegative {} ({input_proof})",

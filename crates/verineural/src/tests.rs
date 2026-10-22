@@ -120,6 +120,84 @@ impl NeuralModule for MulModule {
     }
 }
 
+struct PropertyInnerModule {
+    contract: MathContract,
+}
+
+impl PropertyInnerModule {
+    fn new(dims: &[usize]) -> Self {
+        Self {
+            contract: MathContract::new(
+                vec![port(dims, Domain::Any); 3],
+                port(dims, Domain::Any),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for PropertyInnerModule {
+    fn name(&self) -> &'static str {
+        "property_inner"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        let add = AddModule::new(&[3]);
+        let mul = MulModule::new(&[3]);
+        let left = graph.apply_module(&add, &[inputs[0], inputs[1]])?;
+        let right = graph.apply_module(&mul, &[inputs[0], inputs[2]])?;
+        graph.add(left, right)
+    }
+}
+
+struct PropertyOuterModule {
+    contract: MathContract,
+}
+
+impl PropertyOuterModule {
+    fn new(dims: &[usize]) -> Self {
+        Self {
+            contract: PropertyInnerModule::new(dims).contract,
+        }
+    }
+}
+
+impl NeuralModule for PropertyOuterModule {
+    fn name(&self) -> &'static str {
+        "property_outer"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.apply_module(&PropertyInnerModule::new(&[3]), inputs)
+    }
+}
+
+struct CapturingPropertyModule {
+    contract: MathContract,
+    undeclared: NodeId,
+}
+
+impl NeuralModule for CapturingPropertyModule {
+    fn name(&self) -> &'static str {
+        "capturing_property"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.apply_module(&AddModule::new(&[3]), &[inputs[0], self.undeclared])
+    }
+}
+
 struct IncorrectClaim {
     contract: MathContract,
 }
@@ -413,6 +491,71 @@ fn proof_generator_composes_explicit_global_nonnegative_property_over_module_dag
             },
         ]
     );
+}
+
+#[test]
+fn proof_generator_composes_global_nonnegative_recursively_through_nested_dag() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[3]), Domain::Finite);
+    let y = graph.input(shape(&[3]), Domain::Finite);
+    let z = graph.input(shape(&[3]), Domain::Finite);
+    let output = graph
+        .apply_module(&PropertyOuterModule::new(&[3]), &[x, y, z])
+        .unwrap();
+    assert_eq!(graph.modules().len(), 4);
+    assert_eq!(graph.modules()[0].name, "add_module");
+    assert_eq!(graph.modules()[1].name, "mul_module");
+    assert_eq!(graph.modules()[2].name, "property_inner");
+    assert_eq!(graph.modules()[3].name, "property_outer");
+
+    let program = LeanProofEngine::default()
+        .generate_global_nonnegative(&graph, output, &[x, y, z])
+        .unwrap();
+    let source = program.source();
+    let inner = source
+        .split("theorem module_2_global_nonnegative")
+        .nth(1)
+        .unwrap()
+        .split("theorem module_3_global_nonnegative")
+        .next()
+        .unwrap();
+    let outer = source
+        .split("theorem module_3_global_nonnegative")
+        .nth(1)
+        .unwrap();
+    assert!(inner.contains("module_0_global_nonnegative"));
+    assert!(inner.contains("module_1_global_nonnegative"));
+    assert!(outer.contains("module_2_global_nonnegative"));
+    assert!(!outer.contains("module_0_global_nonnegative"));
+    assert!(!outer.contains("module_1_global_nonnegative"));
+    assert!(source.contains("have arch_module_3 := module_3_global_nonnegative"));
+    assert!(!source.contains("have arch_module_0 :="));
+    assert!(!source.contains("have arch_module_1 :="));
+    assert!(!source.contains("have arch_module_2 :="));
+    assert!(source.contains("exact arch_module_3"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+#[test]
+fn proof_generator_nested_global_nonnegative_rejects_undeclared_capture() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[3]), Domain::Finite);
+    let captured = graph.input(shape(&[3]), Domain::Finite);
+    let module = CapturingPropertyModule {
+        contract: MathContract::new(
+            vec![port(&[3], Domain::Any)],
+            port(&[3], Domain::Any),
+        ),
+        undeclared: captured,
+    };
+    let output = graph.apply_module(&module, &[x]).unwrap();
+    assert!(matches!(
+        LeanProofEngine::default()
+            .generate_global_nonnegative(&graph, output, &[x, captured]),
+        Err(ProofError::UnsupportedGuarantee { node })
+            if node == captured.index()
+    ));
 }
 
 #[test]
