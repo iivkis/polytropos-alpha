@@ -787,6 +787,7 @@ theorem nonpositive_observation {{ideal : Int}}
 theorem ambiguous_has_opposite_models :
     VeriNeural.ApproxContract {bound} {epsilon} (1 : Int) 0 ∧
     VeriNeural.ApproxContract {bound} {epsilon} (-1 : Int) 0 := by
+  unfold VeriNeural.ApproxContract VeriNeural.ApproxWithin VeriNeural.Within
   decide
 
 end VeriNeural.Generated.RneThreshold
