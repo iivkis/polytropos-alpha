@@ -366,14 +366,22 @@ mod tests {
         );
         assert!(!snapshot.dot.contains("module-input-port"));
         assert!(snapshot.dot.contains(r#"vn_input_port_0="n0""#));
-        // Interface relays keep external wires near their owning modules.
-        assert!(snapshot.dot.contains("n0 -> m6_in0 "));
-        assert!(snapshot.dot.contains("m6_in0 -> m2_in0 "));
-        assert!(snapshot.dot.contains("m2_in0 -> m0_in0 "));
-        assert!(snapshot.dot.contains("m0_in0 -> n5 "));
-        assert!(snapshot.dot.contains("n3 -> m6_in3 "));
-        assert!(!snapshot.dot.contains("n0 -> n5 "));
-        assert!(!snapshot.dot.contains("n3 -> n6 "));
+        // Match complete DOT endpoints, not substrings. In particular,
+        // "m0_in0 -> n5" contains "n0 -> n5", which is NOT a direct IR wire.
+        let has_edge = |source: &str, destination: &str| {
+            let prefix = format!("{source} -> {destination} [");
+            snapshot
+                .dot
+                .lines()
+                .any(|line| line.trim_start().starts_with(&prefix))
+        };
+        assert!(has_edge("n0", "m6_in0"));
+        assert!(has_edge("m6_in0", "m2_in0"));
+        assert!(has_edge("m2_in0", "m0_in0"));
+        assert!(has_edge("m0_in0", "n5"));
+        assert!(has_edge("n3", "m6_in3"));
+        assert!(!has_edge("n0", "n5"));
+        assert!(!has_edge("n3", "n6"));
         assert!(snapshot.dot.contains("vn_semantic_src=\"n0\""));
         assert!(snapshot.dot.contains("vn_visual_src=\"m0_in0\""));
         assert!(snapshot.dot.contains("rank=same; n0; n1; n2; n3; n4;"));
