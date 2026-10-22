@@ -14,7 +14,7 @@ use verineural::{
     Shape, Tensor,
 };
 
-const FILES: [&str; 7] = [
+const FILES: [&str; 14] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -22,6 +22,13 @@ const FILES: [&str; 7] = [
     "fused/graph.ptx",
     "inputs.bits",
     "output.bits",
+    "numeric_matmul.lean",
+    "baseline_matmul/graph.ll",
+    "baseline_matmul/graph.ptx",
+    "fused_matmul/graph.ll",
+    "fused_matmul/graph.ptx",
+    "matmul_inputs.bits",
+    "matmul_output.bits",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -56,6 +63,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
         .into());
     }
     LeanProofEngine::default().check_file(&root.join("numeric.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
     println!("Stage 8: saved Lean source and SHA-256 artifact manifest PASS");
     println!("Scope: conditional integer range proof, not machine FP32 certification");
     Ok(())
@@ -99,6 +107,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let expected = plan.integer_reference(&inputs)?;
     fs::write(root.join("numeric.lean"), plan.lean_source()?)?;
     LeanProofEngine::default().check_file(&root.join("numeric.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
 
     let baseline =
         GpuEngine::default().with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Disabled)?);
@@ -116,6 +125,59 @@ fn main() -> Result<(), Box<dyn Error>> {
             actual.values().len()
         );
     }
+
+    // Independent reduction graph: MatMul -> Mul -> BiasAdd -> Relu.
+    // A tighter bound proves even partial dot sums remain exactly representable.
+    let mut mat_graph = NeuralGraph::default();
+    let lhs = Tensor::new(Shape::new(vec![2, 3])?, vec![2.0, -1.0, 3.0, 0.0, 4.0, -2.0])?;
+    let rhs = Tensor::new(Shape::new(vec![3, 2])?, vec![1.0, 2.0, -3.0, 1.0, 2.0, -1.0])?;
+    let mask = Tensor::new(Shape::new(vec![2, 2])?, vec![2.0, 3.0, 2.0, 4.0])?;
+    let mbias = Tensor::new(Shape::new(vec![2])?, vec![1.0, -2.0])?;
+    let aid = mat_graph.input(lhs.shape().clone(), Domain::Finite);
+    let bid = mat_graph.input(rhs.shape().clone(), Domain::Finite);
+    let mid = mat_graph.input(mask.shape().clone(), Domain::Finite);
+    let biasid = mat_graph.input(mbias.shape().clone(), Domain::Finite);
+    let product = mat_graph.matmul(aid, bid)?;
+    let scaled = mat_graph.mul(product, mid)?;
+    let bias_added = mat_graph.bias_add(scaled, biasid)?;
+    let mat_output = mat_graph.relu(bias_added)?;
+    let mat_inputs = [(aid, lhs), (bid, rhs), (mid, mask), (biasid, mbias)];
+    let mat_plan = ExactFp32Plan::compile_with_input_bound(&mat_graph, mat_output, 8)?;
+    let mat_expected = mat_plan.integer_reference(&mat_inputs)?;
+    fs::write(root.join("numeric_matmul.lean"), mat_plan.lean_source()?)?;
+    LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
+    for (label, engine) in [
+        ("baseline_matmul", &baseline),
+        ("fused_matmul", &fused),
+    ] {
+        let plan = engine.compile(&mat_graph, mat_output)?;
+        if label == "fused_matmul" && plan.removed_kernel_count() != 2 {
+            return Err(io::Error::other("expected Mul/BiasAdd/Relu chain fusion").into());
+        }
+        let actual = engine.execute(&plan, &mat_inputs, &root.join(label))?;
+        mat_plan.compare_gpu(&mat_inputs, &actual)?;
+        println!(
+            "Stage 8 {label}: {} exact integer MatMul/Mul values match i64 oracle",
+            actual.values().len()
+        );
+    }
+    fs::write(
+        root.join("matmul_inputs.bits"),
+        mat_inputs
+            .iter()
+            .map(|(id, tensor)| {
+                format!(
+                    "node={} shape={:?} bits={:?}\n",
+                    id.index(), tensor.shape().dims(),
+                    tensor.values().iter().map(|x| format!("{:08x}", x.to_bits())).collect::<Vec<_>>()
+                )
+            })
+            .collect::<String>(),
+    )?;
+    fs::write(
+        root.join("matmul_output.bits"),
+        mat_expected.values().iter().map(|x| format!("{:08x}\n", x.to_bits())).collect::<String>(),
+    )?;
 
     let input_snapshot = inputs
         .iter()
@@ -158,9 +220,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(err);
     }
     println!(
-        "Stage 8: input |x| <= {}, every intermediate |value| <= {}",
+        "Stage 8 additive profile: input |x| <= {}, intermediate |value| <= {}",
         ExactFp32Plan::input_bound(),
         plan.output_bound()
+    );
+    println!(
+        "Stage 8 MatMul/Mul profile: input |x| <= {}, intermediate |value| <= {}",
+        mat_plan.max_input_bound(),
+        mat_plan.output_bound()
     );
     println!(
         "Manifest SHA256 (pin externally): {}",

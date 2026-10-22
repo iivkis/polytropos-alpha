@@ -94,6 +94,12 @@ fn stage8_rejects_unsupported_ops_and_unrepresentable_intermediates() {
     let product = graph.mul(x, y).unwrap();
     assert!(matches!(
         ExactFp32Plan::compile(&graph, product),
+        Err(NumericError::UnsupportedRange { .. })
+    ));
+    let nonneg = graph.input(Shape::new(vec![2]).unwrap(), Domain::NonNegativeFinite);
+    let sqrt = graph.sqrt(nonneg).unwrap();
+    assert!(matches!(
+        ExactFp32Plan::compile(&graph, sqrt),
         Err(NumericError::UnsupportedOperation { .. })
     ));
 
@@ -171,4 +177,67 @@ fn stage8_lean_uses_only_live_hypotheses_and_explicit_bias_shapes() {
     let library = include_str!("../../../lean/VeriNeural/Numeric.lean");
     assert!(library.contains("Int.max_eq_right"));
     assert!(library.contains("Int.max_eq_left"));
+}
+
+#[test]
+fn stage8_mul_matmul_range_proofs_and_i64_oracle_compose() {
+    let mut graph = NeuralGraph::default();
+    let a = graph.input(Shape::new(vec![2, 3]).unwrap(), Domain::Finite);
+    let b = graph.input(Shape::new(vec![3, 2]).unwrap(), Domain::Finite);
+    let scale = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let bias = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let dot = graph.matmul(a, b).unwrap();
+    let product = graph.mul(dot, scale).unwrap();
+    let biased = graph.bias_add(product, bias).unwrap();
+    let output = graph.relu(biased).unwrap();
+
+    let plan = ExactFp32Plan::compile_with_input_bound(&graph, output, 8).unwrap();
+    assert_eq!(plan.max_input_bound(), 8);
+    // Bound: k * input^2 = 3*64=192, then Mul by 8, then BiasAdd 8.
+    assert_eq!(plan.output_bound(), 1544);
+    let src = plan.lean_source().unwrap();
+    assert!(src.contains("tensor_within_mul"));
+    assert!(src.contains("tensor_within_matmul (m := 2) (k := 3) (n := 2)"));
+    assert!(src.contains("theorem output_integer_range"));
+    assert!(src.contains("1544"));
+
+    let tensors = [
+        (a, Tensor::new(Shape::new(vec![2, 3]).unwrap(), vec![2.0, -1.0, 3.0, 0.0, 4.0, -2.0]).unwrap()),
+        (b, Tensor::new(Shape::new(vec![3, 2]).unwrap(), vec![1.0, 2.0, -3.0, 1.0, 2.0, -1.0]).unwrap()),
+        (scale, Tensor::new(Shape::new(vec![2, 2]).unwrap(), vec![2.0, 3.0, 2.0, 4.0]).unwrap()),
+        (bias, Tensor::new(Shape::new(vec![2]).unwrap(), vec![1.0, -2.0]).unwrap()),
+    ];
+    let result = plan.integer_reference(&tensors).unwrap();
+    assert_eq!(result.values(), &[23.0, 0.0, 0.0, 22.0]);
+    plan.compare_gpu(&tensors, &result).unwrap();
+}
+
+#[test]
+fn stage8_multiplication_reduction_fail_closed_when_not_exactly_bounded() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let y = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let product = graph.mul(x, y).unwrap();
+    assert!(matches!(
+        ExactFp32Plan::compile(&graph, product),
+        Err(NumericError::UnsupportedRange { .. })
+    ));
+    let bounded = ExactFp32Plan::compile_with_input_bound(&graph, product, 100).unwrap();
+    assert_eq!(bounded.output_bound(), 10_000);
+    assert!(ExactFp32Plan::compile_with_input_bound(&graph, product, 0).is_err());
+    assert!(ExactFp32Plan::compile_with_input_bound(&graph, product, 1_048_577).is_err());
+
+    let mut g = NeuralGraph::default();
+    let lhs = g.input(Shape::new(vec![1, 16]).unwrap(), Domain::Finite);
+    let rhs = g.input(Shape::new(vec![16, 1]).unwrap(), Domain::Finite);
+    let dot = g.matmul(lhs, rhs).unwrap();
+    assert!(matches!(
+        ExactFp32Plan::compile_with_input_bound(&g, dot, 2048),
+        Err(NumericError::UnsupportedRange { .. })
+    ));
+    assert_eq!(
+        ExactFp32Plan::compile_with_input_bound(&g, dot, 1024)
+            .unwrap().output_bound(),
+        16_777_216
+    );
 }

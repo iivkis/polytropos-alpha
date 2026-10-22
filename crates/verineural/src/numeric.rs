@@ -16,6 +16,7 @@ use crate::{LeanProofEngine, NeuralError, NeuralGraph, NodeId, Operation, ProofE
 
 const EXACT_F32_INTEGER_LIMIT: i64 = 1 << 24;
 const SOURCE_INTEGER_LIMIT: i64 = 1 << 20;
+const MEMORY_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Memory.lean");
 const NUMERIC_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Numeric.lean");
 
 #[derive(Debug)]
@@ -99,6 +100,7 @@ pub struct ExactFp32Plan {
     reachable: Vec<usize>,
     inputs: Vec<NodeId>,
     bounds: BTreeMap<usize, i64>,
+    max_input: i64,
 }
 
 impl ExactFp32Plan {
@@ -110,10 +112,27 @@ impl ExactFp32Plan {
         EXACT_F32_INTEGER_LIMIT
     }
 
-    /// Build the numerical contract from the same Semantic Neural IR as the
-    /// GPU lowering. Unsupported nonlinear/reduction ops fail closed.
+    /// Backwards-compatible conservative profile for purely additive graphs.
+    /// Products normally need a tighter explicit source bound.
     pub fn compile(graph: &NeuralGraph, output: NodeId) -> Result<Self, NumericError> {
+        Self::compile_with_input_bound(graph, output, SOURCE_INTEGER_LIMIT)
+    }
+
+    /// Check all reachable integer intermediates and left-to-right MatMul
+    /// partial sums against the exact-binary32 magnitude limit. A tighter
+    /// input bound permits safe products without weakening the guarantee.
+    pub fn compile_with_input_bound(
+        graph: &NeuralGraph,
+        output: NodeId,
+        max_input: i64,
+    ) -> Result<Self, NumericError> {
         graph.node(output)?;
+        if !(1..=SOURCE_INTEGER_LIMIT).contains(&max_input) {
+            return Err(NumericError::InvalidInput {
+                node: output.index(),
+                reason: "source bound must be in 1..=2^20",
+            });
+        }
         if graph.policy() != crate::FP32Policy::strict() {
             return Err(NumericError::InvalidInput {
                 node: output.index(),
@@ -131,6 +150,8 @@ impl ExactFp32Plan {
                 node.operation,
                 Operation::Input
                     | Operation::Add
+                    | Operation::Mul
+                    | Operation::MatMul
                     | Operation::BiasAdd
                     | Operation::Relu
                     | Operation::Reshape(_)
@@ -162,8 +183,16 @@ impl ExactFp32Plan {
             let node = &graph.nodes()[index];
             let parent = |position: usize| bounds[&node.inputs[position].index()];
             let bound = match node.operation {
-                Operation::Input => SOURCE_INTEGER_LIMIT,
+                Operation::Input => max_input,
                 Operation::Add | Operation::BiasAdd => parent(0) + parent(1),
+                Operation::Mul => parent(0).checked_mul(parent(1)).unwrap_or(i64::MAX),
+                Operation::MatMul => {
+                    let left = graph.nodes()[node.inputs[0].index()].shape.dims()[1];
+                    parent(0)
+                        .checked_mul(parent(1))
+                        .and_then(|product| i64::try_from(left).ok()?.checked_mul(product))
+                        .unwrap_or(i64::MAX)
+                }
                 Operation::Relu | Operation::Reshape(_) => parent(0),
                 _ => unreachable!("rejected during graph traversal"),
             };
@@ -178,6 +207,7 @@ impl ExactFp32Plan {
             reachable,
             inputs,
             bounds,
+            max_input,
         })
     }
 
@@ -189,11 +219,17 @@ impl ExactFp32Plan {
         &self.inputs
     }
 
+    pub fn max_input_bound(&self) -> i64 {
+        self.max_input
+    }
+
     /// Generate a Lean theorem for every reachable output node and its real
     /// composed input hypotheses. The result is NOT proof until Lean checks it.
     pub fn lean_source(&self) -> Result<String, NumericError> {
         let base = LeanProofEngine::default().generate(&self.graph, self.output)?;
         let mut source = base.source().to_owned();
+        source.push_str("\n\n");
+        source.push_str(MEMORY_LIBRARY);
         source.push_str("\n\n");
         source.push_str(NUMERIC_LIBRARY);
         source.push_str("\nnamespace VeriNeural.Generated\n\n");
@@ -231,7 +267,8 @@ impl ExactFp32Plan {
                 .iter()
                 .map(|source| {
                     format!(
-                        "(h_{source} : VeriNeural.TensorWithin {SOURCE_INTEGER_LIMIT} x_{source})"
+                        "(h_{source} : VeriNeural.TensorWithin {} x_{source})",
+                        self.max_input
                     )
                 })
                 .collect::<Vec<_>>()
@@ -268,6 +305,27 @@ impl ExactFp32Plan {
                     proof(node.inputs[0].index()),
                     proof(node.inputs[1].index())
                 ),
+                Operation::Mul => format!(
+                    "VeriNeural.tensor_within_mul {} {}",
+                    proof(node.inputs[0].index()),
+                    proof(node.inputs[1].index())
+                ),
+                Operation::MatMul => {
+                    let left = &self.graph.nodes()[node.inputs[0].index()];
+                    let right = &self.graph.nodes()[node.inputs[1].index()];
+                    format!(
+                        "VeriNeural.tensor_within_matmul (m := {}) (k := {}) (n := {}) \
+                         (a := {}) (b := {}) (by decide : 0 < {}) {} {}",
+                        left.shape.dims()[0],
+                        left.shape.dims()[1],
+                        right.shape.dims()[1],
+                        call(node.inputs[0].index()),
+                        call(node.inputs[1].index()),
+                        right.shape.dims()[1],
+                        proof(node.inputs[0].index()),
+                        proof(node.inputs[1].index()),
+                    )
+                }
                 Operation::BiasAdd => format!(
                     "VeriNeural.tensor_within_biasAdd (m := {}) (n := {}) (a := {}) (b := {}) \
                      (by decide : 0 < {}) {} {}",
@@ -333,13 +391,13 @@ impl ExactFp32Plan {
             tensor.validate_domain(node.domain)?;
             for value in tensor.values() {
                 if !value.is_finite()
-                    || value.abs() > SOURCE_INTEGER_LIMIT as f32
+                    || value.abs() > self.max_input as f32
                     || value.fract() != 0.0
                     || (value.to_bits() == (-0.0f32).to_bits())
                 {
                     return Err(NumericError::InvalidInput {
                         node: id.index(),
-                        reason: "requires finite integral f32 values, no -0, |x| <= 2^20",
+                        reason: "requires finite integral f32 values, no -0, |x| <= plan input bound",
                     });
                 }
             }
@@ -378,6 +436,29 @@ impl ExactFp32Plan {
                     let left = &values[&node.inputs[0].index()];
                     let right = &values[&node.inputs[1].index()];
                     left.iter().zip(right).map(|(&a, &b)| a + b).collect()
+                }
+                Operation::Mul => {
+                    let left = &values[&node.inputs[0].index()];
+                    let right = &values[&node.inputs[1].index()];
+                    left.iter().zip(right).map(|(&a, &b)| a * b).collect()
+                }
+                Operation::MatMul => {
+                    let left = &values[&node.inputs[0].index()];
+                    let right = &values[&node.inputs[1].index()];
+                    let inner = self.graph.nodes()[node.inputs[0].index()].shape.dims()[1];
+                    let rows = node.shape.dims()[0];
+                    let cols = node.shape.dims()[1];
+                    let mut out = vec![0i64; rows * cols];
+                    for row in 0..rows {
+                        for col in 0..cols {
+                            let mut sum = 0i64;
+                            for j in 0..inner {
+                                sum += left[row * inner + j] * right[j * cols + col];
+                            }
+                            out[row * cols + col] = sum;
+                        }
+                    }
+                    out
                 }
                 Operation::BiasAdd => {
                     let left = &values[&node.inputs[0].index()];
