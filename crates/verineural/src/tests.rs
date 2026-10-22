@@ -127,10 +127,7 @@ struct PropertyInnerModule {
 impl PropertyInnerModule {
     fn new(dims: &[usize]) -> Self {
         Self {
-            contract: MathContract::new(
-                vec![port(dims, Domain::Any); 3],
-                port(dims, Domain::Any),
-            ),
+            contract: MathContract::new(vec![port(dims, Domain::Any); 3], port(dims, Domain::Any)),
         }
     }
 }
@@ -543,10 +540,7 @@ fn proof_generator_nested_global_nonnegative_rejects_undeclared_capture() {
     let x = graph.input(shape(&[3]), Domain::Finite);
     let captured = graph.input(shape(&[3]), Domain::Finite);
     let module = CapturingPropertyModule {
-        contract: MathContract::new(
-            vec![port(&[3], Domain::Any)],
-            port(&[3], Domain::Any),
-        ),
+        contract: MathContract::new(vec![port(&[3], Domain::Any)], port(&[3], Domain::Any)),
         undeclared: captured,
     };
     let output = graph.apply_module(&module, &[x]).unwrap();

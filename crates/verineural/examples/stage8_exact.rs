@@ -974,8 +974,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         || !nested_outer.contains("module_2_global_nonnegative")
         || nested_outer.contains("module_0_global_nonnegative")
         || nested_outer.contains("module_1_global_nonnegative")
-        || !nested_property_source
-            .contains("have arch_module_3 := module_3_global_nonnegative")
+        || !nested_property_source.contains("have arch_module_3 := module_3_global_nonnegative")
     {
         return Err(io::Error::other("invalid recursive global property composition").into());
     }

@@ -857,12 +857,24 @@ fn prove_module_node_nonnegative(
             let left = node.inputs[0].index();
             let right = node.inputs[1].index();
             let left_proof = prove_module_node_nonnegative(
-                graph, module_index, left, arguments, boundary,
-                required_ports, cache, module_proofs,
+                graph,
+                module_index,
+                left,
+                arguments,
+                boundary,
+                required_ports,
+                cache,
+                module_proofs,
             )?;
             let right_proof = prove_module_node_nonnegative(
-                graph, module_index, right, arguments, boundary,
-                required_ports, cache, module_proofs,
+                graph,
+                module_index,
+                right,
+                arguments,
+                boundary,
+                required_ports,
+                cache,
+                module_proofs,
             )?;
             let theorem = if matches!(node.operation, Operation::Add) {
                 "VeriNeural.add_nonnegative"
@@ -884,8 +896,14 @@ fn prove_module_node_nonnegative(
         Operation::Reshape(_) => {
             let input = node.inputs[0].index();
             let input_proof = prove_module_node_nonnegative(
-                graph, module_index, input, arguments, boundary,
-                required_ports, cache, module_proofs,
+                graph,
+                module_index,
+                input,
+                arguments,
+                boundary,
+                required_ports,
+                cache,
+                module_proofs,
             )?;
             format!(
                 "VeriNeural.reshape_nonnegative {} ({input_proof})",
