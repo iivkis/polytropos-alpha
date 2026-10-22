@@ -292,7 +292,6 @@ fn auto_build_refuses_successful_but_disconnected_property() {
     ));
 }
 
-
 #[test]
 fn auto_build_creates_dot_and_png_before_manifest_and_replays_without_mutation() {
     // The previous auto-build failed after Lean/PTX because SHA256SUMS listed
@@ -332,7 +331,10 @@ fn auto_build_creates_dot_and_png_before_manifest_and_replays_without_mutation()
         )
         .unwrap();
     assert_eq!(generated.manifest_sha256, replayed.manifest_sha256);
-    assert_eq!(std::fs::read_to_string(folder.join("architecture.dot")).unwrap(), saved_dot);
+    assert_eq!(
+        std::fs::read_to_string(folder.join("architecture.dot")).unwrap(),
+        saved_dot
+    );
     assert_eq!(std::fs::read(folder.join("architecture.png")).unwrap(), png);
 
     std::fs::write(folder.join("architecture.png"), b"tampered PNG").unwrap();
