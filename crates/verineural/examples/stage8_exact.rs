@@ -12,10 +12,10 @@ use std::process::Command;
 use verineural::{
     Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, MathContract, NeuralGraph,
     NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd, ResidualFfn, RneFp32Plan,
-    RneRangePlan, RneThresholdSide, Shape, Tensor,
+    RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx,
 };
 
-const FILES: [&str; 48] = [
+const FILES: [&str; 55] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -50,6 +50,13 @@ const FILES: [&str; 48] = [
     "range_contract.txt",
     "numeric_threshold.lean",
     "threshold_certificates.txt",
+    "baseline_fma/graph.ll",
+    "baseline_fma/graph.ptx",
+    "fused_fma/graph.ll",
+    "fused_fma/graph.ptx",
+    "fma_probe_inputs.bits",
+    "fma_probe_output.bits",
+    "fp32_contraction_report.txt",
     "numeric_architecture.lean",
     "architecture_contract.txt",
     "numeric_architecture_dag.lean",
@@ -65,6 +72,40 @@ const FILES: [&str; 48] = [
     "architecture_property_matmul_bias.lean",
     "architecture_property_matmul_bias_contract.txt",
 ];
+
+const PTX_PROFILES: [&str; 10] = [
+    "baseline",
+    "fused",
+    "baseline_matmul",
+    "fused_matmul",
+    "baseline_rne",
+    "fused_rne",
+    "baseline_rne_matmul",
+    "fused_rne_matmul",
+    "baseline_fma",
+    "fused_fma",
+];
+
+/// Recheck the actually saved PTX/LLVM pairs, not only the Rust generator.
+/// Static opcode/rounding checks are not a PTX-to-SASS translation proof.
+fn fp32_contraction_report(root: &Path) -> Result<String, Box<dyn Error>> {
+    let mut report = String::from(
+        "scope=LLVM-inline-PTX-vs-emitted-PTX\n"
+    );
+    report.push_str("guarantee=static-rounded-add-mul-opcodes-and-no-PTX-FMA\n");
+    report.push_str("machine_fp32_sass_jit=trusted-not-proven\n");
+    for profile in PTX_PROFILES {
+        let dir = root.join(profile);
+        let llvm = fs::read_to_string(dir.join("graph.ll"))?;
+        let ptx = fs::read_to_string(dir.join("graph.ptx"))?;
+        let audit = audit_fp32_ptx(&llvm, &ptx)?;
+        report.push_str(&format!(
+            "{profile}:add.rn.f32={} mul.rn.f32={} fma=0\n",
+            audit.rounded_adds, audit.rounded_muls
+        ));
+    }
+    Ok(report)
+}
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
     let output = Command::new("sha256sum").arg(path).output()?;
@@ -110,6 +151,11 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("architecture_property.lean"))?;
     LeanProofEngine::default().check_file(&root.join("architecture_property_nested.lean"))?;
     LeanProofEngine::default().check_file(&root.join("architecture_property_matmul_bias.lean"))?;
+    if fs::read_to_string(root.join("fp32_contraction_report.txt"))?
+        != fp32_contraction_report(root)?
+    {
+        return Err(io::Error::other("saved Stage 8 FP32 PTX audit report mismatch").into());
+    }
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
         "Scope: ideal integer ranges, concrete dyadic RNE traces, and reusable bounded RNE/module contracts; not machine FP32 certification"
@@ -691,6 +737,54 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Adversarial contraction case: separate RNE yields zero, but a
+    // fused multiply-add leaves a positive 2^-46 residual after the bias.
+    // The fused CUDA Graph kernel must preserve the *two* roundings.
+    let a = f32::from_bits(0x3f80_0001);
+    let separately_rounded_product = a * a;
+    let fma_bias = -separately_rounded_product;
+    if (separately_rounded_product + fma_bias).to_bits() != 0.0f32.to_bits()
+        || a.mul_add(a, fma_bias).to_bits() == 0.0f32.to_bits()
+    {
+        return Err(io::Error::other("FMA-sensitive FP32 fixture is not discriminating").into());
+    }
+    let mut fma_graph = NeuralGraph::default();
+    let fma_shape = Shape::new(vec![1, 1])?;
+    let fma_x = fma_graph.input(fma_shape.clone(), Domain::Finite);
+    let fma_y = fma_graph.input(fma_shape.clone(), Domain::Finite);
+    let fma_b = fma_graph.input(Shape::new(vec![1])?, Domain::Finite);
+    let fma_product = fma_graph.mul(fma_x, fma_y)?;
+    let fma_biased = fma_graph.bias_add(fma_product, fma_b)?;
+    let fma_result = fma_graph.relu(fma_biased)?;
+    let fma_inputs = [
+        (fma_x, Tensor::new(fma_shape.clone(), vec![a])?),
+        (fma_y, Tensor::new(fma_shape, vec![a])?),
+        (fma_b, Tensor::new(Shape::new(vec![1])?, vec![fma_bias])?),
+    ];
+    for (label, engine) in [("baseline_fma", &baseline), ("fused_fma", &fused)] {
+        let program = engine.compile(&fma_graph, fma_result)?;
+        if label == "fused_fma" && program.removed_kernel_count() != 2 {
+            return Err(io::Error::other("FMA probe did not fuse Mul/BiasAdd/ReLU").into());
+        }
+        let output = engine.execute(&program, &fma_inputs, &root.join(label))?;
+        if output.values().len() != 1
+            || output.values()[0].to_bits() != 0.0f32.to_bits()
+        {
+            return Err(io::Error::other(format!(
+                "{label} introduced an unexpected FP32 contraction or rounding difference"
+            )).into());
+        }
+        println!("Stage 8 {label}: FMA-sensitive separate-rounding GPU probe matches +0 bits");
+    }
+    fs::write(
+        root.join("fma_probe_inputs.bits"),
+        format!(
+            "a={:08x}\nb={:08x}\nbias={:08x}\n",
+            a.to_bits(), a.to_bits(), fma_bias.to_bits()
+        ),
+    )?;
+    fs::write(root.join("fma_probe_output.bits"), "00000000\n")?;
+
     // Reusable range contract over a composed module. Unlike the concrete RNE
     // traces above, the values are arbitrary within the source tick interval.
     // Lean proves the scalar transfer rules under Binary32RneTick hypotheses;
@@ -1229,6 +1323,10 @@ end VeriNeural.Generated.RneThreshold
             .map(|x| format!("{:08x}\n", x.to_bits()))
             .collect::<String>(),
     )?;
+    fs::write(
+        root.join("fp32_contraction_report.txt"),
+        fp32_contraction_report(root)?,
+    )?;
     let result = Command::new("sha256sum")
         .args(FILES)
         .current_dir(root)
@@ -1313,12 +1411,13 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 ReLU threshold margins: conditional positive/nonpositive proofs plus explicit ambiguity witness"
     );
+    println!("Stage 8 FP32 PTX audit: explicit separate RNE mul/add, no emitted FMA/FTZ (LLVM/PTX static check only)");
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; a PTX opcode audit and adversarial FMA probe have been checked, but LLVM/PTX-to-machine translation and hardware remain trusted"
     );
     Ok(())
 }

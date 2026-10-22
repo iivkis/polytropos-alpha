@@ -22,7 +22,9 @@
 //! separate from FP32/GPU guarantees.
 //! Stage 8 ReLU threshold decisions use conditional per-node error margins;
 //! uncertain pre-activations remain indeterminate.
-//! The LLVM/PTX/GPU link is still trusted rather than formally certified.
+//! Strict FP32 NVPTX lowering uses explicit rounded PTX operations and
+//! rejects unsupported contraction at the emitted PTX level. The LLVM/PTX/GPU
+//! machine correspondence remains trusted rather than formally certified.
 
 mod certificate;
 mod cuda;
@@ -37,8 +39,8 @@ mod tensor;
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
 pub use gpu::{
-    GpuBenchmark, GpuEngine, GpuError, GpuExecution, GpuLaunchConfig, GpuMemoryContract,
-    GpuMemoryPattern, GpuProgram, ReluFusion,
+    audit_fp32_ptx, Fp32PtxAudit, GpuBenchmark, GpuEngine, GpuError, GpuExecution, GpuLaunchConfig,
+    GpuMemoryContract, GpuMemoryPattern, GpuProgram, ReluFusion,
 };
 pub use ir::{
     Domain, FP32Policy, FmaMode, GpuSemantics, MathContract, ModuleInvocation, NeuralGraph,

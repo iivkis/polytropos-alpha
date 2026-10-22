@@ -732,8 +732,8 @@ fn gpu_compiler_lowers_arithmetic_and_reshape_to_a_reachable_kernel_dag() {
     assert!(!ir.contains("define ptx_kernel void @vn_node_4"));
     assert!(ir.contains("icmp ult i32 %idx, %length"));
     assert!(ir.contains("fcmp uno float %x, %x"));
-    assert!(ir.contains("fadd float %x, %y"));
-    assert!(ir.contains("fmul float %x, %y"));
+    assert!(ir.contains("add.rn.f32 $0, $1, $2;"));
+    assert!(ir.contains("mul.rn.f32 $0, $1, $2;"));
     assert!(!ir.contains("fast "));
 }
 

@@ -117,11 +117,11 @@ tasks:
       - cargo run -p verineural --example stage7_benchmark --release
 
   numeric-stage8:
-    desc: Prove Stage 8 numeric composition and global ideal-Int MatMul/BiasAdd properties; compare CUDA and pin evidence
+    desc: Check Stage 8 Lean/RNE, FMA-sensitive baseline/fused CUDA, audit PTX RNE instructions and pin evidence
     cmds:
       - cargo run -p verineural --example stage8_exact
 
   verify-numeric-stage8:
-    desc: Verify saved Stage 8 integer, RNE trace, range-contract Lean proofs and SHA-256 artifacts without CUDA
+    desc: Offline recheck Stage 8 Lean, SHA-256 and saved LLVM/PTX contraction audit without CUDA
     cmds:
       - cargo run -p verineural --example stage8_exact -- --verify

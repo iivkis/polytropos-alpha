@@ -97,6 +97,9 @@ pub enum GpuError {
     LlvmFailed {
         diagnostics: String,
     },
+    Fp32PtxRejected {
+        reason: String,
+    },
     Driver(String),
     Cuda {
         function: &'static str,
@@ -130,6 +133,7 @@ impl fmt::Display for GpuError {
             Self::NoKernelGraph => write!(f, "GPU benchmark requires at least one CUDA kernel"),
             Self::Io(err) => write!(f, "GPU I/O failure: {err}"),
             Self::LlvmFailed { diagnostics } => write!(f, "NVPTX lowering failed: {diagnostics}"),
+            Self::Fp32PtxRejected { reason } => write!(f, "strict FP32 PTX audit rejected lowering: {reason}"),
             Self::Driver(message) => write!(f, "CUDA driver unavailable: {message}"),
             Self::Cuda { function, code } => write!(f, "{function} returned CUDA error {code}"),
         }
@@ -184,6 +188,95 @@ pub enum GpuMemoryPattern {
 }
 
 /// A checked, immutable GPU compilation plan. No claims about machine-code proof.
+/// Static inspection of separate, rounded arithmetic in emitted PTX.
+/// This does not establish LLVM translation or machine/SASS correctness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fp32PtxAudit {
+    pub rounded_adds: usize,
+    pub rounded_muls: usize,
+}
+
+/// The audit compares explicit RNE inline PTX in LLVM with PTX instructions.
+/// It fails closed on contraction, FTZ, unapproved FP32 arithmetic or missing
+/// instructions. PTX itself, CUDA JIT and hardware remain in the TCB.
+pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError> {
+    let rejected = |reason: String| GpuError::Fp32PtxRejected { reason };
+    if llvm_ir.contains("fadd float")
+        || llvm_ir.contains("fmul float")
+        || llvm_ir.contains("fast ")
+        || llvm_ir.contains("contract ")
+    {
+        return Err(rejected("non-explicit/fast LLVM floating point operation".into()));
+    }
+    const ADD_ASM: &str = "call float asm sideeffect \"add.rn.f32";
+    const MUL_ASM: &str = "call float asm sideeffect \"mul.rn.f32";
+    let expected_adds = llvm_ir.matches(ADD_ASM).count();
+    let expected_muls = llvm_ir.matches(MUL_ASM).count();
+    let mut rounded_adds = 0usize;
+    let mut rounded_muls = 0usize;
+    let mut block_comment = false;
+    for line in ptx.lines() {
+        let mut code = String::new();
+        let mut remaining = line;
+        while !remaining.is_empty() {
+            if block_comment {
+                if let Some(end) = remaining.find("*/") {
+                    remaining = &remaining[end + 2..];
+                    block_comment = false;
+                } else {
+                    break;
+                }
+            } else {
+                let line_comment = remaining.find("//").unwrap_or(remaining.len());
+                let block = remaining.find("/*").unwrap_or(remaining.len());
+                let end = line_comment.min(block);
+                code.push_str(&remaining[..end]);
+                if end == remaining.len() || end == line_comment {
+                    break;
+                }
+                remaining = &remaining[end + 2..];
+                block_comment = true;
+            }
+        }
+        let mut instruction = code.trim();
+        if instruction.starts_with('@') {
+            instruction = instruction
+                .split_once(char::is_whitespace)
+                .map_or("", |(_, rest)| rest.trim_start());
+        }
+        let opcode = instruction.split_whitespace().next().unwrap_or("");
+        if !opcode.ends_with(".f32") {
+            continue;
+        }
+        if opcode.contains(".ftz.")
+            || opcode.contains(".approx.")
+            || opcode.starts_with("fma.")
+            || opcode.starts_with("mad.")
+        {
+            return Err(rejected(format!("prohibited PTX FP32 opcode: {opcode}")));
+        }
+        match opcode {
+            "add.rn.f32" => rounded_adds += 1,
+            "mul.rn.f32" => rounded_muls += 1,
+            _ if opcode.starts_with("setp.")
+                || opcode.starts_with("selp.")
+                || opcode.starts_with("mov.")
+                || opcode.starts_with("ld.")
+                || opcode.starts_with("st.") => {}
+            _ => return Err(rejected(format!("unapproved PTX FP32 opcode: {opcode}"))),
+        }
+    }
+    if rounded_adds != expected_adds || rounded_muls != expected_muls {
+        return Err(rejected(format!(
+            "rounded arithmetic count mismatch: LLVM add/mul={expected_adds}/{expected_muls}, PTX add/mul={rounded_adds}/{rounded_muls}"
+        )));
+    }
+    Ok(Fp32PtxAudit {
+        rounded_adds,
+        rounded_muls,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct GpuProgram {
     graph: NeuralGraph,
@@ -706,6 +799,12 @@ impl GpuEngine {
                 ),
             });
         }
+        // Every llc output is checked before CUDA can load it.
+        let ptx_source = fs::read_to_string(&ptx)?;
+        if let Err(err) = audit_fp32_ptx(program.llvm_ir(), &ptx_source) {
+            let _ = fs::remove_file(&ptx);
+            return Err(err);
+        }
         Ok(ptx)
     }
 
@@ -902,18 +1001,18 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
         Operation::Add => String::from(
             "  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx\n\
                %y = load float, ptr addrspace(1) %bp, align 4\n\
-               %value = fadd float %x, %y\n",
+               %value = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n",
         ),
         Operation::Mul => String::from(
             "  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx\n\
                %y = load float, ptr addrspace(1) %bp, align 4\n\
-               %value = fmul float %x, %y\n",
+               %value = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n",
         ),
         Operation::BiasAdd => format!(
             "  %col = urem i32 %idx, {columns}\n\
                %bp = getelementptr float, ptr addrspace(1) %b, i32 %col\n\
                %y = load float, ptr addrspace(1) %bp, align 4\n\
-               %value = fadd float %x, %y\n",
+               %value = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n",
         ),
         Operation::Relu => String::from(
             "  %nan = fcmp uno float %x, %x\n\
@@ -937,8 +1036,8 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
 
 fn pointwise_chain_kernel_ir(index: usize, inner_op: &Operation, columns: usize) -> String {
     let inner = match inner_op {
-        Operation::Add => "fadd",
-        Operation::Mul => "fmul",
+        Operation::Add => "add.rn.f32",
+        Operation::Mul => "mul.rn.f32",
         _ => unreachable!("only Add/Mul start the supported pointwise chain"),
     };
     format!(
@@ -956,11 +1055,11 @@ compute:
   %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx
   %x = load float, ptr addrspace(1) %ap, align 4
   %y = load float, ptr addrspace(1) %bp, align 4
-  %inner = {inner} float %x, %y
+  %inner = call float asm sideeffect "{inner} $0, $1, $2;", "=f,f,f"(float %x, float %y)
   %col = urem i32 %idx, {columns}
   %biasp = getelementptr float, ptr addrspace(1) %bias, i32 %col
   %bias_value = load float, ptr addrspace(1) %biasp, align 4
-  %biased = fadd float %inner, %bias_value
+  %biased = call float asm sideeffect "add.rn.f32 $0, $1, $2;", "=f,f,f"(float %inner, float %bias_value)
   %nan = fcmp uno float %biased, %biased
   %positive = fcmp ogt float %biased, 0.000000e+00
   %keep = or i1 %nan, %positive
@@ -1031,8 +1130,8 @@ fn matmul_kernel_ir(index: usize, inner: usize, columns: usize) -> String {
            %bp = getelementptr float, ptr addrspace(1) %b, i32 %rhsIdx\n\
            %x = load float, ptr addrspace(1) %ap, align 4\n\
            %y = load float, ptr addrspace(1) %bp, align 4\n\
-           %product = fmul float %x, %y\n\
-           %updated = fadd float %sum, %product\n\
+           %product = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n\
+           %updated = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %sum, float %product)\n\
            %next = add i32 %j, 1\n\
            br label %loop\n\
          store:\n\
