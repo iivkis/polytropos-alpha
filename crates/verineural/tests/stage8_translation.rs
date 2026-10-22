@@ -8,7 +8,10 @@ use verineural::{
 fn synthetic_ptx(plan: &TranslationPlan) -> String {
     let mut ptx = ".version 7.0\n.target sm_52\n.address_size 64\n".to_owned();
     for kernel in &plan.kernels {
-        ptx.push_str(&format!(".visible .entry vn_node_{}(\n)\n{{\n", kernel.node));
+        ptx.push_str(&format!(
+            ".visible .entry vn_node_{}(\n)\n{{\n",
+            kernel.node
+        ));
         let (adds, muls) = match kernel.kind {
             TranslationKind::Add
             | TranslationKind::BiasAdd { .. }
@@ -50,7 +53,9 @@ fn fused_chain() -> (NeuralGraph, verineural::NodeId) {
     let product = graph.mul(left, right).unwrap();
     let biased = graph.bias_add(product, bias).unwrap();
     let activated = graph.relu(biased).unwrap();
-    let output = graph.reshape(activated, Shape::new(vec![3, 2]).unwrap()).unwrap();
+    let output = graph
+        .reshape(activated, Shape::new(vec![3, 2]).unwrap())
+        .unwrap();
     (graph, output)
 }
 
@@ -70,7 +75,11 @@ fn translation_plan_cross_checks_real_generated_llvm_for_matmul_bias_relu() {
         assert_eq!(report.rounded_adds, 2); // MatMul + BiasAdd
         assert_eq!(report.rounded_muls, 1);
         assert_eq!(report.relu_guards, 1);
-        assert!(report.to_text().contains("semantic_fp32_equivalence=not-proven"));
+        assert!(
+            report
+                .to_text()
+                .contains("semantic_fp32_equivalence=not-proven")
+        );
         assert!(report.to_text().contains("cuda_jit_sass_hardware=trusted"));
     }
 }
@@ -90,7 +99,10 @@ fn translation_plan_tracks_fused_sources_and_rejects_wrong_kernel_assignment() {
         assert_eq!(report.rounded_muls, 1);
         if fusion == ReluFusion::Experimental {
             assert_eq!(plan.kernels.len(), 1);
-            assert!(matches!(plan.kernels[0].kind, TranslationKind::MulBiasRelu { columns: 3 }));
+            assert!(matches!(
+                plan.kernels[0].kind,
+                TranslationKind::MulBiasRelu { columns: 3 }
+            ));
             assert_eq!(program.removed_kernel_count(), 2);
             assert_eq!(plan.kernels[0].reads.len(), 3);
         } else {
@@ -148,15 +160,21 @@ fn translation_validator_rejects_swapped_per_kernel_operations_even_if_global_co
     let ptx = synthetic_ptx(&plan);
     assert!(plan.validate(program.llvm_ir(), &ptx).is_ok());
     // Both the MatMul and BiasAdd use an add, but only MatMul has a multiply.
-    let bias_node = plan.kernels.iter()
+    let bias_node = plan
+        .kernels
+        .iter()
         .find(|kernel| matches!(kernel.kind, TranslationKind::BiasAdd { .. }))
-        .unwrap().node;
+        .unwrap()
+        .node;
     let prefix = format!(".entry vn_node_{bias_node}(\n)\n{{\n");
     let misplaced = ptx
         .replacen("mul.rn.f32 %f1, %f2, %f3;", "mov.f32 %f1, %f2;", 1)
         .replace(&prefix, &format!("{prefix} mul.rn.f32 %f1, %f2, %f3;\n"));
     assert_ne!(misplaced, ptx);
     // Global mul/add counts are unchanged, but the multiply moved to BiasAdd.
-    assert_eq!(misplaced.matches("mul.rn.f32").count(), ptx.matches("mul.rn.f32").count());
+    assert_eq!(
+        misplaced.matches("mul.rn.f32").count(),
+        ptx.matches("mul.rn.f32").count()
+    );
     assert!(plan.validate(program.llvm_ir(), &misplaced).is_err());
 }

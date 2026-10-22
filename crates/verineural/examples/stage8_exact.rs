@@ -12,9 +12,9 @@ use std::process::Command;
 use verineural::{
     Domain, ExactFp32Plan, Fp32SpecialExpected, GpuEngine, GpuLaunchConfig, LeanProofEngine,
     MathContract, NeuralGraph, NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd,
-    ResidualFfn, RneFp32Plan, RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx,
-    special_mul_bias_relu_boundary, subnormal_add_exact_bits, subnormal_mul_rne_bits,
-    subnormal_relu_bits, TranslationPlan,
+    ResidualFfn, RneFp32Plan, RneRangePlan, RneThresholdSide, Shape, Tensor, TranslationPlan,
+    audit_fp32_ptx, special_mul_bias_relu_boundary, subnormal_add_exact_bits,
+    subnormal_mul_rne_bits, subnormal_relu_bits,
 };
 
 const FILES: [&str; 101] = [
@@ -237,7 +237,8 @@ fn translation_summary(root: &Path) -> Result<String, Box<dyn Error>> {
         if fs::read_to_string(dir.join("translation.report"))? != report.to_text() {
             return Err(io::Error::other(format!(
                 "Stage 8 {profile}: saved translation report does not match evidence"
-            )).into());
+            ))
+            .into());
         }
         summary.push_str(&format!(
             "{profile}:kernels={} add.rn.f32={} mul.rn.f32={} relu_guards={} status=structural-pass\n",
@@ -315,7 +316,9 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
         return Err(io::Error::other("saved Stage 8 FP32 PTX audit report mismatch").into());
     }
     if fs::read_to_string(root.join("translation_summary.txt"))? != translation_summary(root)? {
-        return Err(io::Error::other("saved Stage 8 translation validation summary mismatch").into());
+        return Err(
+            io::Error::other("saved Stage 8 translation validation summary mismatch").into(),
+        );
     }
     if fs::read_to_string(root.join("special_evidence.txt"))? != special_values_report(root)? {
         return Err(io::Error::other("saved Stage 8 special FP32 evidence mismatch").into());
@@ -1793,7 +1796,10 @@ end VeriNeural.Generated.RneThreshold
         root.join("fp32_contraction_report.txt"),
         fp32_contraction_report(root)?,
     )?;
-    fs::write(root.join("translation_summary.txt"), translation_summary(root)?)?;
+    fs::write(
+        root.join("translation_summary.txt"),
+        translation_summary(root)?,
+    )?;
     let result = Command::new("sha256sum")
         .args(FILES)
         .current_dir(root)
@@ -1881,7 +1887,9 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 FP32 PTX audit: explicit separate RNE mul/add, no emitted FMA/FTZ (LLVM/PTX static check only)"
     );
-    println!("Stage 8 Numeric Translation Validation: 14 per-kernel Semantic-plan/LLVM/PTX profiles (structural only)");
+    println!(
+        "Stage 8 Numeric Translation Validation: 14 per-kernel Semantic-plan/LLVM/PTX profiles (structural only)"
+    );
     println!(
         "Stage 8 gradual underflow: 8 signed/subnormal lanes in both baseline/fused kernels; integer bit oracle plus Lean half-tick model"
     );

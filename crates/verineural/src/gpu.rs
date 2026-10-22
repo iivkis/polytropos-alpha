@@ -471,16 +471,20 @@ impl GpuProgram {
                 let inner = &self.graph.nodes()[chain[0]].operation;
                 let columns = match contract.pattern {
                     GpuMemoryPattern::BiasAdd { columns } => columns,
-                    _ => return Err(GpuError::Fp32PtxRejected {
-                        reason: "fused chain lacks BiasAdd memory contract".into()
-                    }),
+                    _ => {
+                        return Err(GpuError::Fp32PtxRejected {
+                            reason: "fused chain lacks BiasAdd memory contract".into(),
+                        });
+                    }
                 };
                 match inner {
                     Operation::Add => TranslationKind::AddBiasRelu { columns },
                     Operation::Mul => TranslationKind::MulBiasRelu { columns },
-                    _ => return Err(GpuError::Fp32PtxRejected {
-                        reason: "unsupported fused inner operation".into()
-                    }),
+                    _ => {
+                        return Err(GpuError::Fp32PtxRejected {
+                            reason: "unsupported fused inner operation".into(),
+                        });
+                    }
                 }
             } else if let Some(&producer) = self.fused_relus.get(&contract.kernel_node) {
                 match self.graph.nodes()[producer].operation {
@@ -489,15 +493,19 @@ impl GpuProgram {
                     Operation::BiasAdd => {
                         let columns = match contract.pattern {
                             GpuMemoryPattern::BiasAdd { columns } => columns,
-                            _ => return Err(GpuError::Fp32PtxRejected {
-                                reason: "fused bias lacks broadcast memory contract".into()
-                            }),
+                            _ => {
+                                return Err(GpuError::Fp32PtxRejected {
+                                    reason: "fused bias lacks broadcast memory contract".into(),
+                                });
+                            }
                         };
                         TranslationKind::BiasAddRelu { columns }
                     }
-                    _ => return Err(GpuError::Fp32PtxRejected {
-                        reason: "unsupported fused producer operation".into()
-                    }),
+                    _ => {
+                        return Err(GpuError::Fp32PtxRejected {
+                            reason: "unsupported fused producer operation".into(),
+                        });
+                    }
                 }
             } else {
                 match node.operation {
@@ -506,25 +514,31 @@ impl GpuProgram {
                     Operation::BiasAdd => {
                         let columns = match contract.pattern {
                             GpuMemoryPattern::BiasAdd { columns } => columns,
-                            _ => return Err(GpuError::Fp32PtxRejected {
-                                reason: "bias lacks broadcast memory contract".into()
-                            }),
+                            _ => {
+                                return Err(GpuError::Fp32PtxRejected {
+                                    reason: "bias lacks broadcast memory contract".into(),
+                                });
+                            }
                         };
                         TranslationKind::BiasAdd { columns }
                     }
                     Operation::MatMul => {
                         let (inner, columns) = match contract.pattern {
                             GpuMemoryPattern::MatMul { inner, columns, .. } => (inner, columns),
-                            _ => return Err(GpuError::Fp32PtxRejected {
-                                reason: "MatMul lacks reduction memory contract".into()
-                            }),
+                            _ => {
+                                return Err(GpuError::Fp32PtxRejected {
+                                    reason: "MatMul lacks reduction memory contract".into(),
+                                });
+                            }
                         };
                         TranslationKind::MatMul { inner, columns }
                     }
                     Operation::Relu => TranslationKind::Relu,
-                    _ => return Err(GpuError::Fp32PtxRejected {
-                        reason: "unexpected operation in kernel translation plan".into()
-                    }),
+                    _ => {
+                        return Err(GpuError::Fp32PtxRejected {
+                            reason: "unexpected operation in kernel translation plan".into(),
+                        });
+                    }
                 }
             };
             kernels.push(TranslationKernel {
@@ -889,9 +903,10 @@ impl GpuEngine {
         // contracts, while the report is checked from both emitted artifacts.
         let ptx_source = fs::read_to_string(&ptx)?;
         let plan = program.translation_plan()?;
-        let validated = plan.validate(program.llvm_ir(), &ptx_source)
+        let validated = plan
+            .validate(program.llvm_ir(), &ptx_source)
             .map_err(|err| GpuError::Fp32PtxRejected {
-                reason: format!("per-kernel translation validation: {err}")
+                reason: format!("per-kernel translation validation: {err}"),
             });
         let report = match validated {
             Ok(report) => report,
