@@ -169,14 +169,14 @@ tasks:
   lab-xor:
     desc: Check XOR MLP truth table via VeriNeural, Lean, NVPTX and CUDA Graph; write lab evidence
     cmds:
-      - cargo run -p xor-lab --example xor_lab
+      - cargo run -p xor-lab --example xor_lab -- {{.CLI_ARGS}}
 
   verify-lab-xor:
     desc: Recheck XOR lab artifacts, Lean, translation and hashes without GPU
     cmds:
-      - cargo run -p xor-lab --example xor_lab -- --verify
+      - cargo run -p xor-lab --example xor_lab -- --verify {{.CLI_ARGS}}
 
   test-lab-xor:
     desc: Run CPU-only XOR consumer tests including proof and GPU compilation planning
     cmds:
-      - cargo test -p xor-lab
+      - cargo test -p xor-lab --all-targets
