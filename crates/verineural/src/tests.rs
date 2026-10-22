@@ -1111,3 +1111,32 @@ fn p1_multi_output_ports_check_shapes_and_rollback() {
     assert_eq!(graph.multi_modules()[0].outputs, outs);
     assert_eq!(graph.nodes().len(), 3);
 }
+
+#[test]
+fn p1_multi_output_rejects_hidden_capture_and_reuses_port_namespaces() {
+    struct Hidden {
+        contract: crate::MultiOutputContract,
+        captured: NodeId,
+    }
+    impl crate::MultiOutputModule for Hidden {
+        fn name(&self) -> &'static str { "hidden_multi" }
+        fn contract(&self) -> &crate::MultiOutputContract { &self.contract }
+        fn build(&self, g: &mut NeuralGraph, inputs: &[NodeId]) -> Result<Vec<NodeId>, NeuralError> {
+            Ok(vec![g.add(inputs[0], self.captured)?])
+        }
+    }
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::Any);
+    let foreign = graph.input(shape(&[2]), Domain::Any);
+    let nc = || crate::NamedPortContract::new("state", port(&[2], Domain::Any));
+    let module = Hidden {
+        contract: crate::MultiOutputContract { inputs: vec![nc()], outputs: vec![nc()] },
+        captured: foreign,
+    };
+    assert!(matches!(
+        graph.apply_multi_module(&module, &[x]),
+        Err(NeuralError::ContractViolation { detail: "undeclared external capture", .. })
+    ));
+    assert_eq!(graph.nodes().len(), 2);
+    assert!(graph.multi_modules().is_empty());
+}

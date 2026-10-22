@@ -330,12 +330,20 @@ impl CertificateEngine {
                 .and_then(|line| line.split_whitespace().next())
                 .map(ToOwned::to_owned)
         }).collect::<Vec<_>>();
-        self.proof.audit_file(&source_file, &names)?;
+        let audit = self.proof.audit_file(&source_file, &names)?;
+        let report = fs::read_to_string(directory.join("report.json"))?;
+        if !report.contains(&format!(
+            "\"lean_checker_version\": \"{}\"", escape_json(&audit.lean_version),
+        )) {
+            return Err(CertificateError::Integrity(
+                "saved report Lean version differs from current audited checker".into(),
+            ));
+        }
         Ok(())
     }
 }
 
-/// Canonical within the v2 format: graph identity and process-global IDs do
+/// Canonical within the v3 format: graph identity and process-global IDs do
 /// not contribute to the fingerprint; complete semantics and interfaces do.
 fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
     let mut source = format!(

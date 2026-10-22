@@ -628,10 +628,12 @@ impl NeuralGraph {
         if inputs.len() != contract.inputs.len() || contract.outputs.is_empty() {
             return Err(NeuralError::ContractViolation { module: module.name(), detail: "incorrect multi-output arity" });
         }
-        let mut names = std::collections::BTreeSet::new();
-        for port in contract.inputs.iter().chain(&contract.outputs) {
-            if port.name.is_empty() || !names.insert(port.name) {
-                return Err(NeuralError::ContractViolation { module: module.name(), detail: "empty or duplicated named port" });
+        for ports in [&contract.inputs, &contract.outputs] {
+            let mut names = std::collections::BTreeSet::new();
+            for port in ports {
+                if port.name.is_empty() || !names.insert(port.name) {
+                    return Err(NeuralError::ContractViolation { module: module.name(), detail: "empty or duplicated named port" });
+                }
             }
         }
         for (&input, port) in inputs.iter().zip(&contract.inputs) {
