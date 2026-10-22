@@ -11,6 +11,10 @@ namespace VeriNeural
 def Within (bound value : Int) : Prop :=
   -bound ≤ value ∧ value ≤ bound
 
+instance withinDecidable (bound value : Int) : Decidable (Within bound value) := by
+  unfold Within
+  infer_instance
+
 def TensorWithin {n : Nat} (bound : Int) (a : Tensor n) : Prop :=
   ∀ i : Fin n, Within bound (a i)
 
@@ -141,11 +145,11 @@ theorem tensor_within_matmul {m k n : Nat}
 
 /-!
 A second Stage 8 slice models round-to-nearest, ties-to-even for concrete
-dyadic fixed-point traces. Values are represented as mathematical Int "ticks"
-of one common power-of-two quantum chosen by Rust. For fractionBits <= 30,
-every nonzero i64 tick is far above the binary32 subnormal range and far below
-overflow; the Rust trace generator still rejects inputs that do not lie on the
-chosen lattice.
+dyadic traces. Rust chooses a power-of-two tick lattice per node: additive
+operators align to the finer input lattice, while products use the sum of the
+operand fractional widths. Source inputs use 1..30 fractional bits; internal
+product lattices are capped separately and every concrete value/budget is
+checked for i64 overflow and normal finite binary32 encodability.
 
 Binary32RneTick does not claim that LLVM/PTX/GPU hardware followed this
 relation. It is the formal target relation used by the independent integer
@@ -190,6 +194,50 @@ theorem approx_add_round
   have hsum := approx_add ha hb
   have h := approx_trans hsum hr
   simpa [Int.add_assoc] using h
+
+theorem approx_scale {epsilon ideal actual scale : Int}
+    (nonnegative : 0 ≤ scale)
+    (h : ApproxWithin epsilon ideal actual) :
+    ApproxWithin (epsilon * scale) (ideal * scale) (actual * scale) := by
+  unfold ApproxWithin at h ⊢
+  have hscale : Within scale scale := by
+    unfold Within
+    constructor <;> omega
+  have hmul := within_mul h hscale
+  simpa only [Int.sub_mul] using hmul
+
+/-- Product error propagation on the product tick lattice.
+    The asymmetric form uses a bound on idealA and actualB; callers may choose
+    either operand order if a tighter concrete bound is useful. -/
+theorem approx_mul
+    {idealA actualA idealB actualB epsilonA epsilonB boundIdealA boundActualB : Int}
+    (ha : ApproxWithin epsilonA idealA actualA)
+    (hb : ApproxWithin epsilonB idealB actualB)
+    (hidealA : Within boundIdealA idealA)
+    (hactualB : Within boundActualB actualB) :
+    ApproxWithin (epsilonA * boundActualB + boundIdealA * epsilonB)
+      (idealA * idealB) (actualA * actualB) := by
+  unfold ApproxWithin at ha hb ⊢
+  have hleft := within_mul ha hactualB
+  have hright := within_mul hidealA hb
+  have hsum := within_add hleft hright
+  unfold Within at hsum ⊢
+  rw [Int.sub_mul, Int.mul_sub] at hsum
+  rcases hsum with ⟨hlower, hupper⟩
+  constructor <;> omega
+
+theorem approx_mul_round
+    {idealA actualA idealB actualB rounded epsilonA epsilonB
+      boundIdealA boundActualB epsilonRound : Int}
+    (ha : ApproxWithin epsilonA idealA actualA)
+    (hb : ApproxWithin epsilonB idealB actualB)
+    (hidealA : Within boundIdealA idealA)
+    (hactualB : Within boundActualB actualB)
+    (hr : ApproxWithin epsilonRound (actualA * actualB) rounded) :
+    ApproxWithin
+      (epsilonA * boundActualB + boundIdealA * epsilonB + epsilonRound)
+      (idealA * idealB) rounded := by
+  exact approx_trans (approx_mul ha hb hidealA hactualB) hr
 
 theorem approx_relu {ideal actual epsilon : Int}
     (h : ApproxWithin epsilon ideal actual) :

@@ -1,5 +1,5 @@
-//! Stage 8: exact-integer ranges plus a concrete fractional dyadic RNE/epsilon
-//! trace. Rust input guards -> Lean range/error lemmas -> baseline/fused CUDA
+//! Stage 8: exact-integer ranges plus concrete fractional dyadic RNE/epsilon
+//! traces. Rust input guards -> Lean range/error lemmas -> baseline/fused CUDA
 //! Graph -> independent integer oracles -> SHA-256 evidence.
 //! The LLVM/PTX/JIT/GPU link remains trusted rather than formally proved.
 
@@ -14,7 +14,7 @@ use verineural::{
     RneFp32Plan, Shape, Tensor,
 };
 
-const FILES: [&str; 22] = [
+const FILES: [&str; 30] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -37,6 +37,14 @@ const FILES: [&str; 22] = [
     "rne_inputs.bits",
     "rne_output.bits",
     "rne_error.txt",
+    "numeric_rne_matmul.lean",
+    "baseline_rne_matmul/graph.ll",
+    "baseline_rne_matmul/graph.ptx",
+    "fused_rne_matmul/graph.ll",
+    "fused_rne_matmul/graph.ptx",
+    "rne_matmul_inputs.bits",
+    "rne_matmul_output.bits",
+    "rne_matmul_error.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -73,9 +81,10 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_rne.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_rne_matmul.lean"))?;
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
-        "Scope: ideal integer ranges plus concrete dyadic RNE/epsilon trace; not machine FP32 certification"
+        "Scope: ideal integer ranges plus concrete dyadic RNE/epsilon traces, including separate Mul/MatMul reduction steps; not machine FP32 certification"
     );
     Ok(())
 }
@@ -272,15 +281,107 @@ fn main() -> Result<(), Box<dyn Error>> {
     fs::write(
         root.join("rne_error.txt"),
         format!(
-            "fraction_bits={}\nideal_ticks={:?}\nrounded_ticks={:?}\nobserved_error_ticks={}\n\
+            "input_fraction_bits={}\noutput_fraction_bits={}\nideal_ticks={:?}\nrounded_ticks={:?}\nobserved_error_ticks={}\n\
              epsilon_ticks={}\nobserved_error={:.12e}\nepsilon={:.12e}\n",
             rne_plan.fraction_bits(),
+            rne_trace.fraction_bits(),
             rne_trace.ideal_output_ticks(),
             rne_trace.rounded_output_ticks(),
             rne_trace.observed_error_ticks(),
             rne_trace.epsilon_ticks(),
             rne_trace.observed_error(),
             rne_trace.epsilon(),
+        ),
+    )?;
+
+    // Fractional MatMul trace. Each product is rounded independently, then
+    // each left-to-right accumulation add is rounded independently as required
+    // by the strict FP32 policy. The chosen inputs leave a two-tick ideal/RNE
+    // discrepancy on the q=40 output proof lattice.
+    let mut rne_mat_graph = NeuralGraph::default();
+    let rne_mat_value = f32::from_bits(0x4100_0001);
+    let rne_mat_lhs = Tensor::new(
+        Shape::new(vec![1, 2])?,
+        vec![rne_mat_value, rne_mat_value],
+    )?;
+    let rne_mat_rhs = Tensor::new(
+        Shape::new(vec![2, 1])?,
+        vec![rne_mat_value, rne_mat_value],
+    )?;
+    let rne_mat_lhs_id = rne_mat_graph.input(rne_mat_lhs.shape().clone(), Domain::Finite);
+    let rne_mat_rhs_id = rne_mat_graph.input(rne_mat_rhs.shape().clone(), Domain::Finite);
+    let rne_mat_output = rne_mat_graph.matmul(rne_mat_lhs_id, rne_mat_rhs_id)?;
+    let rne_mat_inputs = [
+        (rne_mat_lhs_id, rne_mat_lhs),
+        (rne_mat_rhs_id, rne_mat_rhs),
+    ];
+    let rne_mat_plan = RneFp32Plan::compile(&rne_mat_graph, rne_mat_output, 20)?;
+    let rne_mat_trace = rne_mat_plan.trace(&rne_mat_inputs)?;
+    if rne_mat_plan.output_fraction_bits() != 40
+        || rne_mat_trace.observed_error_ticks() != 2
+        || rne_mat_trace.epsilon_ticks() == 0
+    {
+        return Err(io::Error::other(
+            "unexpected Stage 8 fractional MatMul RNE/error trace",
+        )
+        .into());
+    }
+    write_checked_lean(
+        &root.join("numeric_rne_matmul.lean"),
+        rne_mat_trace.lean_source(),
+    )?;
+    for (label, engine) in [
+        ("baseline_rne_matmul", &baseline),
+        ("fused_rne_matmul", &fused),
+    ] {
+        let gpu_plan = engine.compile(&rne_mat_graph, rne_mat_output)?;
+        let actual = engine.execute(&gpu_plan, &rne_mat_inputs, &root.join(label))?;
+        rne_mat_trace.compare_gpu(&actual)?;
+        println!(
+            "Stage 8 {label}: {} fractional MatMul output(s) match separate-mul/add integer RNE oracle",
+            actual.values().len()
+        );
+    }
+    fs::write(
+        root.join("rne_matmul_inputs.bits"),
+        rne_mat_inputs
+            .iter()
+            .map(|(id, tensor)| {
+                format!(
+                    "node={} shape={:?} bits={:?}\n",
+                    id.index(),
+                    tensor.shape().dims(),
+                    tensor
+                        .values()
+                        .iter()
+                        .map(|x| format!("{:08x}", x.to_bits()))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .collect::<String>(),
+    )?;
+    fs::write(
+        root.join("rne_matmul_output.bits"),
+        rne_mat_trace
+            .expected()
+            .values()
+            .iter()
+            .map(|x| format!("{:08x}\n", x.to_bits()))
+            .collect::<String>(),
+    )?;
+    fs::write(
+        root.join("rne_matmul_error.txt"),
+        format!(
+            "input_fraction_bits={}\noutput_fraction_bits={}\nideal_ticks={:?}\nrounded_ticks={:?}\nobserved_error_ticks={}\n\
+             epsilon_ticks={}\nobserved_error={:.12e}\nepsilon={:.12e}\n",
+            rne_mat_plan.fraction_bits(),
+            rne_mat_trace.fraction_bits(),
+            rne_mat_trace.ideal_output_ticks(),
+            rne_mat_trace.rounded_output_ticks(),
+            rne_mat_trace.observed_error_ticks(),
+            rne_mat_trace.epsilon_ticks(),
+            rne_mat_trace.observed_error(),
+            rne_mat_trace.epsilon(),
         ),
     )?;
 
@@ -335,17 +436,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         mat_plan.output_bound()
     );
     println!(
-        "Stage 8 dyadic RNE profile: q={}, observed error={} ticks, proved epsilon={} ticks",
+        "Stage 8 additive dyadic RNE profile: q_in={}, q_out={}, observed error={} ticks, proved epsilon={} ticks",
         rne_plan.fraction_bits(),
+        rne_trace.fraction_bits(),
         rne_trace.observed_error_ticks(),
         rne_trace.epsilon_ticks()
+    );
+    println!(
+        "Stage 8 MatMul dyadic RNE profile: q_in={}, q_out={}, observed error={} ticks, proved epsilon={} ticks",
+        rne_mat_plan.fraction_bits(),
+        rne_mat_trace.fraction_bits(),
+        rne_mat_trace.observed_error_ticks(),
+        rne_mat_trace.epsilon_ticks()
     );
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds and the concrete dyadic RNE epsilon trace; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds plus concrete dyadic Add/Mul/MatMul RNE error composition; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }

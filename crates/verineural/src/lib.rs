@@ -8,8 +8,9 @@
 //! Stage 6 adds MatMul, row-wise bias and composable Dense/Residual FFN blocks.
 //! Stage 7 begins controllable CUDA launches and experimental local Relu fusion,
 //! with ideal-Int Lean rewrite lemmas, not certified FP32/PTX equivalence.
-//! Stage 8 adds exact-integer range proofs plus a concrete dyadic binary32
-//! RNE trace with Lean-composed nonzero error bounds for additive graphs.
+//! Stage 8 adds exact-integer range proofs plus concrete dyadic binary32
+//! RNE traces with Lean-composed error bounds for Add/Mul/MatMul/BiasAdd/Relu/
+//! Reshape, including explicit separate multiply/add MatMul reductions.
 //! The LLVM/PTX/GPU link is still trusted rather than formally certified.
 
 mod certificate;

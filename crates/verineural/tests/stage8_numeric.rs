@@ -291,6 +291,8 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
     assert!(after_rne.contains(
         "write_checked_lean(&root.join(\"numeric_rne.lean\"), rne_trace.lean_source())?"
     ));
+    assert!(after_rne.contains("numeric_rne_matmul.lean"));
+    assert!(after_rne.contains("rne_mat_trace.lean_source()"));
 }
 
 #[test]
@@ -409,14 +411,118 @@ fn stage8_fractional_rne_ties_choose_even_for_both_signs() {
 }
 
 #[test]
+fn stage8_fractional_mul_scales_lattice_and_composes_error() {
+    let mut graph = NeuralGraph::default();
+    let matrix = Shape::new(vec![1, 1]).unwrap();
+    let x = graph.input(matrix.clone(), Domain::Finite);
+    let y = graph.input(matrix, Domain::Finite);
+    let bias = graph.input(Shape::new(vec![1]).unwrap(), Domain::Finite);
+    let product = graph.mul(x, y).unwrap();
+    let output = graph.bias_add(product, bias).unwrap();
+
+    let inputs = [
+        (
+            x,
+            Tensor::new(
+                Shape::new(vec![1, 1]).unwrap(),
+                vec![f32::from_bits(0x4100_0001)],
+            )
+            .unwrap(),
+        ),
+        (
+            y,
+            Tensor::new(
+                Shape::new(vec![1, 1]).unwrap(),
+                vec![f32::from_bits(0x4100_0001)],
+            )
+            .unwrap(),
+        ),
+        (
+            bias,
+            Tensor::new(
+                Shape::new(vec![1]).unwrap(),
+                vec![f32::from_bits(0x3580_0000)],
+            )
+            .unwrap(),
+        ),
+    ];
+
+    let plan = RneFp32Plan::compile(&graph, output, 20).unwrap();
+    assert_eq!(plan.output_fraction_bits(), 40);
+    let trace = plan.trace(&inputs).unwrap();
+    assert_eq!(trace.fraction_bits(), 40);
+    assert_eq!(trace.ideal_output_ticks(), &[70_368_762_003_457]);
+    assert_eq!(trace.rounded_output_ticks(), &[70_368_760_954_880]);
+    assert_eq!(trace.observed_error_ticks(), 1_048_577);
+    assert_eq!(trace.epsilon_ticks(), 16_777_216);
+    assert_eq!(trace.expected().values()[0].to_bits(), 0x4280_0002);
+
+    let source = trace.lean_source();
+    assert!(source.contains("VeriNeural.approx_mul_round"));
+    assert!(source.contains("VeriNeural.approx_scale"));
+    assert!(source.contains("Binary32RneTick 70368760954881 70368760954880 23"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+#[test]
+fn stage8_fractional_matmul_models_separate_mul_add_reduction() {
+    let mut graph = NeuralGraph::default();
+    let lhs_shape = Shape::new(vec![1, 2]).unwrap();
+    let rhs_shape = Shape::new(vec![2, 1]).unwrap();
+    let lhs = graph.input(lhs_shape.clone(), Domain::Finite);
+    let rhs = graph.input(rhs_shape.clone(), Domain::Finite);
+    let output = graph.matmul(lhs, rhs).unwrap();
+
+    let value = f32::from_bits(0x4100_0001);
+    let inputs = [
+        (
+            lhs,
+            Tensor::new(lhs_shape, vec![value, value]).unwrap(),
+        ),
+        (
+            rhs,
+            Tensor::new(rhs_shape, vec![value, value]).unwrap(),
+        ),
+    ];
+
+    let plan = RneFp32Plan::compile(&graph, output, 20).unwrap();
+    assert_eq!(plan.output_fraction_bits(), 40);
+    let trace = plan.trace(&inputs).unwrap();
+    assert_eq!(trace.ideal_output_ticks(), &[140_737_521_909_762]);
+    assert_eq!(trace.rounded_output_ticks(), &[140_737_521_909_760]);
+    assert_eq!(trace.observed_error_ticks(), 2);
+    assert_eq!(trace.epsilon_ticks(), 41_943_040);
+    assert_eq!(trace.expected().values()[0].to_bits(), 0x4300_0002);
+
+    let source = trace.lean_source();
+    assert!(source.contains("product_0_error"));
+    assert!(source.contains("sum_1_error"));
+    assert!(source.contains("VeriNeural.approx_mul_round"));
+    assert!(source.contains("VeriNeural.approx_add_round"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+#[test]
 fn stage8_fractional_rne_slice_fails_closed_outside_its_model() {
     let mut graph = NeuralGraph::default();
     let shape = Shape::new(vec![1]).unwrap();
     let x = graph.input(shape.clone(), Domain::Finite);
-    let y = graph.input(shape, Domain::Finite);
-    let product = graph.mul(x, y).unwrap();
+    let y = graph.input(shape.clone(), Domain::Finite);
+    let first = graph.mul(x, y).unwrap();
+    let second = graph.mul(first, x).unwrap();
+    let too_fine = graph.mul(second, y).unwrap();
     assert!(matches!(
-        RneFp32Plan::compile(&graph, product, 20),
+        RneFp32Plan::compile(&graph, too_fine, 20),
+        Err(NumericError::InvalidInput { .. })
+    ));
+
+    let mut unsupported = NeuralGraph::default();
+    let sx = unsupported.input(shape, Domain::NonNegativeFinite);
+    let sqrt = unsupported.sqrt(sx).unwrap();
+    assert!(matches!(
+        RneFp32Plan::compile(&unsupported, sqrt, 20),
         Err(NumericError::UnsupportedOperation { .. })
     ));
 

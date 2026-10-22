@@ -117,11 +117,11 @@ tasks:
       - cargo run -p verineural --example stage7_benchmark --release
 
   numeric-stage8:
-    desc: Prove Stage 8 integer ranges and dyadic RNE epsilon trace; compare baseline/fused CUDA and pin evidence
+    desc: Prove Stage 8 integer ranges and dyadic Add/Mul/MatMul RNE error traces; compare baseline/fused CUDA and pin evidence
     cmds:
       - cargo run -p verineural --example stage8_exact
 
   verify-numeric-stage8:
-    desc: Verify saved Stage 8 integer/RNE Lean proofs and SHA-256 artifacts without CUDA
+    desc: Verify saved Stage 8 integer and dyadic RNE Lean proofs plus SHA-256 artifacts without CUDA
     cmds:
       - cargo run -p verineural --example stage8_exact -- --verify

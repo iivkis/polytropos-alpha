@@ -1,5 +1,5 @@
-//! Stage 8 first vertical slice: exact-integer FP32 domain and compositional
-//! range obligations for Add, BiasAdd, Relu and Reshape.
+//! Stage 8 exact-integer FP32 domain plus compositional range obligations for
+//! Add/Mul/MatMul/BiasAdd/Relu/Reshape.
 //!
 //! All integral inputs and intermediate mathematical values are restricted to
 //! magnitude <= 2^24, where every integer has a binary32 representation.
@@ -8,9 +8,10 @@
 //! STILL TRUSTED, not proved by this engine. Non-integral or negative-zero
 //! inputs and unsupported operators fail closed.
 //!
-//! A second, narrower slice models concrete fractional dyadic traces under
-//! round-to-nearest, ties-to-even and composes a nonzero absolute error budget
-//! for Add/BiasAdd/Relu/Reshape. The LLVM/PTX/GPU execution link remains TCB.
+//! A second slice models concrete fractional dyadic traces under round-to-nearest,
+//! ties-to-even and composes absolute error through Add/Mul/MatMul/BiasAdd/Relu/
+//! Reshape. Products use finer per-node dyadic lattices; MatMul explicitly models
+//! separate rounded multiply/add steps. The LLVM/PTX/GPU execution link remains TCB.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -57,7 +58,7 @@ impl fmt::Display for NumericError {
             Self::UnsupportedOperation { node, operation } => {
                 write!(
                     f,
-                    "exact-integer FP32 subset rejects {operation} at node {node}"
+                    "numeric FP32 subset rejects {operation} at node {node}"
                 )
             }
             Self::UnsupportedRange { node, bound } => write!(
@@ -65,7 +66,7 @@ impl fmt::Display for NumericError {
                 "node {node} needs integer bound {bound}, outside exact binary32 subset"
             ),
             Self::InvalidInput { node, reason } => {
-                write!(f, "FP32 exact-integer input {node}: {reason}")
+                write!(f, "FP32 numeric input {node}: {reason}")
             }
             Self::MissingInput { node } => write!(f, "missing numeric input node {node}"),
             Self::OutputBits {
@@ -74,7 +75,7 @@ impl fmt::Display for NumericError {
                 actual,
             } => write!(
                 f,
-                "FP32 integer oracle mismatch at {index}: expected={expected:08x} GPU={actual:08x}"
+                "FP32 oracle mismatch at {index}: expected={expected:08x} GPU={actual:08x}"
             ),
         }
     }
@@ -518,10 +519,11 @@ impl ExactFp32Plan {
 
 /// A concrete Stage 8 rounding slice for fractional dyadic inputs.
 ///
-/// Values are represented internally as exact integer ticks of 2^-fraction_bits.
-/// The current slice deliberately supports only additive operators
-/// (Add/BiasAdd/Relu/Reshape): multiplication changes the fixed-point scale and
-/// will be handled by a later slice. No f32 arithmetic is used by the oracle.
+/// Source inputs live on 2^-fraction_bits. Each reachable node carries its own
+/// exact dyadic proof lattice: Add/BiasAdd lift operands to the finer lattice,
+/// while Mul/MatMul add operand fractional widths. Concrete traces fail closed
+/// if that lattice or any i64 oracle value would overflow. No f32 arithmetic is
+/// used by the oracle itself.
 #[derive(Clone, Debug)]
 pub struct RneFp32Plan {
     graph: NeuralGraph,
@@ -529,13 +531,14 @@ pub struct RneFp32Plan {
     reachable: Vec<usize>,
     inputs: Vec<NodeId>,
     fraction_bits: u32,
+    scales: BTreeMap<usize, u32>,
 }
 
 /// Result of one concrete, independently rounded binary32 trace.
 ///
-/// epsilon_ticks is the Lean-composed conservative absolute-error budget.
-/// observed_error_ticks is the actual deviation of the integer RNE oracle
-/// from ideal fixed-point arithmetic for this concrete trace.
+/// epsilon_ticks is the Lean-composed conservative absolute-error budget on
+/// the output trace lattice. observed_error_ticks is the actual deviation of
+/// the integer RNE oracle from exact dyadic arithmetic on the same lattice.
 #[derive(Clone, Debug)]
 pub struct RneFp32Trace {
     expected: Tensor<f32>,
@@ -554,21 +557,37 @@ struct RneWitness {
     shift: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RneMatMulStep {
+    left_element: usize,
+    right_element: usize,
+    product_ideal: i64,
+    product_actual: i64,
+    product_epsilon: i64,
+    product_rounding: RneWitness,
+    sum_ideal: i64,
+    sum_actual: i64,
+    sum_epsilon: i64,
+    sum_rounding: RneWitness,
+}
+
 #[derive(Clone, Debug)]
 struct RneNodeTrace {
     ideal: Vec<i64>,
     actual: Vec<i64>,
     epsilon: Vec<i64>,
+    fraction_bits: u32,
     rounding: Vec<Option<RneWitness>>,
+    matmul_steps: Option<Vec<Vec<RneMatMulStep>>>,
 }
 
 impl RneFp32Plan {
     /// Compile a concrete dyadic RNE trace profile.
     ///
-    /// fraction_bits chooses the exact input lattice 2^-q. Restricting
-    /// q <= 30 keeps every nonzero i64 tick safely in the normal finite
-    /// binary32 exponent range, so this first slice can reject subnormals
-    /// rather than silently inventing FTZ semantics.
+    /// fraction_bits chooses the exact source-input lattice 2^-q. Source
+    /// inputs keep q <= 30 so accepted normal binary32 values fit the i64
+    /// decoder. Products may use finer internal lattices, capped at 60 bits;
+    /// concrete traces still fail closed on any value/budget overflow.
     pub fn compile(
         graph: &NeuralGraph,
         output: NodeId,
@@ -599,6 +618,8 @@ impl RneFp32Plan {
                 node.operation,
                 Operation::Input
                     | Operation::Add
+                    | Operation::Mul
+                    | Operation::MatMul
                     | Operation::BiasAdd
                     | Operation::Relu
                     | Operation::Reshape(_)
@@ -625,17 +646,49 @@ impl RneFp32Plan {
             })
             .collect::<Vec<_>>();
 
+        let mut scales = BTreeMap::<usize, u32>::new();
+        for &index in &reachable {
+            let node = &graph.nodes()[index];
+            let parent = |position: usize| scales[&node.inputs[position].index()];
+            let scale = match node.operation {
+                Operation::Input => fraction_bits,
+                Operation::Add | Operation::BiasAdd => parent(0).max(parent(1)),
+                Operation::Mul | Operation::MatMul => {
+                    parent(0)
+                        .checked_add(parent(1))
+                        .ok_or(NumericError::InvalidInput {
+                            node: index,
+                            reason: "RNE proof lattice fractional-width overflow",
+                        })?
+                }
+                Operation::Relu | Operation::Reshape(_) => parent(0),
+                _ => unreachable!("rejected during RNE plan compilation"),
+            };
+            if scale > 60 {
+                return Err(NumericError::InvalidInput {
+                    node: index,
+                    reason: "RNE proof lattice exceeds 60 fractional bits",
+                });
+            }
+            scales.insert(index, scale);
+        }
+
         Ok(Self {
             graph: graph.clone(),
             output,
             reachable,
             inputs,
             fraction_bits,
+            scales,
         })
     }
 
     pub fn fraction_bits(&self) -> u32 {
         self.fraction_bits
+    }
+
+    pub fn output_fraction_bits(&self) -> u32 {
+        self.scales[&self.output.index()]
     }
 
     pub fn source_inputs(&self) -> &[NodeId] {
@@ -689,9 +742,9 @@ impl RneFp32Plan {
         Ok(given)
     }
 
-    /// Execute the independent fixed-point/RNE oracle and build a concrete
-    /// Lean proof trace. The returned f32 values are constructed from bits;
-    /// the oracle itself never performs f32 addition or rounding.
+    /// Execute the independent dyadic/RNE oracle and build a concrete Lean
+    /// proof trace. MatMul models a separate rounded multiply followed by a
+    /// separate rounded add at every left-to-right reduction step.
     pub fn trace(&self, inputs: &[(NodeId, Tensor<f32>)]) -> Result<RneFp32Trace, NumericError> {
         let given = self.checked_tick_inputs(inputs)?;
         let mut nodes = BTreeMap::<usize, RneNodeTrace>::new();
@@ -706,13 +759,25 @@ impl RneFp32Plan {
                         ideal: ticks.clone(),
                         actual: ticks,
                         epsilon: vec![0; len],
+                        fraction_bits: self.scales[&index],
                         rounding: vec![None; len],
+                        matmul_steps: None,
                     }
                 }
                 Operation::Add => {
                     let left = &nodes[&node.inputs[0].index()];
                     let right = &nodes[&node.inputs[1].index()];
                     self.trace_add(index, left, right, None)?
+                }
+                Operation::Mul => {
+                    let left = &nodes[&node.inputs[0].index()];
+                    let right = &nodes[&node.inputs[1].index()];
+                    self.trace_mul(index, left, right)?
+                }
+                Operation::MatMul => {
+                    let left = &nodes[&node.inputs[0].index()];
+                    let right = &nodes[&node.inputs[1].index()];
+                    self.trace_matmul(index, left, right)?
                 }
                 Operation::BiasAdd => {
                     let left = &nodes[&node.inputs[0].index()];
@@ -725,7 +790,9 @@ impl RneFp32Plan {
                         ideal: parent.ideal.iter().map(|&v| v.max(0)).collect(),
                         actual: parent.actual.iter().map(|&v| v.max(0)).collect(),
                         epsilon: parent.epsilon.clone(),
+                        fraction_bits: parent.fraction_bits,
                         rounding: vec![None; len],
+                        matmul_steps: None,
                     }
                 }
                 Operation::Reshape(_) => {
@@ -734,15 +801,17 @@ impl RneFp32Plan {
                         ideal: parent.ideal.clone(),
                         actual: parent.actual.clone(),
                         epsilon: parent.epsilon.clone(),
+                        fraction_bits: parent.fraction_bits,
                         rounding: vec![None; len],
+                        matmul_steps: None,
                     }
                 }
                 _ => unreachable!("rejected during RNE plan compilation"),
             };
-            if trace.actual.len() != len {
+            if trace.actual.len() != len || trace.fraction_bits != self.scales[&index] {
                 return Err(NumericError::InvalidInput {
                     node: index,
-                    reason: "internal RNE trace shape mismatch",
+                    reason: "internal RNE trace shape/scale mismatch",
                 });
             }
             for i in 0..len {
@@ -783,7 +852,7 @@ impl RneFp32Plan {
             .actual
             .iter()
             .map(|&ticks| {
-                encode_representable_ticks(ticks, self.fraction_bits)
+                encode_representable_ticks(ticks, final_trace.fraction_bits)
                     .map(f32::from_bits)
                     .map_err(|reason| NumericError::InvalidInput {
                         node: self.output.index(),
@@ -800,7 +869,7 @@ impl RneFp32Plan {
             rounded_ticks: final_trace.actual.clone(),
             epsilon_ticks,
             observed_error_ticks,
-            fraction_bits: self.fraction_bits,
+            fraction_bits: final_trace.fraction_bits,
             lean_source,
         })
     }
@@ -819,6 +888,9 @@ impl RneFp32Plan {
                 reason: "bias width must be positive in RNE trace",
             });
         }
+        let fraction_bits = left.fraction_bits.max(right.fraction_bits);
+        let left_shift = fraction_bits - left.fraction_bits;
+        let right_shift = fraction_bits - right.fraction_bits;
         let mut ideal = Vec::with_capacity(len);
         let mut actual = Vec::with_capacity(len);
         let mut epsilon = Vec::with_capacity(len);
@@ -826,35 +898,71 @@ impl RneFp32Plan {
 
         for i in 0..len {
             let j = bias_len.map_or(i, |width| i % width);
+            let left_ideal = rescale_i64(left.ideal[i], left_shift).ok_or(
+                NumericError::InvalidInput {
+                    node: node_index,
+                    reason: "ideal dyadic addition rescale overflow",
+                },
+            )?;
+            let right_ideal = rescale_i64(right.ideal[j], right_shift).ok_or(
+                NumericError::InvalidInput {
+                    node: node_index,
+                    reason: "ideal dyadic addition rescale overflow",
+                },
+            )?;
+            let left_actual = rescale_i64(left.actual[i], left_shift).ok_or(
+                NumericError::InvalidInput {
+                    node: node_index,
+                    reason: "rounded dyadic addition rescale overflow",
+                },
+            )?;
+            let right_actual = rescale_i64(right.actual[j], right_shift).ok_or(
+                NumericError::InvalidInput {
+                    node: node_index,
+                    reason: "rounded dyadic addition rescale overflow",
+                },
+            )?;
+            let left_epsilon = rescale_i64(left.epsilon[i], left_shift).ok_or(
+                NumericError::InvalidInput {
+                    node: node_index,
+                    reason: "dyadic addition error rescale overflow",
+                },
+            )?;
+            let right_epsilon = rescale_i64(right.epsilon[j], right_shift).ok_or(
+                NumericError::InvalidInput {
+                    node: node_index,
+                    reason: "dyadic addition error rescale overflow",
+                },
+            )?;
             let ideal_value =
-                left.ideal[i]
-                    .checked_add(right.ideal[j])
+                left_ideal
+                    .checked_add(right_ideal)
                     .ok_or(NumericError::InvalidInput {
                         node: node_index,
-                        reason: "ideal fixed-point addition overflow",
+                        reason: "ideal dyadic addition overflow",
                     })?;
             let pre_round =
-                left.actual[i]
-                    .checked_add(right.actual[j])
+                left_actual
+                    .checked_add(right_actual)
                     .ok_or(NumericError::InvalidInput {
                         node: node_index,
-                        reason: "rounded fixed-point addition overflow",
+                        reason: "rounded dyadic addition overflow",
                     })?;
-            let (rounded, _bits, shift) = round_ticks_to_binary32(pre_round, self.fraction_bits)
+            let (rounded, _bits, shift) = round_ticks_to_binary32(pre_round, fraction_bits)
                 .map_err(|reason| NumericError::InvalidInput {
                     node: node_index,
                     reason,
                 })?;
-            let step = 1i64.checked_shl(shift).ok_or(NumericError::InvalidInput {
+            let step = binary32_step_i64(shift).ok_or(NumericError::InvalidInput {
                 node: node_index,
                 reason: "binary32 ulp step overflow",
             })?;
-            let budget = left.epsilon[i]
-                .checked_add(right.epsilon[j])
+            let budget = left_epsilon
+                .checked_add(right_epsilon)
                 .and_then(|v| v.checked_add(step))
                 .ok_or(NumericError::InvalidInput {
                     node: node_index,
-                    reason: "RNE error budget overflow",
+                    reason: "RNE addition error budget overflow",
                 })?;
             ideal.push(ideal_value);
             actual.push(rounded);
@@ -870,7 +978,229 @@ impl RneFp32Plan {
             ideal,
             actual,
             epsilon,
+            fraction_bits,
             rounding,
+            matmul_steps: None,
+        })
+    }
+
+    fn trace_mul_element(
+        &self,
+        node_index: usize,
+        left: &RneNodeTrace,
+        right: &RneNodeTrace,
+        left_element: usize,
+        right_element: usize,
+    ) -> Result<(i64, i64, i64, RneWitness), NumericError> {
+        let fraction_bits = left
+            .fraction_bits
+            .checked_add(right.fraction_bits)
+            .ok_or(NumericError::InvalidInput {
+                node: node_index,
+                reason: "RNE product fractional-width overflow",
+            })?;
+        let ideal = left.ideal[left_element]
+            .checked_mul(right.ideal[right_element])
+            .ok_or(NumericError::InvalidInput {
+                node: node_index,
+                reason: "ideal dyadic product overflow",
+            })?;
+        let pre_round = left.actual[left_element]
+            .checked_mul(right.actual[right_element])
+            .ok_or(NumericError::InvalidInput {
+                node: node_index,
+                reason: "rounded dyadic product overflow",
+            })?;
+        let (rounded, _bits, shift) = round_ticks_to_binary32(pre_round, fraction_bits)
+            .map_err(|reason| NumericError::InvalidInput {
+                node: node_index,
+                reason,
+            })?;
+        let step = binary32_step_i64(shift).ok_or(NumericError::InvalidInput {
+            node: node_index,
+            reason: "binary32 product ulp step overflow",
+        })?;
+        let bound_ideal_left = left.ideal[left_element]
+            .checked_abs()
+            .ok_or(NumericError::InvalidInput {
+                node: node_index,
+                reason: "ideal product bound overflow",
+            })?;
+        let bound_actual_right = right.actual[right_element]
+            .checked_abs()
+            .ok_or(NumericError::InvalidInput {
+                node: node_index,
+                reason: "actual product bound overflow",
+            })?;
+        let propagated = left.epsilon[left_element]
+            .checked_mul(bound_actual_right)
+            .and_then(|v| {
+                bound_ideal_left
+                    .checked_mul(right.epsilon[right_element])
+                    .and_then(|w| v.checked_add(w))
+            })
+            .ok_or(NumericError::InvalidInput {
+                node: node_index,
+                reason: "RNE product propagated-error overflow",
+            })?;
+        let budget = propagated
+            .checked_add(step)
+            .ok_or(NumericError::InvalidInput {
+                node: node_index,
+                reason: "RNE product error budget overflow",
+            })?;
+
+        Ok((
+            ideal,
+            rounded,
+            budget,
+            RneWitness {
+                pre_round,
+                rounded,
+                shift,
+            },
+        ))
+    }
+
+    fn trace_mul(
+        &self,
+        node_index: usize,
+        left: &RneNodeTrace,
+        right: &RneNodeTrace,
+    ) -> Result<RneNodeTrace, NumericError> {
+        if left.actual.len() != right.actual.len() {
+            return Err(NumericError::InvalidInput {
+                node: node_index,
+                reason: "internal RNE pointwise product shape mismatch",
+            });
+        }
+        let len = left.actual.len();
+        let fraction_bits = left.fraction_bits + right.fraction_bits;
+        let mut ideal = Vec::with_capacity(len);
+        let mut actual = Vec::with_capacity(len);
+        let mut epsilon = Vec::with_capacity(len);
+        let mut rounding = Vec::with_capacity(len);
+        for i in 0..len {
+            let (ideal_value, actual_value, error, witness) =
+                self.trace_mul_element(node_index, left, right, i, i)?;
+            ideal.push(ideal_value);
+            actual.push(actual_value);
+            epsilon.push(error);
+            rounding.push(Some(witness));
+        }
+        Ok(RneNodeTrace {
+            ideal,
+            actual,
+            epsilon,
+            fraction_bits,
+            rounding,
+            matmul_steps: None,
+        })
+    }
+
+    fn trace_matmul(
+        &self,
+        node_index: usize,
+        left: &RneNodeTrace,
+        right: &RneNodeTrace,
+    ) -> Result<RneNodeTrace, NumericError> {
+        let node = &self.graph.nodes()[node_index];
+        let left_node = &self.graph.nodes()[node.inputs[0].index()];
+        let inner = left_node.shape.dims()[1];
+        let rows = node.shape.dims()[0];
+        let cols = node.shape.dims()[1];
+        let fraction_bits = left.fraction_bits + right.fraction_bits;
+        let mut ideal = Vec::with_capacity(rows * cols);
+        let mut actual = Vec::with_capacity(rows * cols);
+        let mut epsilon = Vec::with_capacity(rows * cols);
+        let mut all_steps = Vec::with_capacity(rows * cols);
+
+        for row in 0..rows {
+            for col in 0..cols {
+                let mut sum_ideal = 0i64;
+                let mut sum_actual = 0i64;
+                let mut sum_epsilon = 0i64;
+                let mut steps = Vec::with_capacity(inner);
+                for j in 0..inner {
+                    let left_element = row * inner + j;
+                    let right_element = j * cols + col;
+                    let (
+                        product_ideal,
+                        product_actual,
+                        product_epsilon,
+                        product_rounding,
+                    ) = self.trace_mul_element(
+                        node_index,
+                        left,
+                        right,
+                        left_element,
+                        right_element,
+                    )?;
+                    let next_ideal = sum_ideal
+                        .checked_add(product_ideal)
+                        .ok_or(NumericError::InvalidInput {
+                            node: node_index,
+                            reason: "ideal MatMul reduction overflow",
+                        })?;
+                    let pre_round = sum_actual
+                        .checked_add(product_actual)
+                        .ok_or(NumericError::InvalidInput {
+                            node: node_index,
+                            reason: "rounded MatMul reduction overflow",
+                        })?;
+                    let (next_actual, _bits, shift) =
+                        round_ticks_to_binary32(pre_round, fraction_bits).map_err(|reason| {
+                            NumericError::InvalidInput {
+                                node: node_index,
+                                reason,
+                            }
+                        })?;
+                    let step = binary32_step_i64(shift).ok_or(NumericError::InvalidInput {
+                        node: node_index,
+                        reason: "binary32 MatMul-add ulp step overflow",
+                    })?;
+                    let next_epsilon = sum_epsilon
+                        .checked_add(product_epsilon)
+                        .and_then(|v| v.checked_add(step))
+                        .ok_or(NumericError::InvalidInput {
+                            node: node_index,
+                            reason: "RNE MatMul reduction error budget overflow",
+                        })?;
+                    let sum_rounding = RneWitness {
+                        pre_round,
+                        rounded: next_actual,
+                        shift,
+                    };
+                    steps.push(RneMatMulStep {
+                        left_element,
+                        right_element,
+                        product_ideal,
+                        product_actual,
+                        product_epsilon,
+                        product_rounding,
+                        sum_ideal: next_ideal,
+                        sum_actual: next_actual,
+                        sum_epsilon: next_epsilon,
+                        sum_rounding,
+                    });
+                    sum_ideal = next_ideal;
+                    sum_actual = next_actual;
+                    sum_epsilon = next_epsilon;
+                }
+                ideal.push(sum_ideal);
+                actual.push(sum_actual);
+                epsilon.push(sum_epsilon);
+                all_steps.push(steps);
+            }
+        }
+
+        Ok(RneNodeTrace {
+            ideal,
+            actual,
+            epsilon,
+            fraction_bits,
+            rounding: vec![None; rows * cols],
+            matmul_steps: Some(all_steps),
         })
     }
 
@@ -887,7 +1217,8 @@ impl RneFp32Plan {
         source.push_str(NUMERIC_LIBRARY);
         source.push_str("\nnamespace VeriNeural.Generated.RneTrace\n\n");
         source.push_str(&format!(
-            "-- Concrete dyadic RNE trace: one tick = 2^-{}.\n\
+            "-- Concrete dyadic RNE trace: source inputs use 2^-{} ticks.\n\
+             -- Internal products may use finer per-node dyadic lattices.\n\
              -- The hardware/LLVM/PTX link is not proved by this theorem.\n\n",
             self.fraction_bits
         ));
@@ -909,11 +1240,38 @@ impl RneFp32Plan {
                     Operation::Add | Operation::BiasAdd => {
                         let left_index = node.inputs[0].index();
                         let right_index = node.inputs[1].index();
+                        let left_trace = &traces[&left_index];
+                        let right_trace = &traces[&right_index];
                         let right_element = if matches!(node.operation, Operation::BiasAdd) {
-                            element % traces[&right_index].actual.len()
+                            element % right_trace.actual.len()
                         } else {
                             element
                         };
+                        let left_shift = trace.fraction_bits - left_trace.fraction_bits;
+                        let right_shift = trace.fraction_bits - right_trace.fraction_bits;
+                        let left_factor = binary32_step_i64(left_shift).expect("validated scale");
+                        let right_factor = binary32_step_i64(right_shift).expect("validated scale");
+                        let left_ideal =
+                            rescale_i64(left_trace.ideal[element], left_shift).expect("validated");
+                        let left_actual =
+                            rescale_i64(left_trace.actual[element], left_shift).expect("validated");
+                        let left_epsilon =
+                            rescale_i64(left_trace.epsilon[element], left_shift).expect("validated");
+                        let right_ideal = rescale_i64(
+                            right_trace.ideal[right_element],
+                            right_shift,
+                        )
+                        .expect("validated");
+                        let right_actual = rescale_i64(
+                            right_trace.actual[right_element],
+                            right_shift,
+                        )
+                        .expect("validated");
+                        let right_epsilon = rescale_i64(
+                            right_trace.epsilon[right_element],
+                            right_shift,
+                        )
+                        .expect("validated");
                         let witness = trace.rounding[element].expect("add rounding witness");
                         let round_name = format!("rne_node_{index}_elem_{element}_round");
                         source.push_str(&format!(
@@ -925,11 +1283,147 @@ impl RneFp32Plan {
                         source.push_str(&format!(
                             "theorem {error_name} :\n  \
                              VeriNeural.ApproxWithin {} {} {} := by\n  \
+                             have hleft : VeriNeural.ApproxWithin {left_epsilon} \
+                               {left_ideal} {left_actual} := by\n    \
+                               simpa using (VeriNeural.approx_scale (scale := {left_factor}) \
+                                 (by decide) rne_node_{left_index}_elem_{element}_error)\n  \
+                             have hright : VeriNeural.ApproxWithin {right_epsilon} \
+                               {right_ideal} {right_actual} := by\n    \
+                               simpa using (VeriNeural.approx_scale (scale := {right_factor}) \
+                                 (by decide) rne_node_{right_index}_elem_{right_element}_error)\n  \
                              simpa [VeriNeural.binary32Step] using\n    \
-                             (VeriNeural.approx_add_round\n      \
-                             rne_node_{left_index}_elem_{element}_error\n      \
-                             rne_node_{right_index}_elem_{right_element}_error\n      \
-                             (VeriNeural.binary32_rne_within_step {round_name}))\n\n",
+                               (VeriNeural.approx_add_round hleft hright\n      \
+                                 (VeriNeural.binary32_rne_within_step {round_name}))\n\n",
+                            trace.epsilon[element], trace.ideal[element], trace.actual[element]
+                        ));
+                    }
+                    Operation::Mul => {
+                        let left_index = node.inputs[0].index();
+                        let right_index = node.inputs[1].index();
+                        let left_trace = &traces[&left_index];
+                        let right_trace = &traces[&right_index];
+                        let witness = trace.rounding[element].expect("mul rounding witness");
+                        let round_name = format!("rne_node_{index}_elem_{element}_round");
+                        let bound_ideal_left =
+                            left_trace.ideal[element].checked_abs().expect("validated");
+                        let bound_actual_right =
+                            right_trace.actual[element].checked_abs().expect("validated");
+                        source.push_str(&format!(
+                            "theorem {round_name} :\n  \
+                             VeriNeural.Binary32RneTick {} {} {} := by\n  \
+                             decide\n\n",
+                            witness.pre_round, witness.rounded, witness.shift
+                        ));
+                        source.push_str(&format!(
+                            "theorem {error_name} :\n  \
+                             VeriNeural.ApproxWithin {} {} {} := by\n  \
+                             have hideal : VeriNeural.Within {bound_ideal_left} \
+                               {} := by decide\n  \
+                             have hactual : VeriNeural.Within {bound_actual_right} \
+                               {} := by decide\n  \
+                             simpa [VeriNeural.binary32Step] using\n    \
+                               (VeriNeural.approx_mul_round\n      \
+                                 rne_node_{left_index}_elem_{element}_error\n      \
+                                 rne_node_{right_index}_elem_{element}_error\n      \
+                                 hideal hactual\n      \
+                                 (VeriNeural.binary32_rne_within_step {round_name}))\n\n",
+                            trace.epsilon[element],
+                            trace.ideal[element],
+                            trace.actual[element],
+                            left_trace.ideal[element],
+                            right_trace.actual[element],
+                        ));
+                    }
+                    Operation::MatMul => {
+                        let left_index = node.inputs[0].index();
+                        let right_index = node.inputs[1].index();
+                        let left_trace = &traces[&left_index];
+                        let right_trace = &traces[&right_index];
+                        let steps = &trace
+                            .matmul_steps
+                            .as_ref()
+                            .expect("MatMul reduction witnesses")[element];
+                        let init_name = format!("rne_node_{index}_elem_{element}_acc_0_error");
+                        source.push_str(&format!(
+                            "theorem {init_name} :\n  \
+                             VeriNeural.ApproxWithin 0 0 0 := by\n  \
+                             exact VeriNeural.approx_refl _\n\n"
+                        ));
+                        let mut previous = init_name;
+                        for (step_index, step) in steps.iter().enumerate() {
+                            let product_round_name = format!(
+                                "rne_node_{index}_elem_{element}_product_{step_index}_round"
+                            );
+                            let product_error_name = format!(
+                                "rne_node_{index}_elem_{element}_product_{step_index}_error"
+                            );
+                            let sum_round_name = format!(
+                                "rne_node_{index}_elem_{element}_sum_{step_index}_round"
+                            );
+                            let sum_error_name = format!(
+                                "rne_node_{index}_elem_{element}_sum_{}_error",
+                                step_index + 1
+                            );
+                            let bound_ideal_left = left_trace.ideal[step.left_element]
+                                .checked_abs()
+                                .expect("validated");
+                            let bound_actual_right = right_trace.actual[step.right_element]
+                                .checked_abs()
+                                .expect("validated");
+                            source.push_str(&format!(
+                                "theorem {product_round_name} :\n  \
+                                 VeriNeural.Binary32RneTick {} {} {} := by\n  \
+                                 decide\n\n",
+                                step.product_rounding.pre_round,
+                                step.product_rounding.rounded,
+                                step.product_rounding.shift
+                            ));
+                            source.push_str(&format!(
+                                "theorem {product_error_name} :\n  \
+                                 VeriNeural.ApproxWithin {} {} {} := by\n  \
+                                 have hideal : VeriNeural.Within {bound_ideal_left} \
+                                   {} := by decide\n  \
+                                 have hactual : VeriNeural.Within {bound_actual_right} \
+                                   {} := by decide\n  \
+                                 simpa [VeriNeural.binary32Step] using\n    \
+                                   (VeriNeural.approx_mul_round\n      \
+                                     rne_node_{left_index}_elem_{}_error\n      \
+                                     rne_node_{right_index}_elem_{}_error\n      \
+                                     hideal hactual\n      \
+                                     (VeriNeural.binary32_rne_within_step \
+                                       {product_round_name}))\n\n",
+                                step.product_epsilon,
+                                step.product_ideal,
+                                step.product_actual,
+                                left_trace.ideal[step.left_element],
+                                right_trace.actual[step.right_element],
+                                step.left_element,
+                                step.right_element,
+                            ));
+                            source.push_str(&format!(
+                                "theorem {sum_round_name} :\n  \
+                                 VeriNeural.Binary32RneTick {} {} {} := by\n  \
+                                 decide\n\n",
+                                step.sum_rounding.pre_round,
+                                step.sum_rounding.rounded,
+                                step.sum_rounding.shift
+                            ));
+                            source.push_str(&format!(
+                                "theorem {sum_error_name} :\n  \
+                                 VeriNeural.ApproxWithin {} {} {} := by\n  \
+                                 simpa [VeriNeural.binary32Step] using\n    \
+                                   (VeriNeural.approx_add_round\n      \
+                                     {previous}\n      \
+                                     {product_error_name}\n      \
+                                     (VeriNeural.binary32_rne_within_step {sum_round_name}))\n\n",
+                                step.sum_epsilon, step.sum_ideal, step.sum_actual
+                            ));
+                            previous = sum_error_name;
+                        }
+                        source.push_str(&format!(
+                            "theorem {error_name} :\n  \
+                             VeriNeural.ApproxWithin {} {} {} := by\n  \
+                             simpa using {previous}\n\n",
                             trace.epsilon[element], trace.ideal[element], trace.actual[element]
                         ));
                     }
@@ -995,6 +1489,10 @@ impl RneFp32Trace {
         self.observed_error_ticks
     }
 
+    pub fn fraction_bits(&self) -> u32 {
+        self.fraction_bits
+    }
+
     pub fn epsilon(&self) -> f64 {
         self.epsilon_ticks as f64 / (1u64 << self.fraction_bits) as f64
     }
@@ -1029,6 +1527,16 @@ impl RneFp32Trace {
     }
 }
 
+fn rescale_i64(value: i64, shift: u32) -> Option<i64> {
+    let factor = 1i128.checked_shl(shift)?;
+    let scaled = i128::from(value).checked_mul(factor)?;
+    i64::try_from(scaled).ok()
+}
+
+fn binary32_step_i64(shift: u32) -> Option<i64> {
+    1i64.checked_shl(shift)
+}
+
 fn f32_to_dyadic_ticks(value: f32, fraction_bits: u32) -> Result<i64, &'static str> {
     let bits = value.to_bits();
     let sign = bits >> 31;
@@ -1052,9 +1560,11 @@ fn f32_to_dyadic_ticks(value: f32, fraction_bits: u32) -> Result<i64, &'static s
     let unbiased = exponent as i32 - 127;
     let shift = unbiased - 23 + fraction_bits as i32;
     let magnitude = if shift >= 0 {
-        significand
-            .checked_shl(shift as u32)
-            .ok_or("fixed-point input overflow")?
+        let left = shift as u32;
+        if left > 104 {
+            return Err("fixed-point input overflow");
+        }
+        (u128::from(significand)) << left
     } else {
         let right = (-shift) as u32;
         if right >= 64 {
@@ -1064,9 +1574,9 @@ fn f32_to_dyadic_ticks(value: f32, fraction_bits: u32) -> Result<i64, &'static s
         if significand & mask != 0 {
             return Err("input is not on the selected dyadic lattice");
         }
-        significand >> right
+        u128::from(significand >> right)
     };
-    if magnitude > i64::MAX as u64 {
+    if magnitude > i64::MAX as u128 {
         return Err("fixed-point input overflow");
     }
     let magnitude = magnitude as i64;
