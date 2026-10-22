@@ -506,4 +506,35 @@ theorem approx_contract_relu
   exact ⟨hbound, hepsilon, within_relu hbound hideal, approx_relu herr⟩
 
 
+
+/-!
+Stage 8 threshold slice. These lemmas select the ReLU branch only when
+the observed pre-activation has enough margin relative to the epsilon bound.
+The results depend on ApproxContract, not CUDA/LLVM/PTX conformance.
+-/
+
+theorem approx_contract_relu_positive_branch
+    {bound epsilon ideal actual : Int}
+    (h : ApproxContract bound epsilon ideal actual)
+    (hmargin : epsilon < actual) :
+    max ideal 0 = ideal ∧ max actual 0 = actual := by
+  rcases h with ⟨_hbound, _hepsilon, _hideal, herr⟩
+  unfold ApproxWithin Within at herr
+  rcases herr with ⟨_hlower, hupper⟩
+  constructor
+  · exact Int.max_eq_left (by omega)
+  · exact Int.max_eq_left (by omega)
+
+theorem approx_contract_relu_nonpositive_branch
+    {bound epsilon ideal actual : Int}
+    (h : ApproxContract bound epsilon ideal actual)
+    (hmargin : actual + epsilon ≤ 0) :
+    max ideal 0 = 0 ∧ max actual 0 = 0 := by
+  rcases h with ⟨_hbound, hepsilon, _hideal, herr⟩
+  unfold ApproxWithin Within at herr
+  rcases herr with ⟨hlower, _hupper⟩
+  constructor
+  · exact Int.max_eq_right (by omega)
+  · exact Int.max_eq_right (by omega)
+
 end VeriNeural

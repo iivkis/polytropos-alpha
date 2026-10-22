@@ -1547,6 +1547,59 @@ impl RneErrorContract {
     }
 }
 
+/// Conditional ReLU branch in the ideal integer model, not an assertion that
+/// CUDA/LLVM/PTX followed the source-level dyadic RNE contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RneThresholdSide {
+    Positive,
+    NonPositive,
+    Indeterminate,
+}
+
+/// A pre-ReLU observation and the interval enclosing its ideal counterpart
+/// if the per-node ApproxContract hypothesis holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RneThresholdEvidence {
+    relu: NodeId,
+    input: NodeId,
+    fraction_bits: u32,
+    observed_ticks: i64,
+    epsilon_ticks: i64,
+    ideal_lower_ticks: i128,
+    ideal_upper_ticks: i128,
+    side: RneThresholdSide,
+}
+
+impl RneThresholdEvidence {
+    pub fn relu(&self) -> NodeId {
+        self.relu
+    }
+
+    pub fn input(&self) -> NodeId {
+        self.input
+    }
+
+    pub fn fraction_bits(&self) -> u32 {
+        self.fraction_bits
+    }
+
+    pub fn observed_ticks(&self) -> i64 {
+        self.observed_ticks
+    }
+
+    pub fn epsilon_ticks(&self) -> i64 {
+        self.epsilon_ticks
+    }
+
+    pub fn ideal_interval_ticks(&self) -> (i128, i128) {
+        (self.ideal_lower_ticks, self.ideal_upper_ticks)
+    }
+
+    pub fn side(&self) -> RneThresholdSide {
+        self.side
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RneModuleErrorContract {
     name: &'static str,
@@ -1991,6 +2044,66 @@ impl RneRangePlan {
                 node: node.index(),
                 reason: "node is outside this RNE range output slice",
             })
+    }
+
+    /// Classify the pre-activation of a reachable ReLU, using its own q scale
+    /// and the RNE epsilon from the preceding node's ApproxContract.
+    ///
+    /// Positive: observed > epsilon. NonPositive: observed + epsilon <= 0.
+    /// All remaining cases are Indeterminate, including equality at the
+    /// positive margin. This is conditional on ApproxContract and trusted
+    /// FP32/GPU correspondence, not a machine-level branch certificate.
+    pub fn classify_relu_input(
+        &self,
+        relu: NodeId,
+        observed: f32,
+    ) -> Result<RneThresholdEvidence, NumericError> {
+        let node = self.graph.node(relu)?;
+        if !matches!(node.operation, Operation::Relu)
+            || !self.contracts.contains_key(&relu.index())
+        {
+            return Err(NumericError::InvalidInput {
+                node: relu.index(),
+                reason: "threshold target must be a reachable ReLU",
+            });
+        }
+        let input = node.inputs[0];
+        let contract = self.node_contract(input)?;
+        let observed_ticks =
+            f32_to_dyadic_ticks(observed, contract.fraction_bits).map_err(|reason| {
+                NumericError::InvalidInput {
+                    node: input.index(),
+                    reason,
+                }
+            })?;
+        if observed_ticks.unsigned_abs() > contract.actual_bound_ticks as u64 {
+            return Err(NumericError::InvalidInput {
+                node: input.index(),
+                reason: "threshold observation exceeds the node actual range bound",
+            });
+        }
+        // i128 avoids signed overflow even near the maximum supported i64.
+        let epsilon = i128::from(contract.epsilon_ticks);
+        let actual = i128::from(observed_ticks);
+        let ideal_lower_ticks = actual - epsilon;
+        let ideal_upper_ticks = actual + epsilon;
+        let side = if ideal_lower_ticks > 0 {
+            RneThresholdSide::Positive
+        } else if ideal_upper_ticks <= 0 {
+            RneThresholdSide::NonPositive
+        } else {
+            RneThresholdSide::Indeterminate
+        };
+        Ok(RneThresholdEvidence {
+            relu,
+            input,
+            fraction_bits: contract.fraction_bits,
+            observed_ticks,
+            epsilon_ticks: contract.epsilon_ticks,
+            ideal_lower_ticks,
+            ideal_upper_ticks,
+            side,
+        })
     }
 
     pub fn module_contracts(&self) -> Vec<RneModuleErrorContract> {
@@ -3162,6 +3275,29 @@ impl RneRangePlan {
                         parent.epsilon_ticks,
                         contract.ideal_bound_ticks,
                         contract.epsilon_ticks,
+                    ));
+                    source.push_str(&format!(
+                        r#"theorem node_{index}_positive_branch
+    {{ideal actual : Int}}
+    (h : VeriNeural.ApproxContract {} {} ideal actual)
+    (hmargin : {} < actual) :
+    max ideal 0 = ideal ∧ max actual 0 = actual := by
+  exact VeriNeural.approx_contract_relu_positive_branch h hmargin
+
+theorem node_{index}_nonpositive_branch
+    {{ideal actual : Int}}
+    (h : VeriNeural.ApproxContract {} {} ideal actual)
+    (hmargin : actual + {} ≤ 0) :
+    max ideal 0 = 0 ∧ max actual 0 = 0 := by
+  exact VeriNeural.approx_contract_relu_nonpositive_branch h hmargin
+
+"#,
+                        parent.ideal_bound_ticks,
+                        parent.epsilon_ticks,
+                        parent.epsilon_ticks,
+                        parent.ideal_bound_ticks,
+                        parent.epsilon_ticks,
+                        parent.epsilon_ticks,
                     ));
                 }
                 RneRangeRule::Reshape => {

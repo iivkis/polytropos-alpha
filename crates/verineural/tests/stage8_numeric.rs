@@ -1,6 +1,7 @@
 use verineural::{
     Domain, ExactFp32Plan, MathContract, NeuralGraph, NeuralModule, NodeId, NumericError,
-    PortContract, ResidualAdd, ResidualFfn, RneFp32Plan, RneRangePlan, Shape, Tensor,
+    PortContract, ResidualAdd, ResidualFfn, RneFp32Plan, RneRangePlan, RneThresholdSide, Shape,
+    Tensor,
 };
 
 fn plan() -> (NeuralGraph, verineural::NodeId, [verineural::NodeId; 3]) {
@@ -937,4 +938,64 @@ fn stage8_fractional_rne_slice_fails_closed_outside_its_model() {
     }
     assert!(RneFp32Plan::compile(&graph, output, 0).is_err());
     assert!(RneFp32Plan::compile(&graph, output, 31).is_err());
+}
+
+#[test]
+fn stage8_threshold_margins_and_fail_closed() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![1]).unwrap();
+    let x = graph.input(shape.clone(), Domain::Finite);
+    let y = graph.input(shape, Domain::Finite);
+    let sum = graph.add(x, y).unwrap();
+    let relu = graph.relu(sum).unwrap();
+    let orphan = graph.relu(x).unwrap();
+    let plan = RneRangePlan::compile(&graph, relu, 10, 16).unwrap();
+    assert_eq!(plan.node_contract(sum).unwrap().epsilon_ticks(), 1);
+    let positive = plan.classify_relu_input(relu, 2.0 / 1024.0).unwrap();
+    assert_eq!(positive.side(), RneThresholdSide::Positive);
+    assert_eq!(positive.ideal_interval_ticks(), (1, 3));
+    let nonpositive = plan.classify_relu_input(relu, -1.0 / 1024.0).unwrap();
+    assert_eq!(nonpositive.side(), RneThresholdSide::NonPositive);
+    assert_eq!(nonpositive.ideal_interval_ticks(), (-2, 0));
+    let ambiguous = plan.classify_relu_input(relu, 0.0).unwrap();
+    assert_eq!(ambiguous.side(), RneThresholdSide::Indeterminate);
+    assert_eq!(ambiguous.ideal_interval_ticks(), (-1, 1));
+    assert_eq!(
+        plan.classify_relu_input(relu, 1.0 / 1024.0).unwrap().side(),
+        RneThresholdSide::Indeterminate
+    );
+    for value in [-0.0, f32::from_bits(1), f32::NAN, f32::INFINITY, 100.0] {
+        assert!(plan.classify_relu_input(relu, value).is_err());
+    }
+    assert!(plan.classify_relu_input(sum, 0.0).is_err());
+    assert!(plan.classify_relu_input(orphan, 0.0).is_err());
+    let source = plan.lean_source().unwrap();
+    assert!(source.contains("theorem node_3_positive_branch"));
+    assert!(source.contains("theorem node_3_nonpositive_branch"));
+}
+
+#[test]
+fn stage8_threshold_margin_uses_matmul_bias_error_and_node_scale() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![1, 2]).unwrap(), Domain::Finite);
+    let w = graph.input(Shape::new(vec![2, 1]).unwrap(), Domain::Finite);
+    let b = graph.input(Shape::new(vec![1]).unwrap(), Domain::Finite);
+    let product = graph.matmul(x, w).unwrap();
+    let biased = graph.bias_add(product, b).unwrap();
+    let relu = graph.relu(biased).unwrap();
+    let plan = RneRangePlan::compile(&graph, relu, 10, 16).unwrap();
+    let contract = plan.node_contract(biased).unwrap();
+    assert!(contract.epsilon_ticks() > 0);
+    assert_eq!(contract.fraction_bits(), 20);
+    let scale = (1u64 << contract.fraction_bits()) as f32;
+    let epsilon = contract.epsilon_ticks() as f32;
+    let positive = plan.classify_relu_input(relu, (epsilon + 1.0) / scale).unwrap();
+    assert_eq!(positive.side(), RneThresholdSide::Positive);
+    let nonpositive = plan.classify_relu_input(relu, -epsilon / scale).unwrap();
+    assert_eq!(nonpositive.side(), RneThresholdSide::NonPositive);
+    let indeterminate = plan.classify_relu_input(relu, 0.0).unwrap();
+    assert_eq!(indeterminate.side(), RneThresholdSide::Indeterminate);
+    let generated = plan.lean_source().unwrap();
+    assert!(generated.contains("theorem node_5_positive_branch"));
+    assert!(generated.contains("theorem node_5_nonpositive_branch"));
 }

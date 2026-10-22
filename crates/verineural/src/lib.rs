@@ -20,6 +20,8 @@
 //! BiasAdd/ReLU/Reshape module proofs over a DAG from source hypotheses.
 //! Nested modules reuse direct child theorems recursively. This property is
 //! separate from FP32/GPU guarantees.
+//! Stage 8 ReLU threshold decisions use conditional per-node error margins;
+//! uncertain pre-activations remain indeterminate.
 //! The LLVM/PTX/GPU link is still trusted rather than formally certified.
 
 mod certificate;
@@ -46,7 +48,7 @@ pub use ir::{
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
 pub use numeric::{
     ExactFp32Plan, NumericError, RneErrorContract, RneFp32Plan, RneFp32Trace,
-    RneModuleErrorContract, RneRangePlan,
+    RneModuleErrorContract, RneRangePlan, RneThresholdEvidence, RneThresholdSide,
 };
 pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
 pub use tensor::{Shape, Tensor, TensorShape};

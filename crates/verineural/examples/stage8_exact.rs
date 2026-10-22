@@ -12,10 +12,10 @@ use std::process::Command;
 use verineural::{
     Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, MathContract, NeuralGraph,
     NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd, ResidualFfn, RneFp32Plan,
-    RneRangePlan, Shape, Tensor,
+    RneRangePlan, RneThresholdSide, Shape, Tensor,
 };
 
-const FILES: [&str; 46] = [
+const FILES: [&str; 48] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -48,6 +48,8 @@ const FILES: [&str; 46] = [
     "rne_matmul_error.txt",
     "numeric_range.lean",
     "range_contract.txt",
+    "numeric_threshold.lean",
+    "threshold_certificates.txt",
     "numeric_architecture.lean",
     "architecture_contract.txt",
     "numeric_architecture_dag.lean",
@@ -100,6 +102,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_rne.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_rne_matmul.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_range.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_threshold.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_architecture.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_architecture_dag.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_nested.lean"))?;
@@ -734,6 +737,94 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Synthetic, exactly representable pre-ReLU observations.
+    // Classification remains conditional on the node's ApproxContract.
+    let mut threshold_graph = NeuralGraph::default();
+    let threshold_shape = Shape::new(vec![1])?;
+    let threshold_x = threshold_graph.input(threshold_shape.clone(), Domain::Finite);
+    let threshold_y = threshold_graph.input(threshold_shape, Domain::Finite);
+    let threshold_sum = threshold_graph.add(threshold_x, threshold_y)?;
+    let threshold_relu = threshold_graph.relu(threshold_sum)?;
+    let threshold_plan = RneRangePlan::compile(&threshold_graph, threshold_relu, 10, 16)?;
+    let threshold_contract = threshold_plan.node_contract(threshold_sum)?;
+    if threshold_contract.ideal_bound_ticks() != 32
+        || threshold_contract.epsilon_ticks() != 1
+    {
+        return Err(io::Error::other("unexpected Stage 8 threshold budget").into());
+    }
+    let positive = threshold_plan.classify_relu_input(threshold_relu, 2.0 / 1024.0)?;
+    let nonpositive = threshold_plan.classify_relu_input(threshold_relu, -1.0 / 1024.0)?;
+    let ambiguous = threshold_plan.classify_relu_input(threshold_relu, 0.0)?;
+    if positive.side() != RneThresholdSide::Positive
+        || nonpositive.side() != RneThresholdSide::NonPositive
+        || ambiguous.side() != RneThresholdSide::Indeterminate
+        || positive.ideal_interval_ticks() != (1, 3)
+        || nonpositive.ideal_interval_ticks() != (-2, 0)
+        || ambiguous.ideal_interval_ticks() != (-1, 1)
+    {
+        return Err(io::Error::other("unexpected Stage 8 threshold decision").into());
+    }
+
+    let mut threshold_source = threshold_plan.lean_source()?;
+    if !threshold_source.contains("theorem node_3_positive_branch")
+        || !threshold_source.contains("theorem node_3_nonpositive_branch")
+    {
+        return Err(io::Error::other("missing conditional ReLU branch proofs").into());
+    }
+    threshold_source.push_str(&format!(
+        r#"
+namespace VeriNeural.Generated.RneThreshold
+
+theorem positive_observation {{ideal : Int}}
+    (h : VeriNeural.ApproxContract {bound} {epsilon} ideal ({positive_ticks} : Int)) :
+    max ideal 0 = ideal ∧ max ({positive_ticks} : Int) 0 = ({positive_ticks} : Int) := by
+  exact VeriNeural.Generated.RneRange.node_{relu}_positive_branch h (by decide)
+
+theorem nonpositive_observation {{ideal : Int}}
+    (h : VeriNeural.ApproxContract {bound} {epsilon} ideal ({negative_ticks} : Int)) :
+    max ideal 0 = 0 ∧ max ({negative_ticks} : Int) 0 = 0 := by
+  exact VeriNeural.Generated.RneRange.node_{relu}_nonpositive_branch h (by decide)
+
+-- The same actual operand allows opposite ideal branch choices.
+theorem ambiguous_has_opposite_models :
+    VeriNeural.ApproxContract {bound} {epsilon} (1 : Int) 0 ∧
+    VeriNeural.ApproxContract {bound} {epsilon} (-1 : Int) 0 := by
+  decide
+
+end VeriNeural.Generated.RneThreshold
+"#,
+        bound = threshold_contract.ideal_bound_ticks(),
+        epsilon = threshold_contract.epsilon_ticks(),
+        positive_ticks = positive.observed_ticks(),
+        negative_ticks = nonpositive.observed_ticks(),
+        relu = threshold_relu.index(),
+    ));
+    write_checked_lean(&root.join("numeric_threshold.lean"), &threshold_source)?;
+    fs::write(
+        root.join("threshold_certificates.txt"),
+        format!(
+            "model=dyadic-rne-int\nobservations=synthetic-not-gpu\nrelu_node={}\ninput_node={}\n\
+             q={}\nepsilon_ticks={}\n\
+             positive={}: {:?} {:?}\nnonpositive={}: {:?} {:?}\n\
+             ambiguous={}: {:?} {:?}\n\
+             proofs=positive_observation,nonpositive_observation,ambiguous_has_opposite_models\n\
+             assumption=pre-relu-ApproxContract\nmachine_fp32_gpu=trusted-not-proven\n",
+            threshold_relu.index(),
+            threshold_sum.index(),
+            positive.fraction_bits(),
+            positive.epsilon_ticks(),
+            positive.observed_ticks(),
+            positive.ideal_interval_ticks(),
+            positive.side(),
+            nonpositive.observed_ticks(),
+            nonpositive.ideal_interval_ticks(),
+            nonpositive.side(),
+            ambiguous.observed_ticks(),
+            ambiguous.ideal_interval_ticks(),
+            ambiguous.side(),
+        ),
+    )?;
+
     // Architecture-level composition: the second ResidualFfn consumes the
     // first module's output contract. The generated Lean theorem must compose
     // module_0_global_contract -> module_1_global_contract instead of flattening
@@ -1220,12 +1311,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "Stage 8 MatMul/BiasAdd global property: nonnegative 2x3 * 3x2 with row-wise bias broadcast (ideal-Int only)"
     );
+    println!("Stage 8 ReLU threshold margins: conditional positive/nonpositive proofs plus explicit ambiguity witness");
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }
