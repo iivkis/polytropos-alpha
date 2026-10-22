@@ -142,3 +142,109 @@ fn stage7_replay_inputs_are_validated_before_cuda_setup() {
         Err(GpuError::MissingInput { .. })
     ));
 }
+
+
+#[test]
+fn memory_contracts_cover_baseline_and_fused_read_extents() {
+    use verineural::GpuMemoryPattern;
+
+    let mut graph = NeuralGraph::default();
+    let matrix = Shape::new(vec![2, 3]).unwrap();
+    let x = graph.input(matrix.clone(), Domain::Finite);
+    let y = graph.input(matrix, Domain::Finite);
+    let bias = graph.input(Shape::new(vec![3]).unwrap(), Domain::Finite);
+    let sum = graph.add(x, y).unwrap();
+    let biased = graph.bias_add(sum, bias).unwrap();
+    let output = graph.relu(biased).unwrap();
+
+    let base = GpuEngine::default()
+        .with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Disabled).unwrap())
+        .compile(&graph, output)
+        .unwrap();
+    let fused = GpuEngine::default()
+        .with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Experimental).unwrap())
+        .compile(&graph, output)
+        .unwrap();
+
+    let before = base.memory_contracts().unwrap();
+    assert_eq!(before.len(), 3);
+    assert_eq!(before[0].kernel_node, sum.index());
+    assert_eq!(before[0].reads, vec![(x.index(), 6), (y.index(), 6)]);
+    assert_eq!(before[0].writes, 6);
+    assert_eq!(before[0].pattern, GpuMemoryPattern::Pointwise);
+    assert_eq!(before[1].reads, vec![(sum.index(), 6), (bias.index(), 3)]);
+    assert_eq!(before[1].pattern, GpuMemoryPattern::BiasAdd { columns: 3 });
+    assert_eq!(before[2].reads, vec![(biased.index(), 6)]);
+
+    let after = fused.memory_contracts().unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].kernel_node, output.index());
+    assert_eq!(after[0].reads, vec![(x.index(), 6), (y.index(), 6), (bias.index(), 3)]);
+    assert_eq!(after[0].writes, 6);
+    assert_eq!(after[0].pattern, GpuMemoryPattern::BiasAdd { columns: 3 });
+
+    let source = fused.memory_lean_source().unwrap();
+    assert!(source.contains("theorem bias_address_bound"));
+    assert!(source.contains("index % 3 < 3"));
+    assert!(source.contains("index < 6"));
+    assert!(source.contains("IR kernel 5: 3 source tensors"));
+}
+
+#[test]
+fn matmul_memory_contract_uses_row_major_source_spans() {
+    use verineural::GpuMemoryPattern;
+
+    let mut graph = NeuralGraph::default();
+    let left = graph.input(Shape::new(vec![2, 4]).unwrap(), Domain::Finite);
+    let right = graph.input(Shape::new(vec![4, 3]).unwrap(), Domain::Finite);
+    let result = graph.matmul(left, right).unwrap();
+
+    let program = GpuEngine::default().compile(&graph, result).unwrap();
+    let contracts = program.memory_contracts().unwrap();
+    assert_eq!(contracts.len(), 1);
+    assert_eq!(contracts[0].reads, vec![(left.index(), 8), (right.index(), 12)]);
+    assert_eq!(contracts[0].writes, 6);
+    assert_eq!(
+        contracts[0].pattern,
+        GpuMemoryPattern::MatMul {
+            rows: 2,
+            inner: 4,
+            columns: 3,
+        }
+    );
+    let source = program.memory_lean_source().unwrap();
+    assert!(source.contains("matmul_address_bounds"));
+    assert!(source.contains("index / 3) * 4 + j < 2 * 4"));
+    assert!(source.contains("j * 3 + index % 3 < 4 * 3"));
+}
+
+#[test]
+fn memory_contract_does_not_consider_reshape_a_new_allocation() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![2, 3]).unwrap(), Domain::Finite);
+    let reshaped = graph.reshape(x, Shape::new(vec![3, 2]).unwrap()).unwrap();
+    let y = graph.input(Shape::new(vec![3, 2]).unwrap(), Domain::Finite);
+    let output = graph.add(reshaped, y).unwrap();
+    let contracts = GpuEngine::default()
+        .compile(&graph, output)
+        .unwrap()
+        .memory_contracts()
+        .unwrap();
+
+    assert_eq!(contracts.len(), 1);
+    assert_eq!(
+        contracts[0].reads,
+        vec![(reshaped.index(), 6), (y.index(), 6)]
+    );
+    assert_eq!(contracts[0].writes, 6);
+}
+
+#[test]
+fn memory_proof_files_are_pinned_in_stage7_manifest() {
+    let source = include_str!("../examples/stage7_fusion.rs");
+    assert!(source.contains("\"memory_baseline.lean\""));
+    assert!(source.contains("\"memory_fused.lean\""));
+    assert!(source.contains("program.memory_lean_source()?"));
+    assert!(source.contains("proof.check_file(&root.join(\"memory_baseline.lean\"))"));
+    assert!(source.contains("proof.check_file(&root.join(\"memory_fused.lean\"))"));
+}

@@ -190,7 +190,7 @@ mod platform {
         device: c_int,
         context: Handle,
         module: Handle,
-        allocations: Vec<DevicePtr>,
+        allocations: Vec<(DevicePtr, usize)>,
         staging_pending: Vec<PinnedBuffer>,
         staging_available: Vec<PinnedBuffer>,
         kernels: BTreeMap<String, Handle>,
@@ -300,8 +300,20 @@ mod platform {
             check("cuMemAlloc_v2", unsafe {
                 (self.functions.mem_allocate)(&mut address, bytes)
             })?;
-            self.allocations.push(address);
+            self.allocations.push((address, elements));
             Ok(address)
+        }
+
+        /// Check the actual device allocations backing a logical memory
+        /// contract before graph capture. This is a preflight check, not an
+        /// assertion about LLVM/PTX's machine-level memory accesses.
+        pub fn require_allocation(&self, address: DevicePtr, elements: usize) -> Result<(), GpuError> {
+            if !self.allocations.iter().any(|&(ptr, capacity)| ptr == address && capacity >= elements) {
+                return Err(GpuError::Driver(
+                    "CUDA kernel memory contract references an unallocated or undersized buffer".into(),
+                ));
+            }
+            Ok(())
         }
 
         // Find the smallest completed allocation that fits, or allocate one.
@@ -674,7 +686,7 @@ mod platform {
             if !self.graph.is_null() {
                 unsafe { (self.functions.graph_destroy)(self.graph) };
             }
-            for address in self.allocations.drain(..).rev() {
+            for (address, _) in self.allocations.drain(..).rev() {
                 unsafe { (self.functions.mem_free)(address) };
             }
             for host in self.staging_pending.drain(..).chain(self.staging_available.drain(..)) {
@@ -714,6 +726,12 @@ mod platform {
         }
 
         pub fn allocate(&mut self, _: usize) -> Result<u64, GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn require_allocation(&self, _: u64, _: usize) -> Result<(), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))

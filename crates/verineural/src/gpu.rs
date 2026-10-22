@@ -158,6 +158,25 @@ impl From<std::io::Error> for GpuError {
     }
 }
 
+/// The source-buffer extents required by the emitted kernel template. This
+/// describes *logical* element indices, not device pointer validity or PTX.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuMemoryContract {
+    pub kernel_node: usize,
+    /// (source graph node, required readable FP32 elements).
+    pub reads: Vec<(usize, usize)>,
+    /// Output is written once per active lane, at [0, writes).
+    pub writes: usize,
+    pub pattern: GpuMemoryPattern,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuMemoryPattern {
+    Pointwise,
+    BiasAdd { columns: usize },
+    MatMul { rows: usize, inner: usize, columns: usize },
+}
+
 /// A checked, immutable GPU compilation plan. No claims about machine-code proof.
 #[derive(Clone, Debug)]
 pub struct GpuProgram {
@@ -209,6 +228,160 @@ impl GpuProgram {
             skipped.extend(chain.iter().copied());
         }
         skipped
+    }
+
+    /// Independently describe and check every launched kernel's element
+    /// addresses. The same input selection drives CUDA graph capture.
+    pub fn memory_contracts(&self) -> Result<Vec<GpuMemoryContract>, GpuError> {
+        let mut result = Vec::new();
+        let skipped = self.skipped_nodes();
+        for &index in &self.live_nodes {
+            if skipped.contains(&index) {
+                continue;
+            }
+            let node = &self.graph.nodes()[index];
+            if matches!(node.operation, Operation::Input | Operation::Reshape(_)) {
+                continue;
+            }
+            let writes = node.shape.element_count();
+            let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) =
+                if let Some(chain) = self.fused_pointwise_chains.get(&index) {
+                    let inner = &self.graph.nodes()[chain[0]];
+                    let bias = &self.graph.nodes()[chain[1]];
+                    (
+                        vec![
+                            inner.inputs[0].index(),
+                            inner.inputs[1].index(),
+                            bias.inputs[1].index(),
+                        ],
+                        GpuMemoryPattern::BiasAdd {
+                            columns: node.shape.dims()[1],
+                        },
+                    )
+                } else {
+                    let producer = self.fused_relus.get(&index).copied().unwrap_or(index);
+                    let op_node = &self.graph.nodes()[producer];
+                    let pattern = match op_node.operation {
+                        Operation::BiasAdd => GpuMemoryPattern::BiasAdd {
+                            columns: node.shape.dims()[1],
+                        },
+                        Operation::MatMul => {
+                            let left = &self.graph.nodes()[op_node.inputs[0].index()];
+                            GpuMemoryPattern::MatMul {
+                                rows: left.shape.dims()[0],
+                                inner: left.shape.dims()[1],
+                                columns: node.shape.dims()[1],
+                            }
+                        }
+                        _ => GpuMemoryPattern::Pointwise,
+                    };
+                    (op_node.inputs.iter().map(|id| id.index()).collect(), pattern)
+                };
+            let required = match pattern {
+                GpuMemoryPattern::Pointwise => vec![writes; read_nodes.len()],
+                GpuMemoryPattern::BiasAdd { columns } => {
+                    if read_nodes.len() == 3 {
+                        vec![writes, writes, columns]
+                    } else {
+                        vec![writes, columns]
+                    }
+                }
+                GpuMemoryPattern::MatMul { rows, inner, columns } => {
+                    if rows.checked_mul(columns) != Some(writes) {
+                        return Err(GpuError::InvalidInput {
+                            node: index,
+                            reason: "MatMul output extent does not match row-major indexing",
+                        });
+                    }
+                    vec![
+                        rows.checked_mul(inner).ok_or(GpuError::UnsupportedSize { elements: writes })?,
+                        inner.checked_mul(columns).ok_or(GpuError::UnsupportedSize { elements: writes })?,
+                    ]
+                }
+            };
+            // CUDA templates form idx = block * width + lane with u32
+            // wrap semantics, then test idx < length as unsigned. Bound the
+            // *whole* grid so even unused trailing lanes cannot wrap.
+            let width = self.launch.threads_per_block as usize;
+            let launch_extent = writes.div_ceil(width).checked_mul(width);
+            if !matches!(read_nodes.len(), 1..=3)
+                || read_nodes.len() != required.len()
+                || writes == 0
+                || writes > i32::MAX as usize
+                || launch_extent.is_none_or(|n| n > u32::MAX as usize)
+                || read_nodes.iter().any(|&source| source >= index)
+            {
+                return Err(GpuError::InvalidInput {
+                    node: index,
+                    reason: "unsupported CUDA kernel memory access or launch bounds",
+                });
+            }
+            if let GpuMemoryPattern::BiasAdd { columns } = pattern {
+                if columns == 0 || writes % columns != 0 {
+                    return Err(GpuError::InvalidInput {
+                        node: index,
+                        reason: "BiasAdd requires nonempty aligned rows",
+                    });
+                }
+            }
+            let mut reads = Vec::with_capacity(read_nodes.len());
+            for (source, needed) in read_nodes.into_iter().zip(required) {
+                if self.graph.nodes()[source].shape.element_count() != needed
+                    || needed > i32::MAX as usize
+                {
+                    return Err(GpuError::InvalidInput {
+                        node: index,
+                        reason: "kernel input extent differs from its indexed access",
+                    });
+                }
+                reads.push((source, needed));
+            }
+            result.push(GpuMemoryContract {
+                kernel_node: index,
+                reads,
+                writes,
+                pattern,
+            });
+        }
+        Ok(result)
+    }
+
+    /// Lean proofs of the natural-number address bounds for the actual shapes.
+    /// The proof does not validate the LLVM/PTX instructions or GPU pointers.
+    pub fn memory_lean_source(&self) -> Result<String, GpuError> {
+        let mut source = format!(
+            "{}\n\n{}\n",
+            include_str!("../../../lean/VeriNeural/Basic.lean"),
+            include_str!("../../../lean/VeriNeural/Memory.lean")
+        );
+        source.push_str("\nnamespace VeriNeural\n");
+        for contract in self.memory_contracts()? {
+            source.push_str(&format!(
+                "-- IR kernel {}: {} source tensors, {} output elements.\n",
+                contract.kernel_node,
+                contract.reads.len(),
+                contract.writes
+            ));
+            source.push_str(&format!(
+                "example (index : Nat) (active : index < {}) : index < {} :=\n  pointwise_address_bound active\n",
+                contract.writes, contract.writes
+            ));
+            match contract.pattern {
+                GpuMemoryPattern::Pointwise => {}
+                GpuMemoryPattern::BiasAdd { columns } => {
+                    source.push_str(&format!(
+                        "example (index : Nat) : index % {columns} < {columns} :=\n  bias_address_bound (by decide)\n"
+                    ));
+                }
+                GpuMemoryPattern::MatMul { rows, inner, columns } => {
+                    source.push_str(&format!(
+                        "example (index j : Nat) (active : index < {rows} * {columns}) (reduction : j < {inner}) :\n    (index / {columns}) * {inner} + j < {rows} * {inner} ∧\n    j * {columns} + index % {columns} < {inner} * {columns} :=\n  matmul_address_bounds (by decide) active reduction\n"
+                    ));
+                }
+            }
+        }
+        source.push_str("end VeriNeural\n");
+        Ok(source)
     }
 
     /// The Lean proof of the *ideal integer* fusion rule, not PTX/FP32 equivalence.
@@ -472,7 +645,7 @@ impl GpuEngine {
                 llvm_ir.push_str(&kernel_ir(index, &node.operation, columns, false));
             }
         }
-        Ok(GpuProgram {
+        let program = GpuProgram {
             graph: graph.clone(),
             output,
             live_nodes,
@@ -481,7 +654,11 @@ impl GpuEngine {
             launch: self.launch,
             fused_relus,
             fused_pointwise_chains,
-        })
+        };
+        // Fail closed on unsupported memory addressing before an LLVM program
+        // or CUDA session can be accepted.
+        program.memory_contracts()?;
+        Ok(program)
     }
 
     /// Write the inspectable LLVM IR and lower it with LLVM's NVPTX backend.
@@ -518,6 +695,7 @@ impl GpuEngine {
         inputs: &[(NodeId, Tensor<f32>)],
         output_dir: &Path,
     ) -> Result<GpuExecution, GpuError> {
+        let contracts = program.memory_contracts()?;
         let given = validate_inputs(program, inputs)?;
         let ptx_path = self.lower(program, output_dir)?;
         let ptx = fs::read(ptx_path)?;
@@ -555,6 +733,32 @@ impl GpuEngine {
             }
         }
 
+        // Validate the *allocated* buffers as well as the abstract shapes
+        // before capturing any kernel into the CUDA Graph. Each output has
+        // its own allocation; aliases are allowed only for zero-copy Reshape
+        // inputs, never for an output being written by this kernel.
+        let mut written_buffers = BTreeSet::new();
+        for contract in &contracts {
+            let output_ptr = buffers[&contract.kernel_node];
+            session.require_allocation(output_ptr, contract.writes)?;
+            if !written_buffers.insert(output_ptr) {
+                return Err(GpuError::InvalidInput {
+                    node: contract.kernel_node,
+                    reason: "two CUDA kernel nodes write the same output allocation",
+                });
+            }
+            for &(source, elements) in &contract.reads {
+                let input_ptr = buffers[&source];
+                session.require_allocation(input_ptr, elements)?;
+                if input_ptr == output_ptr {
+                    return Err(GpuError::InvalidInput {
+                        node: contract.kernel_node,
+                        reason: "in-place CUDA kernel write is not supported",
+                    });
+                }
+            }
+        }
+
         let kernel_count = program
             .live_nodes
             .iter()
@@ -578,49 +782,31 @@ impl GpuEngine {
                 }
             }
             session.begin_graph()?;
-            for &index in &program.live_nodes {
-                if skipped.contains(&index) {
-                    continue;
-                }
-                let node = &program.graph.nodes()[index];
-                if matches!(node.operation, Operation::Input | Operation::Reshape(_)) {
-                    continue;
-                }
-                if let Some(chain) = program.fused_pointwise_chains.get(&index) {
-                    let inner = &program.graph.nodes()[chain[0]];
-                    let bias_add = &program.graph.nodes()[chain[1]];
+            for contract in &contracts {
+                let index = contract.kernel_node;
+                let inputs = contract
+                    .reads
+                    .iter()
+                    .map(|&(node, _)| buffers[&node])
+                    .collect::<Vec<_>>();
+                if inputs.len() == 3 {
                     session.launch3(
                         &format!("vn_node_{index}"),
-                        [
-                            buffers[&inner.inputs[0].index()],
-                            buffers[&inner.inputs[1].index()],
-                            buffers[&bias_add.inputs[1].index()],
-                        ],
+                        [inputs[0], inputs[1], inputs[2]],
                         buffers[&index],
-                        node.shape.element_count(),
+                        contract.writes,
                         program.launch.threads_per_block,
                     )?;
-                    continue;
+                } else {
+                    session.launch(
+                        &format!("vn_node_{index}"),
+                        inputs[0],
+                        inputs.get(1).copied().unwrap_or(0),
+                        buffers[&index],
+                        contract.writes,
+                        program.launch.threads_per_block,
+                    )?;
                 }
-                let kernel_inputs = if let Some(&producer) = program.fused_relus.get(&index) {
-                    &program.graph.nodes()[producer].inputs
-                } else {
-                    &node.inputs
-                };
-                let first = buffers[&kernel_inputs[0].index()];
-                let second = if kernel_inputs.len() == 2 {
-                    buffers[&kernel_inputs[1].index()]
-                } else {
-                    0
-                };
-                session.launch(
-                    &format!("vn_node_{index}"),
-                    first,
-                    second,
-                    buffers[&index],
-                    node.shape.element_count(),
-                    program.launch.threads_per_block,
-                )?;
             }
             session.finish_graph()?;
         }

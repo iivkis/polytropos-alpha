@@ -14,7 +14,13 @@ use verineural::{
     ReluFusion, Shape, Tensor,
 };
 
-const STAGE7_ARTIFACTS: [&str; 3] = ["fusion.lean", "baseline/SHA256SUMS", "fused/SHA256SUMS"];
+const STAGE7_ARTIFACTS: [&str; 5] = [
+    "fusion.lean",
+    "memory_baseline.lean",
+    "memory_fused.lean",
+    "baseline/SHA256SUMS",
+    "fused/SHA256SUMS",
+];
 
 fn digest(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let output = Command::new("sha256sum").arg(path).output()?;
@@ -50,6 +56,8 @@ fn verify_stage7(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     let proof = LeanProofEngine::default();
     proof.check_file(&root.join("fusion.lean"))?;
+    proof.check_file(&root.join("memory_baseline.lean"))?;
+    proof.check_file(&root.join("memory_fused.lean"))?;
     for name in ["baseline", "fused"] {
         CertificateEngine::default().verify_bundle(&root.join(name))?;
     }
@@ -82,6 +90,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fail closed: a previous success manifest must not survive a bad rerun.
     for name in [
         "SHA256SUMS",
+        "fusion.lean",
+        "memory_baseline.lean",
+        "memory_fused.lean",
         "baseline/SHA256SUMS",
         "baseline/report.json",
         "fused/SHA256SUMS",
@@ -117,6 +128,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&fusion_lean, source)?;
     let proof = LeanProofEngine::default();
     proof.check_file(&fusion_lean)?;
+    // Both lowering variants get kernel-by-kernel memory-layout obligations
+    // with concrete Rust IR extents. These are natural-number indexing lemmas,
+    // not PTX or machine-memory proofs.
+    for (name, program) in [
+        ("memory_baseline.lean", &unoptimized_plan),
+        ("memory_fused.lean", &fused_plan),
+    ] {
+        let source = program.memory_lean_source()?;
+        let path = root.join(name);
+        fs::write(&path, source)?;
+        proof.check_file(&path)?;
+    }
 
     // Evidence generation still performs its own one-shot replay and bitwise CPU check.
     let baseline_cert = CertificateEngine::new(LeanProofEngine::default(), baseline.clone());
@@ -205,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         digest(&root.join("SHA256SUMS"))?
     );
     println!("Recheck without a GPU: task verify-gpu-stage7");
-    println!("Stage 7 manifest covers fusion.lean and both Stage 5 evidence manifests.");
+    println!("Stage 7 manifest covers fusion + baseline/fused memory Lean obligations and both Stage 5 evidence manifests.");
     println!("No certified PTX/FP32/machine-code equivalence is claimed.");
     Ok(())
 }
