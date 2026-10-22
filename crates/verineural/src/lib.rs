@@ -37,6 +37,7 @@ mod ir;
 mod modules;
 mod numeric;
 mod proof;
+mod primitive;
 mod special;
 mod subnormal;
 mod tensor;
@@ -50,7 +51,8 @@ pub use gpu::{
     GpuMemoryContract, GpuMemoryPattern, GpuProgram, ReluFusion, audit_fp32_ptx,
 };
 pub use ir::{
-    Domain, FP32Policy, FmaMode, GpuSemantics, MathContract, ModuleInvocation, NeuralGraph,
+    ContractClaim, Domain, FP32Policy, FmaMode, GpuSemantics, MathContract, ModuleInvocation,
+    MultiModuleInvocation, MultiOutputContract, MultiOutputModule, NamedPortContract, NeuralGraph,
     NeuralModule, Node, NodeId, Operation, OperationSemantics, PortContract, ReductionOrder,
     RoundingMode, SubnormalMode,
 };
@@ -59,7 +61,8 @@ pub use numeric::{
     ExactFp32Plan, NumericError, RneErrorContract, RneFp32Plan, RneFp32Trace,
     RneModuleErrorContract, RneRangePlan, RneThresholdEvidence, RneThresholdSide,
 };
-pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
+pub use proof::{CheckedLean, LeanAxiomAudit, LeanProgram, LeanProofEngine, ProofAssumption, ProofError, ProofGoal, ProofGoalKind};
+pub use primitive::{PrimitiveExpr, PrimitiveSpec};
 pub use special::{
     Fp32SpecialExpected, special_add_boundary, special_mul_bias_relu_boundary,
     special_mul_boundary, special_relu_boundary,

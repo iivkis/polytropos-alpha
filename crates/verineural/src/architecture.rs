@@ -259,8 +259,9 @@ pub fn snapshot_architecture(
     for (i, module) in graph.modules().iter().enumerate() {
         writeln!(
             ir,
-            "module={i};name={};inputs={:?};body_start={};output={};requires={:?};ensures={:?}",
+            "module={i};name={};semantic_version={};inputs={:?};body_start={};output={};requires={:?};ensures={:?};claims={:?}",
             module.name,
+            module.semantic_version,
             module
                 .inputs
                 .iter()
@@ -270,8 +271,17 @@ pub fn snapshot_architecture(
             module.output.index(),
             module.contract.requires,
             module.contract.ensures,
+            module.contract.claims,
         )
         .expect("writing to string");
+    }
+    for (i, module) in graph.multi_modules().iter().enumerate() {
+        writeln!(ir, "multi_module={i};name={};version={};inputs={:?};outputs={:?};ports={:?};body=[{},{})",
+            module.name, module.semantic_version,
+            module.inputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
+            module.outputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
+            module.contract, module.body_start, module.body_end
+        ).expect("writing to string");
     }
     ir.push_str("translation_plan_begin\n");
     ir.push_str(&gpu.to_text());
@@ -400,6 +410,7 @@ pub fn snapshot_architecture(
             "input,parameter,primitive,module-boundary,output".into(),
         ),
         ("vn_unmodeled", "state,control,training".into()),
+        ("vn_multi_output_modules", format!("{:?}", graph.multi_modules())),
     ] {
         writeln!(dot, "  {key}={};", quoted(&value)).expect("writing to string");
     }
@@ -503,6 +514,7 @@ pub fn snapshot_architecture(
                 ("vn_semantics", format!("{:?}", node.semantics)),
                 ("vn_requires", format!("{:?}", node.contract.requires)),
                 ("vn_ensures", format!("{:?}", node.contract.ensures)),
+                ("vn_claims", format!("{:?}", node.contract.claims)),
                 ("vn_fp32_policy", policy),
                 (
                     "vn_reachable_from_output",
@@ -580,6 +592,8 @@ pub fn snapshot_architecture(
                 ("vn_module_output", format!("n{}", module.output.index())),
                 ("vn_requires", format!("{:?}", module.contract.requires)),
                 ("vn_ensures", format!("{:?}", module.contract.ensures)),
+                ("vn_claims", format!("{:?}", module.contract.claims)),
+                ("vn_semantic_version", module.semantic_version.into()),
                 (
                     "vn_proof_status",
                     "conditional-ideal-Int;Lean-check-required".into(),

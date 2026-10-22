@@ -647,13 +647,14 @@ fn proof_generator_nested_global_nonnegative_rejects_undeclared_capture() {
         contract: MathContract::new(vec![port(&[3], Domain::Any)], port(&[3], Domain::Any)),
         undeclared: captured,
     };
-    let output = graph.apply_module(&module, &[x]).unwrap();
+    let before = graph.nodes().len();
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_global_nonnegative(&graph, output, &[x, captured]),
-        Err(ProofError::UnsupportedGuarantee { node })
-            if node == captured.index()
+        graph.apply_module(&module, &[x]),
+        Err(NeuralError::ContractViolation { detail: "undeclared external capture", .. })
+            | Err(NeuralError::ContractViolation { detail: "nested module captured undeclared input", .. })
     ));
+    assert_eq!(graph.nodes().len(), before);
+    assert!(graph.modules().is_empty());
 }
 
 #[test]
@@ -1007,4 +1008,106 @@ fn cuda_graph_only_runtime_regression_guard() {
     assert!(!source.contains("cuCtxSynchronize"));
     assert!(!source.contains("cuMemcpyHtoD_v2"));
     assert!(!source.contains("cuMemcpyDtoH_v2"));
+}
+
+#[test]
+fn p0_module_rejects_foreign_output_even_with_matching_shape() {
+    struct Borrowed { contract: MathContract, borrowed: NodeId }
+    impl NeuralModule for Borrowed {
+        fn name(&self) -> &'static str { "borrowed" }
+        fn contract(&self) -> &MathContract { &self.contract }
+        fn build(&self, _: &mut NeuralGraph, _: &[NodeId]) -> Result<NodeId, NeuralError> {
+            Ok(self.borrowed)
+        }
+    }
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::Any);
+    let module = Borrowed {
+        contract: MathContract::new(vec![port(&[2], Domain::Any)], port(&[2], Domain::Any)),
+        borrowed: x,
+    };
+    assert!(matches!(graph.apply_module(&module, &[x]), Err(NeuralError::ContractViolation { .. })));
+    assert_eq!(graph.nodes().len(), 1);
+}
+
+#[test]
+fn p0_independent_claims_are_theorems_not_structural_inference() {
+    struct Identity { contract: MathContract }
+    impl NeuralModule for Identity {
+        fn name(&self) -> &'static str { "reshape_identity" }
+        fn contract(&self) -> &MathContract { &self.contract }
+        fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+            graph.reshape(inputs[0], shape(&[2]))
+        }
+    }
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::Any);
+    let module = Identity { contract: MathContract::new(vec![port(&[2], Domain::Any)],
+        port(&[2], Domain::Any)).with_claim(crate::ContractClaim::EqualsInput(0)) };
+    let out = graph.apply_module(&module, &[x]).unwrap();
+    let proof = LeanProofEngine::default().generate(&graph, out).unwrap();
+    assert!(proof.source().contains("theorem module_0_claim_0"));
+    assert!(proof.source().contains("node_1 x_0 = (node_0 x_0)"));
+    let goal = crate::ProofGoal { name: "identity".into(), output: out,
+        kind: crate::ProofGoalKind::EqualTo { other: x } };
+    assert!(LeanProofEngine::default().generate_goal(&graph, &goal).unwrap()
+        .source().contains("architecture_property_identity"));
+}
+
+#[test]
+fn p0_claim_is_not_marked_proven_for_unknown_nonnegativity() {
+    struct Claimed { contract: MathContract }
+    impl NeuralModule for Claimed {
+        fn name(&self) -> &'static str { "false_nonnegative" }
+        fn contract(&self) -> &MathContract { &self.contract }
+        fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+            graph.add(inputs[0], inputs[1])
+        }
+    }
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::Any);
+    let y = graph.input(shape(&[2]), Domain::Any);
+    let contract = MathContract::new(vec![port(&[2], Domain::Any); 2],
+        port(&[2], Domain::Any)).with_claim(crate::ContractClaim::Nonnegative);
+    let output = graph.apply_module(&Claimed { contract }, &[x, y]).unwrap();
+    assert!(matches!(LeanProofEngine::default().generate(&graph, output),
+        Err(ProofError::UnsupportedGuarantee { .. })));
+}
+
+#[test]
+fn p0_extensible_composite_primitive_reuses_ir_and_proof() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::Any);
+    let expr = crate::PrimitiveExpr::Apply(Operation::Relu,
+        vec![crate::PrimitiveExpr::Port(0)]);
+    let spec = crate::PrimitiveSpec::new("consumer_relu", "1.0",
+        MathContract::new(vec![port(&[2], Domain::Any)],
+            port(&[2], Domain::NonNegativeFinite))
+            .with_claim(crate::ContractClaim::Nonnegative), expr).unwrap();
+    let out = spec.apply(&mut graph, &[x]).unwrap();
+    assert_eq!(graph.modules()[0].semantic_version, "1.0");
+    assert!(LeanProofEngine::default().generate(&graph, out).unwrap()
+        .source().contains("module_0_claim_0"));
+}
+
+#[test]
+fn p1_multi_output_ports_check_shapes_and_rollback() {
+    struct Fork { contract: crate::MultiOutputContract }
+    impl crate::MultiOutputModule for Fork {
+        fn name(&self) -> &'static str { "fork" }
+        fn contract(&self) -> &crate::MultiOutputContract { &self.contract }
+        fn build(&self, g: &mut NeuralGraph, inputs: &[NodeId]) -> Result<Vec<NodeId>, NeuralError> {
+            Ok(vec![g.relu(inputs[0])?, g.mul(inputs[0], inputs[0])?])
+        }
+    }
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::Any);
+    let named = |name| crate::NamedPortContract::new(name, port(&[2], Domain::Any));
+    let spec = Fork { contract: crate::MultiOutputContract {
+        inputs: vec![named("x")], outputs: vec![named("activated"), named("square")] } };
+    let outs = graph.apply_multi_module(&spec, &[x]).unwrap();
+    assert_eq!(outs.len(), 2);
+    assert_eq!(graph.multi_modules().len(), 1);
+    assert_eq!(graph.multi_modules()[0].outputs, outs);
+    assert_eq!(graph.nodes().len(), 3);
 }
