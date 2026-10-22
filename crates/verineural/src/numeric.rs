@@ -2059,8 +2059,7 @@ impl RneRangePlan {
         observed: f32,
     ) -> Result<RneThresholdEvidence, NumericError> {
         let node = self.graph.node(relu)?;
-        if !matches!(node.operation, Operation::Relu)
-            || !self.contracts.contains_key(&relu.index())
+        if !matches!(node.operation, Operation::Relu) || !self.contracts.contains_key(&relu.index())
         {
             return Err(NumericError::InvalidInput {
                 node: relu.index(),

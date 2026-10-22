@@ -989,7 +989,9 @@ fn stage8_threshold_margin_uses_matmul_bias_error_and_node_scale() {
     assert_eq!(contract.fraction_bits(), 20);
     let scale = (1u64 << contract.fraction_bits()) as f32;
     let epsilon = contract.epsilon_ticks() as f32;
-    let positive = plan.classify_relu_input(relu, (epsilon + 1.0) / scale).unwrap();
+    let positive = plan
+        .classify_relu_input(relu, (epsilon + 1.0) / scale)
+        .unwrap();
     assert_eq!(positive.side(), RneThresholdSide::Positive);
     let nonpositive = plan.classify_relu_input(relu, -epsilon / scale).unwrap();
     assert_eq!(nonpositive.side(), RneThresholdSide::NonPositive);

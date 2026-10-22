@@ -747,9 +747,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let threshold_relu = threshold_graph.relu(threshold_sum)?;
     let threshold_plan = RneRangePlan::compile(&threshold_graph, threshold_relu, 10, 16)?;
     let threshold_contract = threshold_plan.node_contract(threshold_sum)?;
-    if threshold_contract.ideal_bound_ticks() != 32
-        || threshold_contract.epsilon_ticks() != 1
-    {
+    if threshold_contract.ideal_bound_ticks() != 32 || threshold_contract.epsilon_ticks() != 1 {
         return Err(io::Error::other("unexpected Stage 8 threshold budget").into());
     }
     let positive = threshold_plan.classify_relu_input(threshold_relu, 2.0 / 1024.0)?;
@@ -1311,7 +1309,9 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 MatMul/BiasAdd global property: nonnegative 2x3 * 3x2 with row-wise bias broadcast (ideal-Int only)"
     );
-    println!("Stage 8 ReLU threshold margins: conditional positive/nonpositive proofs plus explicit ambiguity witness");
+    println!(
+        "Stage 8 ReLU threshold margins: conditional positive/nonpositive proofs plus explicit ambiguity witness"
+    );
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
