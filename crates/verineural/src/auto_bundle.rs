@@ -5,86 +5,11 @@ use std::fs;
 use std::path::Path;
 
 use crate::auto_build::{AutoBuildError, AutoBuildPlan, PlannedGpu};
-use crate::{ArchitectureProofTask, GpuRequirement, NeuralGraph, NodeId, ProofGoalKind};
 
 const MANIFEST: &str = "SHA256SUMS";
 
 pub(super) fn hash_file(path: &Path) -> Result<String, AutoBuildError> {
     crate::certificate::hash_file(path).map_err(|err| AutoBuildError::Integrity(err.to_string()))
-}
-
-pub(super) fn canonical_ir(
-    graph: &NeuralGraph,
-    outputs: &[NodeId],
-    tasks: &[ArchitectureProofTask],
-    gpu_requirement: GpuRequirement,
-) -> String {
-    // Canonical identifiers are node indices; graph-scoped random handles must
-    // not enter a reproducible fingerprint.
-    let mut text = format!(
-        "verineural-auto-ir-v1\npolicy={:?}\noutputs={:?}\ngpu_requirement={gpu_requirement:?}\n",
-        graph.policy(),
-        outputs.iter().map(|id| id.index()).collect::<Vec<_>>()
-    );
-    for (index, node) in graph.nodes().iter().enumerate() {
-        text.push_str(&format!(
-            "node={index};operation={:?};inputs={:?};shape={:?};domain={:?};contract={:?};semantics={:?}\n",
-            node.operation, node.inputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
-            node.shape.dims(), node.domain, node.contract, node.semantics,
-        ));
-    }
-    for (index, module) in graph.modules().iter().enumerate() {
-        text.push_str(&format!(
-            "module={index};name={};version={};inputs={:?};body_start={};output={};contract={:?}\n",
-            module.name,
-            module.semantic_version,
-            module
-                .inputs
-                .iter()
-                .map(|id| id.index())
-                .collect::<Vec<_>>(),
-            module.body_start,
-            module.output.index(),
-            module.contract
-        ));
-    }
-    for (index, module) in graph.multi_modules().iter().enumerate() {
-        text.push_str(&format!(
-            "multi_module={index};name={};version={};inputs={:?};body_start={};body_end={};outputs={:?};contract={:?}\n",
-            module.name, module.semantic_version,
-            module.inputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
-            module.body_start, module.body_end,
-            module.outputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
-            module.contract,
-        ));
-    }
-    for (index, task) in tasks.iter().enumerate() {
-        match task {
-            ArchitectureProofTask::Goal(goal) => match &goal.kind {
-                ProofGoalKind::Nonnegative { assumptions } => text.push_str(&format!(
-                    "task={index};name={};output={};nonnegative_assumptions={:?}\n",
-                    goal.name,
-                    goal.output.index(),
-                    assumptions.iter().map(|id| id.index()).collect::<Vec<_>>(),
-                )),
-                ProofGoalKind::EqualTo { other } => text.push_str(&format!(
-                    "task={index};name={};output={};equal_to={}\n",
-                    goal.name,
-                    goal.output.index(),
-                    other.index(),
-                )),
-            },
-            ArchitectureProofTask::FixedScanNonnegative { name, scan } => {
-                text.push_str(&format!(
-                    "task={index};name={name};scan_states={:?};scan_outputs={:?};scan_modules={:?}\n",
-                    scan.states.iter().map(|id| id.index()).collect::<Vec<_>>(),
-                    scan.outputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
-                    scan.module_indices,
-                ));
-            }
-        }
-    }
-    text
 }
 
 /// The expected artifact set is derived from the current plan, never from
@@ -170,7 +95,7 @@ pub(super) fn verify_manifest(
 pub(super) fn verify_current_ir(dir: &Path, source: &str) -> Result<(), AutoBuildError> {
     if fs::read_to_string(dir.join("semantic.ir"))? != source {
         return Err(AutoBuildError::Integrity(
-            "saved auto-build IR differs from current Rust architecture or proof tasks".into(),
+            "saved auto-build IR differs from current Rust architecture".into(),
         ));
     }
     Ok(())
@@ -180,8 +105,7 @@ pub(super) fn verify_current_ir(dir: &Path, source: &str) -> Result<(), AutoBuil
 mod tests {
     use super::*;
     use crate::{
-        ArchitectureAutoCompiler, ArchitectureProofTask, Domain, GpuRequirement, NeuralGraph,
-        ProofGoal, ProofGoalKind, Shape,
+        ArchitectureAutoCompiler, Domain, GpuRequirement, NeuralGraph, NodeId, Shape,
     };
 
     fn graph() -> (NeuralGraph, NodeId) {
@@ -192,35 +116,19 @@ mod tests {
     }
 
     #[test]
-    fn auto_ir_is_independent_of_graph_identity_but_bound_to_contracts_and_tasks() {
-        let (g1, out1) = graph();
-        let (g2, out2) = graph();
-        let ir1 = canonical_ir(&g1, &[out1], &[], GpuRequirement::AllOutputs);
-        let ir2 = canonical_ir(&g2, &[out2], &[], GpuRequirement::AllOutputs);
-        assert_eq!(ir1, ir2);
+    fn canonical_ir_is_graph_identity_independent_and_semantic() {
+        let (g1, _) = graph();
+        let (g2, _) = graph();
+        let ir1 = g1.canonical_ir();
+        assert_eq!(ir1, g2.canonical_ir());
+        assert!(ir1.starts_with("verineural-semantic-ir-v2\n"));
+        assert!(!ir1.contains("MathContract {"));
+        assert!(!ir1.contains("FP32Policy {"));
 
-        let task = ArchitectureProofTask::Goal(ProofGoal {
-            name: "consumer_claim".to_owned(),
-            output: out1,
-            kind: ProofGoalKind::Nonnegative {
-                assumptions: vec![],
-            },
-        });
-        assert_ne!(
-            ir1,
-            canonical_ir(&g1, &[out1], &[task], GpuRequirement::AllOutputs)
-        );
-        assert_ne!(
-            ir1,
-            canonical_ir(&g1, &[out1], &[], GpuRequirement::AllowUnsupported),
-        );
         let mut other = NeuralGraph::default();
         let x = other.input(Shape::new(vec![3]).unwrap(), Domain::NonNegativeFinite);
-        let y = other.relu(x).unwrap();
-        assert_ne!(
-            ir1,
-            canonical_ir(&other, &[y], &[], GpuRequirement::AllOutputs),
-        );
+        let _y = other.relu(x).unwrap();
+        assert_ne!(ir1, other.canonical_ir());
     }
 
     #[test]

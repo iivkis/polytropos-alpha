@@ -101,34 +101,6 @@ impl From<io::Error> for AutoBuildError {
     }
 }
 
-/// The certified scope is the dependency closure of selected roots, including
-/// declared module inputs even if a body does not read a particular port.
-fn selected_dependency_scope(
-    graph: &NeuralGraph,
-    outputs: &[NodeId],
-) -> Result<BTreeSet<usize>, AutoBuildError> {
-    let mut used = BTreeSet::new();
-    let mut pending = outputs.to_vec();
-    while let Some(id) = pending.pop() {
-        let node = graph.node(id)?;
-        if !used.insert(id.index()) {
-            continue;
-        }
-        pending.extend(node.inputs.iter().copied());
-        for module in graph.modules() {
-            if module.output == id {
-                pending.extend(module.inputs.iter().copied());
-            }
-        }
-        for module in graph.multi_modules() {
-            if module.outputs.contains(&id) {
-                pending.extend(module.inputs.iter().copied());
-            }
-        }
-    }
-    Ok(used)
-}
-
 /// Rechecked graph bindings, not a formal theorem about GPU wiring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectivityEvidence {
@@ -201,19 +173,45 @@ pub fn check_architecture_connectivity(
         )?;
     }
 
-    for (index, module) in graph.modules().iter().enumerate() {
-        if module.inputs.len() != module.contract.requires.len()
-            || module.body_start >= graph.nodes().len()
-            || module.output.index() < module.body_start
+    let mut module_instances = 0;
+    for (index, module) in graph.module_instances().enumerate() {
+        module_instances += 1;
+        let body = module.body_range();
+        let outputs = module.outputs();
+        if body.start >= body.end
+            || body.end > graph.nodes().len()
+            || outputs.is_empty()
+            || outputs
+                .iter()
+                .any(|output| output.index() < body.start || output.index() >= body.end)
         {
             return Err(invalid(format!(
-                "module {index} has malformed body or ports"
+                "module instance {index} has malformed body or outputs"
             )));
         }
+        if module
+            .inputs()
+            .iter()
+            .any(|input| input.index() >= body.start)
+        {
+            return Err(invalid(format!(
+                "module instance {index} captures a forward input"
+            )));
+        }
+        check_body_edges(
+            graph,
+            body.start,
+            body.end,
+            module.inputs(),
+            &format!("module instance {index}"),
+        )?;
+    }
+
+    for (index, module) in graph.modules().iter().enumerate() {
+        if module.inputs.len() != module.contract.requires.len() {
+            return Err(invalid(format!("module {index} has malformed ports")));
+        }
         for (&input, port) in module.inputs.iter().zip(&module.contract.requires) {
-            if input.index() >= module.body_start {
-                return Err(invalid(format!("module {index} captures a forward input")));
-            }
             check_port(graph, input, port, &format!("module {index} input"))?;
             module_ports += 1;
         }
@@ -224,31 +222,18 @@ pub fn check_architecture_connectivity(
             &format!("module {index} output"),
         )?;
         module_ports += 1;
-        check_body_edges(
-            graph,
-            module.body_start,
-            module.output.index() + 1,
-            &module.inputs,
-            &format!("module {index}"),
-        )?;
     }
+
     for (index, module) in graph.multi_modules().iter().enumerate() {
         if module.inputs.len() != module.contract.inputs.len()
             || module.outputs.len() != module.contract.outputs.len()
             || module.outputs.is_empty()
-            || module.body_start >= module.body_end
-            || module.body_end > graph.nodes().len()
         {
             return Err(invalid(format!(
-                "multi-module {index} has malformed body or ports"
+                "multi-module {index} has malformed ports"
             )));
         }
         for (&input, port) in module.inputs.iter().zip(&module.contract.inputs) {
-            if input.index() >= module.body_start {
-                return Err(invalid(format!(
-                    "multi-module {index} captures a forward input"
-                )));
-            }
             check_port(
                 graph,
                 input,
@@ -259,12 +244,9 @@ pub fn check_architecture_connectivity(
         }
         let mut seen = BTreeSet::new();
         for (&output, port) in module.outputs.iter().zip(&module.contract.outputs) {
-            if output.index() < module.body_start
-                || output.index() >= module.body_end
-                || !seen.insert(output.index())
-            {
+            if !seen.insert(output.index()) {
                 return Err(invalid(format!(
-                    "multi-module {index} has invalid output identity"
+                    "multi-module {index} has duplicate output identity"
                 )));
             }
             check_port(
@@ -275,18 +257,11 @@ pub fn check_architecture_connectivity(
             )?;
             module_ports += 1;
         }
-        check_body_edges(
-            graph,
-            module.body_start,
-            module.body_end,
-            &module.inputs,
-            &format!("multi-module {index}"),
-        )?;
     }
     Ok(ConnectivityEvidence {
         data_edges,
         module_ports,
-        module_instances: graph.modules().len() + graph.multi_modules().len(),
+        module_instances,
     })
 }
 
@@ -388,7 +363,7 @@ impl ArchitectureAutoCompiler {
     ) -> Result<AutoBuildPlan, AutoBuildError> {
         let connectivity = check_architecture_connectivity(graph)?;
         let architecture = self.proof.generate_outputs(graph, outputs)?;
-        let scope = selected_dependency_scope(graph, outputs)?;
+        let scope = graph.dependency_scope(outputs)?;
         let mut names = BTreeSet::new();
         let mut goals = Vec::new();
         for task in tasks {
@@ -476,7 +451,7 @@ impl ArchitectureAutoCompiler {
         let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
         fs::write(
             directory.join("semantic.ir"),
-            auto_bundle::canonical_ir(graph, outputs, tasks, gpu_requirement),
+            graph.canonical_ir(),
         )?;
         let lean_dir = directory.join("lean");
         fs::create_dir_all(&lean_dir)?;
@@ -661,7 +636,7 @@ impl ArchitectureAutoCompiler {
         let digest = auto_bundle::verify_manifest(&directory, &plan, pinned_sha256)?;
         auto_bundle::verify_current_ir(
             &directory,
-            &auto_bundle::canonical_ir(graph, outputs, tasks, gpu_requirement),
+            &graph.canonical_ir(),
         )?;
         let ir_sha256 = auto_bundle::hash_file(&directory.join("semantic.ir"))?;
         let expected_dot = crate::architecture::auto_architecture_dot(graph, &plan, &ir_sha256)?;

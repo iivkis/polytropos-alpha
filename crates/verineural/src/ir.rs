@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{NeuralError, Shape};
@@ -13,6 +15,14 @@ pub enum Domain {
 }
 
 impl Domain {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Finite => "finite",
+            Self::NonNegativeFinite => "nonnegative_finite",
+        }
+    }
+
     /// Whether this domain is at least as restrictive as the required domain.
     pub fn satisfies(self, required: Self) -> bool {
         matches!(
@@ -254,6 +264,18 @@ impl PortContract {
     pub fn new(shape: Shape, domain: Domain) -> Self {
         Self { shape, domain }
     }
+
+    pub fn any(shape: Shape) -> Self {
+        Self::new(shape, Domain::Any)
+    }
+
+    pub fn finite(shape: Shape) -> Self {
+        Self::new(shape, Domain::Finite)
+    }
+
+    pub fn nonnegative(shape: Shape) -> Self {
+        Self::new(shape, Domain::NonNegativeFinite)
+    }
 }
 
 /// Independent mathematical claims about a module's output (ideal-Int semantics).
@@ -288,6 +310,14 @@ impl MathContract {
     pub fn with_claim(mut self, claim: ContractClaim) -> Self {
         self.claims.push(claim);
         self
+    }
+
+    pub fn nonnegative(self) -> Self {
+        self.with_claim(ContractClaim::Nonnegative)
+    }
+
+    pub fn equals_input(self, port: usize) -> Self {
+        self.with_claim(ContractClaim::EqualsInput(port))
     }
 }
 
@@ -329,20 +359,79 @@ pub struct Node {
 pub struct ModuleInvocation {
     pub name: &'static str,
     pub inputs: Vec<NodeId>,
-    /// First node index that did not exist before this module body was built.
-    /// Proof generators use it to reject undeclared captures from the outer graph.
+    /// Half-open interval `[body_start, body_end)` owned by this invocation.
+    /// It includes every node created by the body, even nodes created after the
+    /// returned output. This is the single source of truth for module ownership.
     pub body_start: usize,
+    pub body_end: usize,
     pub output: NodeId,
     pub contract: MathContract,
     /// Versioned semantic declaration, not a proof identifier by itself.
     pub semantic_version: &'static str,
 }
 
+impl ModuleInvocation {
+    pub fn body_range(&self) -> Range<usize> {
+        self.body_start..self.body_end
+    }
+}
+
+/// Borrowed view over either module kind, in real application order.
+#[derive(Clone, Copy, Debug)]
+pub enum ModuleInstanceRef<'a> {
+    Single(&'a ModuleInvocation),
+    Multi(&'a MultiModuleInvocation),
+}
+
+impl<'a> ModuleInstanceRef<'a> {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Single(module) => module.name,
+            Self::Multi(module) => module.name,
+        }
+    }
+
+    pub fn semantic_version(self) -> &'static str {
+        match self {
+            Self::Single(module) => module.semantic_version,
+            Self::Multi(module) => module.semantic_version,
+        }
+    }
+
+    pub fn inputs(self) -> &'a [NodeId] {
+        match self {
+            Self::Single(module) => &module.inputs,
+            Self::Multi(module) => &module.inputs,
+        }
+    }
+
+    pub fn outputs(self) -> Vec<NodeId> {
+        match self {
+            Self::Single(module) => vec![module.output],
+            Self::Multi(module) => module.outputs.clone(),
+        }
+    }
+
+    pub fn contains_output(self, output: NodeId) -> bool {
+        match self {
+            Self::Single(module) => module.output == output,
+            Self::Multi(module) => module.outputs.contains(&output),
+        }
+    }
+
+    pub fn body_range(self) -> Range<usize> {
+        match self {
+            Self::Single(module) => module.body_range(),
+            Self::Multi(module) => module.body_range(),
+        }
+    }
+}
+
 /// A user-defined, composable symbolic module.
 ///
-/// The body builds graph nodes, rather than executing arbitrary Rust code.
-/// In stage 2, contracts are checked for structural and conservative domain
-/// compatibility only; they are not independently proven.
+/// The body builds graph nodes rather than executing arbitrary Rust code.
+/// Contracts are validated structurally; mathematical claims create separate
+/// proof obligations in the Lean backend.
 pub trait NeuralModule {
     fn name(&self) -> &'static str;
     fn contract(&self) -> &MathContract;
@@ -368,12 +457,31 @@ impl NamedPortContract {
             claims: Vec::new(),
         }
     }
+
+    pub fn with_claim(mut self, claim: ContractClaim) -> Self {
+        self.claims.push(claim);
+        self
+    }
+
+    pub fn nonnegative(self) -> Self {
+        self.with_claim(ContractClaim::Nonnegative)
+    }
+
+    pub fn equals_input(self, port: usize) -> Self {
+        self.with_claim(ContractClaim::EqualsInput(port))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultiOutputContract {
     pub inputs: Vec<NamedPortContract>,
     pub outputs: Vec<NamedPortContract>,
+}
+
+impl MultiOutputContract {
+    pub fn new(inputs: Vec<NamedPortContract>, outputs: Vec<NamedPortContract>) -> Self {
+        Self { inputs, outputs }
+    }
 }
 
 pub trait MultiOutputModule {
@@ -398,6 +506,10 @@ pub struct MultiModuleInvocation {
 }
 
 impl MultiModuleInvocation {
+    pub fn body_range(&self) -> Range<usize> {
+        self.body_start..self.body_end
+    }
+
     /// Resolve an output by its declared stable port name, rather than relying
     /// on the caller to remember a positional result index.
     pub fn output_named(&self, name: &str) -> Option<NodeId> {
@@ -434,6 +546,12 @@ impl FixedScan {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModuleInstanceKey {
+    Single(usize),
+    Multi(usize),
+}
+
 /// Append-only Semantic Neural IR with graph-scoped edges and checked contracts.
 #[derive(Clone, Debug)]
 pub struct NeuralGraph {
@@ -442,6 +560,7 @@ pub struct NeuralGraph {
     nodes: Vec<Node>,
     modules: Vec<ModuleInvocation>,
     multi_modules: Vec<MultiModuleInvocation>,
+    module_order: Vec<ModuleInstanceKey>,
 }
 
 impl NeuralGraph {
@@ -452,6 +571,7 @@ impl NeuralGraph {
             nodes: Vec::new(),
             modules: Vec::new(),
             multi_modules: Vec::new(),
+            module_order: Vec::new(),
         }
     }
 
@@ -469,6 +589,38 @@ impl NeuralGraph {
 
     pub fn multi_modules(&self) -> &[MultiModuleInvocation] {
         &self.multi_modules
+    }
+
+    /// Iterate all module invocations in the order in which they were applied.
+    /// This is the canonical hierarchy order for architecture tooling.
+    pub fn module_instances(&self) -> impl Iterator<Item = ModuleInstanceRef<'_>> {
+        self.module_order.iter().map(|key| match *key {
+            ModuleInstanceKey::Single(index) => ModuleInstanceRef::Single(&self.modules[index]),
+            ModuleInstanceKey::Multi(index) => {
+                ModuleInstanceRef::Multi(&self.multi_modules[index])
+            }
+        })
+    }
+
+    /// Dependency closure of graph roots, including declared module inputs even
+    /// when a module body does not read every port directly. Artifact writers
+    /// and proof planning use this one definition of semantic reachability.
+    pub fn dependency_scope(&self, roots: &[NodeId]) -> Result<BTreeSet<usize>, NeuralError> {
+        let mut used = BTreeSet::new();
+        let mut pending = roots.to_vec();
+        while let Some(id) = pending.pop() {
+            let node = self.node(id)?;
+            if !used.insert(id.index()) {
+                continue;
+            }
+            pending.extend(node.inputs.iter().copied());
+            for module in self.module_instances() {
+                if module.contains_output(id) {
+                    pending.extend(module.inputs().iter().copied());
+                }
+            }
+        }
+        Ok(used)
     }
 
     pub fn node(&self, id: NodeId) -> Result<&Node, NeuralError> {
@@ -660,6 +812,22 @@ impl NeuralGraph {
         Ok(())
     }
 
+    /// Compose an ad-hoc single-output module without defining a Rust type.
+    /// Existing `NeuralModule` implementations delegate to this same path.
+    pub fn compose<F>(
+        &mut self,
+        name: &'static str,
+        semantic_version: &'static str,
+        contract: &MathContract,
+        inputs: &[NodeId],
+        build: F,
+    ) -> Result<NodeId, NeuralError>
+    where
+        F: FnOnce(&mut NeuralGraph, &[NodeId]) -> Result<NodeId, NeuralError>,
+    {
+        self.apply_module_with(name, semantic_version, contract, inputs, build)
+    }
+
     /// Validate the module interface, build in a clone, then commit atomically.
     /// Failed modules never leave partially appended nodes behind.
     pub fn apply_module<M: NeuralModule>(
@@ -667,10 +835,29 @@ impl NeuralGraph {
         module: &M,
         inputs: &[NodeId],
     ) -> Result<NodeId, NeuralError> {
-        let contract = module.contract();
+        self.apply_module_with(
+            module.name(),
+            module.semantic_version(),
+            module.contract(),
+            inputs,
+            |graph, inputs| module.build(graph, inputs),
+        )
+    }
+
+    fn apply_module_with<F>(
+        &mut self,
+        name: &'static str,
+        semantic_version: &'static str,
+        contract: &MathContract,
+        inputs: &[NodeId],
+        build: F,
+    ) -> Result<NodeId, NeuralError>
+    where
+        F: FnOnce(&mut NeuralGraph, &[NodeId]) -> Result<NodeId, NeuralError>,
+    {
         if inputs.len() != contract.requires.len() {
             return Err(NeuralError::ContractViolation {
-                module: module.name(),
+                module: name,
                 detail: "incorrect number of inputs",
             });
         }
@@ -694,14 +881,14 @@ impl NeuralGraph {
         let module_start = self.modules.len();
         let multi_start = self.multi_modules.len();
         let mut candidate = self.clone();
-        let output = module.build(&mut candidate, inputs)?;
+        let output = build(&mut candidate, inputs)?;
         candidate.validate_body(
             body_start,
             module_start,
             multi_start,
             inputs,
             &[output],
-            module.name(),
+            name,
         )?;
         let actual = candidate.node(output)?;
         if actual.shape != contract.ensures.shape {
@@ -716,14 +903,20 @@ impl NeuralGraph {
                 actual: actual.domain,
             });
         }
+        let body_end = candidate.nodes.len();
+        let module_index = candidate.modules.len();
         candidate.modules.push(ModuleInvocation {
-            name: module.name(),
+            name,
             inputs: inputs.to_vec(),
             body_start,
+            body_end,
             output,
             contract: contract.clone(),
-            semantic_version: module.semantic_version(),
+            semantic_version,
         });
+        candidate
+            .module_order
+            .push(ModuleInstanceKey::Single(module_index));
         *self = candidate;
         Ok(output)
     }
@@ -797,6 +990,21 @@ impl NeuralGraph {
         })
     }
 
+    /// Compose an ad-hoc multi-output module without defining a Rust type.
+    pub fn compose_multi<F>(
+        &mut self,
+        name: &'static str,
+        semantic_version: &'static str,
+        contract: &MultiOutputContract,
+        inputs: &[NodeId],
+        build: F,
+    ) -> Result<Vec<NodeId>, NeuralError>
+    where
+        F: FnOnce(&mut NeuralGraph, &[NodeId]) -> Result<Vec<NodeId>, NeuralError>,
+    {
+        self.apply_multi_module_with(name, semantic_version, contract, inputs, build)
+    }
+
     /// Multi-output module invocation is atomic; each returned port has its own
     /// structural contract. Formal proof obligations remain per output.
     pub fn apply_multi_module<M: MultiOutputModule>(
@@ -804,10 +1012,29 @@ impl NeuralGraph {
         module: &M,
         inputs: &[NodeId],
     ) -> Result<Vec<NodeId>, NeuralError> {
-        let contract = module.contract();
+        self.apply_multi_module_with(
+            module.name(),
+            module.semantic_version(),
+            module.contract(),
+            inputs,
+            |graph, inputs| module.build(graph, inputs),
+        )
+    }
+
+    fn apply_multi_module_with<F>(
+        &mut self,
+        name: &'static str,
+        semantic_version: &'static str,
+        contract: &MultiOutputContract,
+        inputs: &[NodeId],
+        build: F,
+    ) -> Result<Vec<NodeId>, NeuralError>
+    where
+        F: FnOnce(&mut NeuralGraph, &[NodeId]) -> Result<Vec<NodeId>, NeuralError>,
+    {
         if inputs.len() != contract.inputs.len() || contract.outputs.is_empty() {
             return Err(NeuralError::ContractViolation {
-                module: module.name(),
+                module: name,
                 detail: "incorrect multi-output arity",
             });
         }
@@ -816,18 +1043,15 @@ impl NeuralGraph {
             for port in ports {
                 if port.name.is_empty() || !names.insert(port.name) {
                     return Err(NeuralError::ContractViolation {
-                        module: module.name(),
+                        module: name,
                         detail: "empty or duplicated named port",
                     });
                 }
             }
         }
-        // Input-port claims cannot be silently treated as proved output
-        // properties. Until predicate-valued preconditions are supported,
-        // callers may constrain inputs only via the checked shape/domain port.
         if contract.inputs.iter().any(|port| !port.claims.is_empty()) {
             return Err(NeuralError::ContractViolation {
-                module: module.name(),
+                module: name,
                 detail: "input port claims are unsupported",
             });
         }
@@ -850,10 +1074,10 @@ impl NeuralGraph {
         let module_start = self.modules.len();
         let multi_start = self.multi_modules.len();
         let mut candidate = self.clone();
-        let outputs = module.build(&mut candidate, inputs)?;
+        let outputs = build(&mut candidate, inputs)?;
         if outputs.len() != contract.outputs.len() {
             return Err(NeuralError::ContractViolation {
-                module: module.name(),
+                module: name,
                 detail: "incorrect multi-output result count",
             });
         }
@@ -863,7 +1087,7 @@ impl NeuralGraph {
             multi_start,
             inputs,
             &outputs,
-            module.name(),
+            name,
         )?;
         if outputs
             .iter()
@@ -873,7 +1097,7 @@ impl NeuralGraph {
             != outputs.len()
         {
             return Err(NeuralError::ContractViolation {
-                module: module.name(),
+                module: name,
                 detail: "duplicate output identity",
             });
         }
@@ -892,18 +1116,23 @@ impl NeuralGraph {
                 });
             }
         }
+        let module_index = candidate.multi_modules.len();
         candidate.multi_modules.push(MultiModuleInvocation {
-            name: module.name(),
-            semantic_version: module.semantic_version(),
+            name,
+            semantic_version,
             inputs: inputs.to_vec(),
             body_start,
             body_end: candidate.nodes.len(),
             outputs: outputs.clone(),
             contract: contract.clone(),
         });
+        candidate
+            .module_order
+            .push(ModuleInstanceKey::Multi(module_index));
         *self = candidate;
         Ok(outputs)
     }
+
 }
 
 impl Default for NeuralGraph {

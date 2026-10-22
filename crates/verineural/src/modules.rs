@@ -3,13 +3,7 @@
 //! These modules have checked *shape* contracts; f32 overflow and backend
 //! lowering remain outside the current Lean proof boundary.
 
-use crate::{
-    Domain, MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, PortContract, Shape,
-};
-
-fn any(shape: Shape) -> PortContract {
-    PortContract::new(shape, Domain::Any)
-}
+use crate::{MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, PortContract, Shape};
 
 /// Dense layer Y = X * W + bias, with row-wise bias broadcast.
 pub struct Dense {
@@ -24,7 +18,14 @@ impl Dense {
         let bias = Shape::new(vec![outputs])?;
         let y = Shape::new(vec![batch, outputs])?;
         Ok(Self {
-            contract: MathContract::new(vec![any(x), any(w), any(bias)], any(y)),
+            contract: MathContract::new(
+                vec![
+                    PortContract::any(x),
+                    PortContract::any(w),
+                    PortContract::any(bias),
+                ],
+                PortContract::any(y),
+            ),
         })
     }
 }
@@ -52,7 +53,13 @@ pub struct ResidualAdd {
 impl ResidualAdd {
     pub fn new(shape: Shape) -> Self {
         Self {
-            contract: MathContract::new(vec![any(shape.clone()), any(shape.clone())], any(shape)),
+            contract: MathContract::new(
+                vec![
+                    PortContract::any(shape.clone()),
+                    PortContract::any(shape.clone()),
+                ],
+                PortContract::any(shape),
+            ),
         }
     }
 }
@@ -90,8 +97,14 @@ impl ResidualFfn {
         let b2 = Shape::new(vec![features])?;
         Ok(Self {
             contract: MathContract::new(
-                vec![any(x.clone()), any(w1), any(b1), any(w2), any(b2)],
-                any(x),
+                vec![
+                    PortContract::any(x.clone()),
+                    PortContract::any(w1),
+                    PortContract::any(b1),
+                    PortContract::any(w2),
+                    PortContract::any(b2),
+                ],
+                PortContract::any(x),
             ),
         })
     }

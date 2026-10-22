@@ -12,7 +12,7 @@ use std::io::{self, Write as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::{GpuProgram, NeuralGraph, NodeId, Operation};
+use crate::{GpuProgram, ModuleInstanceRef, NeuralGraph, NodeId, Operation};
 
 /// Stable provenance and presentation metadata for one architecture.
 /// An input role may be "input" or "parameter"; IR has no state/control nodes.
@@ -139,8 +139,149 @@ fn edge_theme(role: &str, input_port: usize) -> (&'static str, &'static str) {
     }
 }
 
-fn source_is_outside_module(source: usize, module: &crate::ModuleInvocation) -> bool {
-    source < module.body_start || source > module.output.index()
+#[derive(Clone, Debug)]
+struct ModuleScope {
+    id: String,
+    name: &'static str,
+    version: &'static str,
+    start: usize,
+    end: usize,
+    inputs: Vec<(String, usize)>,
+    outputs: Vec<(String, usize)>,
+    contract: String,
+    requires: String,
+    ensures: String,
+    claims: String,
+}
+
+#[derive(Clone, Debug)]
+struct ModuleLayout {
+    scopes: Vec<ModuleScope>,
+    parents: Vec<Option<usize>>,
+    paths: Vec<String>,
+    owners: Vec<Option<usize>>,
+}
+
+fn module_layout(graph: &NeuralGraph) -> io::Result<ModuleLayout> {
+    let mut scopes = Vec::new();
+    for (sequence, module) in graph.module_instances().enumerate() {
+        match module {
+            ModuleInstanceRef::Single(module) => scopes.push(ModuleScope {
+                id: format!("m{sequence}"),
+                name: module.name,
+                version: module.semantic_version,
+                start: module.body_start,
+                end: module.body_end,
+                inputs: module
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(port, id)| (format!("input_{port}"), id.index()))
+                    .collect(),
+                outputs: vec![("output".to_owned(), module.output.index())],
+                contract: format!("{:?}", module.contract),
+                requires: format!("{:?}", module.contract.requires),
+                ensures: format!("{:?}", module.contract.ensures),
+                claims: format!("{:?}", module.contract.claims),
+            }),
+            ModuleInstanceRef::Multi(module) => scopes.push(ModuleScope {
+                id: format!("m{sequence}"),
+                name: module.name,
+                version: module.semantic_version,
+                start: module.body_start,
+                end: module.body_end,
+                inputs: module
+                    .inputs
+                    .iter()
+                    .zip(&module.contract.inputs)
+                    .map(|(id, port)| (port.name.to_owned(), id.index()))
+                    .collect(),
+                outputs: module
+                    .outputs
+                    .iter()
+                    .zip(&module.contract.outputs)
+                    .map(|(id, port)| (port.name.to_owned(), id.index()))
+                    .collect(),
+                contract: format!("{:?}", module.contract),
+                requires: format!("{:?}", module.contract.inputs),
+                ensures: format!("{:?}", module.contract.outputs),
+                claims: format!(
+                    "{:?}",
+                    module
+                        .contract
+                        .outputs
+                        .iter()
+                        .map(|port| (&port.name, &port.claims))
+                        .collect::<Vec<_>>()
+                ),
+            }),
+        }
+    }
+
+    let node_count = graph.nodes().len();
+    for scope in &scopes {
+        if scope.start >= scope.end || scope.end > node_count {
+            return Err(bad("module contains invalid node interval"));
+        }
+        if scope
+            .outputs
+            .iter()
+            .any(|(_, output)| *output < scope.start || *output >= scope.end)
+        {
+            return Err(bad("module output lies outside its owned body"));
+        }
+    }
+
+    let mut parents = vec![None; scopes.len()];
+    for (i, scope) in scopes.iter().enumerate() {
+        let mut candidates = Vec::new();
+        for (j, other) in scopes.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let overlaps = scope.start < other.end && other.start < scope.end;
+            let contained = other.start <= scope.start && scope.end <= other.end;
+            let contains = scope.start <= other.start && other.end <= scope.end;
+            if overlaps && !contained && !contains {
+                return Err(bad("crossing module body intervals"));
+            }
+            if contained && (!contains || j > i) {
+                candidates.push(j);
+            }
+        }
+        candidates.sort_by_key(|&j| (scopes[j].end - scopes[j].start, j));
+        parents[i] = candidates.first().copied();
+    }
+
+    fn path_of(i: usize, scopes: &[ModuleScope], parents: &[Option<usize>]) -> String {
+        let local = format!("{}_{}", scopes[i].id, scopes[i].name);
+        parents[i].map_or_else(
+            || local.clone(),
+            |parent| format!("{}/{}", path_of(parent, scopes, parents), local),
+        )
+    }
+
+    let paths = (0..scopes.len())
+        .map(|index| path_of(index, &scopes, &parents))
+        .collect::<Vec<_>>();
+    let owners = (0..node_count)
+        .map(|node| {
+            (0..scopes.len())
+                .filter(|&scope| node >= scopes[scope].start && node < scopes[scope].end)
+                .min_by_key(|&scope| (scopes[scope].end - scopes[scope].start, scope))
+        })
+        .collect::<Vec<_>>();
+
+    Ok(ModuleLayout {
+        scopes,
+        parents,
+        paths,
+        owners,
+    })
+}
+
+fn source_is_outside_scope(source: usize, scope: &ModuleScope) -> bool {
+    source < scope.start || source >= scope.end
 }
 
 /// All architecture writers invoke the same Graphviz executable from the
@@ -251,136 +392,17 @@ pub fn snapshot_architecture(
         ));
     }
     let gpu = plan.translation_plan().map_err(|e| bad(e.to_string()))?;
-    let mut ir = format!(
-        "verineural-architecture-ir-v1\nid={}\nversion={}\noutput={}\nfp32={:?}\nproperty={}\n",
-        metadata.id,
-        metadata.version,
-        output.index(),
-        graph.policy(),
-        metadata.global_property,
-    );
-    for (index, node) in graph.nodes().iter().enumerate() {
-        writeln!(ir, "node={index};op={:?};inputs={:?};shape={:?};dtype=binary32;layout=row-major;domain={:?};semantics={:?};requires={:?};ensures={:?};role={}",
-            node.operation, node.inputs.iter().map(|x|x.index()).collect::<Vec<_>>(),
-            node.shape.dims(), node.domain, node.semantics,
-            node.contract.requires, node.contract.ensures,
-            metadata.input_roles.get(&index).map(String::as_str).unwrap_or("primitive"),
-        ).expect("writing to string");
-    }
-    for (i, module) in graph.modules().iter().enumerate() {
-        writeln!(
-            ir,
-            "module={i};name={};semantic_version={};inputs={:?};body_start={};output={};requires={:?};ensures={:?};claims={:?}",
-            module.name,
-            module.semantic_version,
-            module
-                .inputs
-                .iter()
-                .map(|id| id.index())
-                .collect::<Vec<_>>(),
-            module.body_start,
-            module.output.index(),
-            module.contract.requires,
-            module.contract.ensures,
-            module.contract.claims,
-        )
-        .expect("writing to string");
-    }
-    for (i, module) in graph.multi_modules().iter().enumerate() {
-        writeln!(
-            ir,
-            "multi_module={i};name={};version={};inputs={:?};outputs={:?};ports={:?};body=[{},{})",
-            module.name,
-            module.semantic_version,
-            module
-                .inputs
-                .iter()
-                .map(|id| id.index())
-                .collect::<Vec<_>>(),
-            module
-                .outputs
-                .iter()
-                .map(|id| id.index())
-                .collect::<Vec<_>>(),
-            module.contract,
-            module.body_start,
-            module.body_end
-        )
-        .expect("writing to string");
-    }
-    ir.push_str("translation_plan_begin\n");
-    ir.push_str(&gpu.to_text());
-    ir.push_str("translation_plan_end\n");
+    let ir = graph.canonical_ir();
     let digest = sha256(ir.as_bytes())?;
 
-    // Build a deterministic hierarchy from nested intervals. An inner module
-    // must be wholly contained in one outer module, never cross boundaries.
-    let mods = graph.modules();
-    let mut parents: Vec<Option<usize>> = vec![None; mods.len()];
-    for (i, module) in mods.iter().enumerate() {
-        let first = module.body_start;
-        let last = module.output.index();
-        if first > last || last >= graph.nodes().len() {
-            return Err(bad("invalid module body interval"));
-        }
-        let mut candidates: Vec<usize> = mods
-            .iter()
-            .enumerate()
-            .filter_map(|(j, other)| {
-                (i != j
-                    && other.body_start <= first
-                    && other.output.index() >= last
-                    && (other.body_start < first || other.output.index() > last))
-                    .then_some(j)
-            })
-            .collect();
-        candidates.sort_by_key(|&j| (mods[j].output.index() - mods[j].body_start, j));
-        parents[i] = candidates.first().copied();
-        for (j, other) in mods.iter().enumerate() {
-            if i != j && first <= other.output.index() && other.body_start <= last {
-                let contains = (first <= other.body_start && last >= other.output.index())
-                    || (other.body_start <= first && other.output.index() >= last);
-                if !contains {
-                    return Err(bad("crossing module body intervals"));
-                }
-            }
-        }
-    }
-    let mut paths = vec![String::new(); mods.len()];
-    fn module_path(
-        i: usize,
-        parents: &[Option<usize>],
-        names: &[crate::ModuleInvocation],
-    ) -> String {
-        let local = format!("m{i}_{}", names[i].name);
-        parents[i].map_or_else(
-            || local.clone(),
-            |p| format!("{}/{}", module_path(p, parents, names), local),
-        )
-    }
-    for (i, path) in paths.iter_mut().enumerate() {
-        *path = module_path(i, &parents, mods);
-    }
-    let mut owners = vec![None; graph.nodes().len()];
-    for (index, slot) in owners.iter_mut().enumerate() {
-        *slot = (0..mods.len())
-            .filter(|&i| index >= mods[i].body_start && index <= mods[i].output.index())
-            .min_by_key(|&i| (mods[i].output.index() - mods[i].body_start, i));
-    }
-    let mut reachable = BTreeSet::new();
-    let mut pending = vec![output];
-    while let Some(id) = pending.pop() {
-        if reachable.insert(id.index()) {
-            pending.extend(
-                graph
-                    .node(id)
-                    .map_err(|e| bad(e.to_string()))?
-                    .inputs
-                    .iter()
-                    .copied(),
-            );
-        }
-    }
+    let layout = module_layout(graph)?;
+    let scopes = &layout.scopes;
+    let parents = &layout.parents;
+    let paths = &layout.paths;
+    let owners = &layout.owners;
+    let reachable = graph
+        .dependency_scope(&[output])
+        .map_err(|err| bad(err.to_string()))?;
     let kernel_map: BTreeMap<_, _> = gpu.kernels.iter().map(|k| (k.node, k)).collect();
     let fused: BTreeSet<_> = plan
         .fused_relus()
@@ -418,7 +440,7 @@ pub fn snapshot_architecture(
     )
     .expect("writing to string");
     for (key, value) in [
-        ("vn_export_version", "1".to_owned()),
+        ("vn_export_version", "2".to_owned()),
         ("vn_architecture_id", metadata.id.clone()),
         ("vn_architecture_version", metadata.version.clone()),
         ("vn_ir_sha256", digest.clone()),
@@ -435,18 +457,16 @@ pub fn snapshot_architecture(
             "input,parameter,primitive,module-boundary,output".into(),
         ),
         ("vn_unmodeled", "state,control,training".into()),
-        (
-            "vn_multi_output_modules",
-            format!("{:?}", graph.multi_modules()),
-        ),
+        ("vn_module_instances", scopes.len().to_string()),
     ] {
         writeln!(dot, "  {key}={};", quoted(&value)).expect("writing to string");
     }
 
     // One immutable rendering context for all recursive module scopes.
-    // The recursion varies only in parent, depth and the output DOT buffer.
+    // Single- and multi-output modules use the same normalized hierarchy.
     struct RenderContext<'a> {
         graph: &'a NeuralGraph,
+        scopes: &'a [ModuleScope],
         owners: &'a [Option<usize>],
         parents: &'a [Option<usize>],
         paths: &'a [String],
@@ -465,6 +485,7 @@ pub fn snapshot_architecture(
     ) {
         let RenderContext {
             graph,
+            scopes,
             owners,
             parents,
             paths,
@@ -504,8 +525,6 @@ pub fn snapshot_architecture(
             );
             let policy = format!("{:?}", node.semantics.fp32);
             let (fill, outline) = node_theme(kind, &node.operation);
-            // Actual newline, not a literal backslash-n. quoted() escapes it
-            // once, allowing Graphviz to render a true two-line label.
             let title = match kind {
                 "input" => "INPUT".to_owned(),
                 "parameter" => "PARAMETER".to_owned(),
@@ -517,10 +536,7 @@ pub fn snapshot_architecture(
                 ("label", label),
                 ("fillcolor", fill.into()),
                 ("color", outline.into()),
-                (
-                    "tooltip",
-                    format!("node {index}: {}", node.operation.name()),
-                ),
+                ("tooltip", format!("node {index}: {}", node.operation.name())),
                 ("vn_id", format!("n{index}")),
                 ("vn_kind", kind.into()),
                 ("vn_op", node.operation.name().into()),
@@ -567,13 +583,12 @@ pub fn snapshot_architecture(
             ];
             writeln!(dot, "{indent}n{index} [{}];", attrs(&properties)).expect("writing to string");
         }
-        for (i, module) in graph
-            .modules()
+        for (i, scope) in scopes
             .iter()
             .enumerate()
             .filter(|(i, _)| parents[*i] == parent)
         {
-            writeln!(dot, "{indent}subgraph cluster_m{i} {{").expect("writing to string");
+            writeln!(dot, "{indent}subgraph cluster_{} {{", scope.id).expect("writing to string");
             let inner = format!("{indent}  ");
             let (background, outline) = cluster_theme(depth);
             for (key, value) in [
@@ -590,38 +605,37 @@ pub fn snapshot_architecture(
             ] {
                 writeln!(dot, "{inner}{key}={};", quoted(&value)).expect("writing to string");
             }
-            let visible_ports = module
+            let visible_inputs = scope
                 .inputs
                 .iter()
-                .enumerate()
-                .map(|(port, source)| format!("p{port}:n{}", source.index()))
+                .map(|(name, source)| format!("{name}:n{source}"))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let visible_outputs = scope
+                .outputs
+                .iter()
+                .map(|(name, output)| format!("{name}:n{output}"))
                 .collect::<Vec<_>>()
                 .join("  ");
             writeln!(
                 dot,
                 "{inner}label={};",
                 quoted(&format!(
-                    "{}  ·  m{i}\n{visible_ports}  →  n{}",
-                    module.name.replace('_', " ").to_uppercase(),
-                    module.output.index()
+                    "{}  ·  {}\n{visible_inputs}  →  {visible_outputs}",
+                    scope.name.replace('_', " ").to_uppercase(),
+                    scope.id,
                 ))
             )
             .expect("writing to string");
             for (key, value) in [
                 ("vn_instance_path", paths[i].clone()),
-                ("vn_definition_id", module.name.into()),
-                (
-                    "vn_module_inputs",
-                    format!(
-                        "{:?}",
-                        module.inputs.iter().map(|n| n.index()).collect::<Vec<_>>()
-                    ),
-                ),
-                ("vn_module_output", format!("n{}", module.output.index())),
-                ("vn_requires", format!("{:?}", module.contract.requires)),
-                ("vn_ensures", format!("{:?}", module.contract.ensures)),
-                ("vn_claims", format!("{:?}", module.contract.claims)),
-                ("vn_semantic_version", module.semantic_version.into()),
+                ("vn_definition_id", scope.name.into()),
+                ("vn_input_ports", format!("{:?}", scope.inputs)),
+                ("vn_output_ports", format!("{:?}", scope.outputs)),
+                ("vn_requires", scope.requires.clone()),
+                ("vn_ensures", scope.ensures.clone()),
+                ("vn_claims", scope.claims.clone()),
+                ("vn_semantic_version", scope.version.into()),
                 (
                     "vn_proof_status",
                     "conditional-ideal-Int;Lean-check-required".into(),
@@ -629,25 +643,16 @@ pub fn snapshot_architecture(
             ] {
                 writeln!(dot, "{inner}{key}={};", quoted(&value)).expect("writing to string");
             }
-            // The label exposes module ports to readers; the full positional
-            // mapping stays available as machine-readable cluster metadata.
-            for (port, source) in module.inputs.iter().enumerate() {
-                writeln!(
-                    dot,
-                    "{inner}vn_input_port_{port}={};",
-                    quoted(&format!("n{}", source.index()))
-                )
-                .expect("writing to string");
-            }
             render_scope(Some(i), context, depth + 1, dot);
             writeln!(dot, "{indent}}}").expect("writing to string");
         }
     }
     let context = RenderContext {
         graph,
-        owners: &owners,
-        parents: &parents,
-        paths: &paths,
+        scopes,
+        owners,
+        parents,
+        paths,
         reachable: &reachable,
         roles: &metadata.input_roles,
         kernel_map: &kernel_map,
@@ -679,20 +684,25 @@ pub fn snapshot_architecture(
         writeln!(dot, "  {{ rank=same; {positions} }}").expect("writing to string");
     }
     // Validate the nested capture chain without adding visual relay edges.
-    for (i, module) in mods.iter().enumerate() {
-        for (port, source) in module.inputs.iter().enumerate() {
-            let source_id = source.index();
-            if !source_is_outside_module(source_id, module) {
+    for (i, scope) in scopes.iter().enumerate() {
+        for (port, (_, source_id)) in scope.inputs.iter().enumerate() {
+            if !source_is_outside_scope(*source_id, scope) {
                 return Err(bad(format!(
-                    "module {i} input {port} is not external to its body"
+                    "module {} input {port} is not external to its body",
+                    scope.id
                 )));
             }
             if let Some(parent) = parents[i] {
-                if source_is_outside_module(source_id, &mods[parent])
-                    && !mods[parent].inputs.contains(source)
+                let parent_scope = &scopes[parent];
+                if source_is_outside_scope(*source_id, parent_scope)
+                    && !parent_scope
+                        .inputs
+                        .iter()
+                        .any(|(_, parent_source)| parent_source == source_id)
                 {
                     return Err(bad(format!(
-                        "module m{i} captures n{source_id} without a declared parent m{parent} port"
+                        "module {} captures n{} without a declared parent {} port",
+                        scope.id, source_id, parent_scope.id
                     )));
                 }
             }
@@ -716,12 +726,16 @@ pub fn snapshot_architecture(
                 .unwrap_or("data");
             let (edge_color, edge_width) = edge_theme(role, port);
             if let Some(owner) = owners[i] {
-                if source_is_outside_module(source.index(), &mods[owner])
-                    && !mods[owner].inputs.contains(source)
+                let scope = &scopes[owner];
+                if source_is_outside_scope(source.index(), scope)
+                    && !scope
+                        .inputs
+                        .iter()
+                        .any(|(_, declared)| *declared == source.index())
                 {
                     return Err(bad(format!(
-                        "node n{i} captures n{} outside module m{owner} without a declared input",
-                        source.index()
+                        "node n{i} captures n{} outside module {} without a declared input",
+                        source.index(), scope.id
                     )));
                 }
             }
@@ -777,134 +791,21 @@ pub(crate) fn auto_architecture_dot(
         return Err(bad("invalid canonical Semantic IR SHA-256 for DOT"));
     }
 
-    struct Scope {
-        name: &'static str,
-        version: &'static str,
-        id: String,
-        start: usize,
-        end: usize,
-        inputs: Vec<(String, usize)>,
-        outputs: Vec<(String, usize)>,
-        contract: String,
-    }
-    let mut scopes = Vec::new();
-    for (i, module) in graph.modules().iter().enumerate() {
-        scopes.push(Scope {
-            name: module.name,
-            version: module.semantic_version,
-            id: format!("m{i}"),
-            start: module.body_start,
-            end: module.output.index() + 1,
-            inputs: module
-                .inputs
-                .iter()
-                .enumerate()
-                .map(|(p, id)| (format!("input_{p}"), id.index()))
-                .collect(),
-            outputs: vec![("output".to_owned(), module.output.index())],
-            contract: format!("{:?}", module.contract),
-        });
-    }
-    for (i, module) in graph.multi_modules().iter().enumerate() {
-        scopes.push(Scope {
-            name: module.name,
-            version: module.semantic_version,
-            id: format!("multi{i}"),
-            start: module.body_start,
-            end: module.body_end,
-            inputs: module
-                .inputs
-                .iter()
-                .zip(&module.contract.inputs)
-                .map(|(id, port)| (port.name.to_owned(), id.index()))
-                .collect(),
-            outputs: module
-                .outputs
-                .iter()
-                .zip(&module.contract.outputs)
-                .map(|(id, port)| (port.name.to_owned(), id.index()))
-                .collect(),
-            contract: format!("{:?}", module.contract),
-        });
-    }
+    let layout = module_layout(graph)?;
+    let scopes = &layout.scopes;
+    let parents = &layout.parents;
+    let paths = &layout.paths;
+    let owners = &layout.owners;
     let n = graph.nodes().len();
-    for scope in &scopes {
-        if scope.start >= scope.end || scope.end > n {
-            return Err(bad("module contains invalid node interval"));
-        }
-    }
-    // Nest only intervals which genuinely contain one another. For identical
-    // intervals, the later registered scope is the outer scope; this supports
-    // modules that forward a nested module's result without producing a node.
-    let mut parents = vec![None; scopes.len()];
-    for (i, scope) in scopes.iter().enumerate() {
-        let mut candidates = Vec::new();
-        for (j, other) in scopes.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            let overlaps = scope.start < other.end && other.start < scope.end;
-            let contained = other.start <= scope.start && scope.end <= other.end;
-            let contains = scope.start <= other.start && other.end <= scope.end;
-            if overlaps && !contained && !contains {
-                return Err(bad("crossing module intervals in auto DOT"));
-            }
-            if contained && (!contains || j > i) {
-                candidates.push(j);
-            }
-        }
-        candidates.sort_by_key(|&j| (scopes[j].end - scopes[j].start, j));
-        parents[i] = candidates.first().copied();
-    }
-    let mut paths = vec![String::new(); scopes.len()];
-    fn path_of(i: usize, scopes: &[Scope], parents: &[Option<usize>]) -> String {
-        let local = format!("{}_{}", scopes[i].id, scopes[i].name);
-        match parents[i] {
-            Some(p) => format!("{}/{}", path_of(p, scopes, parents), local),
-            None => local,
-        }
-    }
-    for (i, p) in paths.iter_mut().enumerate() {
-        *p = path_of(i, &scopes, &parents);
-    }
-    let owners = (0..n)
-        .map(|i| {
-            (0..scopes.len())
-                .filter(|&j| i >= scopes[j].start && i < scopes[j].end)
-                .min_by_key(|&j| (scopes[j].end - scopes[j].start, j))
-        })
-        .collect::<Vec<_>>();
     let selected = plan
         .outputs
         .iter()
         .map(|id| id.index())
         .collect::<BTreeSet<_>>();
     // All nodes are drawn, but Lean only models reachable dependencies.
-    let mut reachable = BTreeSet::new();
-    let mut pending = plan.outputs.clone();
-    while let Some(id) = pending.pop() {
-        if !reachable.insert(id.index()) {
-            continue;
-        }
-        pending.extend(
-            graph
-                .node(id)
-                .map_err(|err| bad(err.to_string()))?
-                .inputs
-                .iter()
-                .copied(),
-        );
-        for module in graph.modules() {
-            if module.output == id {
-                pending.extend(module.inputs.iter().copied());
-            }
-        }
-        for module in graph.multi_modules() {
-            if module.outputs.contains(&id) {
-                pending.extend(module.inputs.iter().copied());
-            }
-        }
-    }
+    let reachable = graph
+        .dependency_scope(&plan.outputs)
+        .map_err(|err| bad(err.to_string()))?;
     let gpu_status = plan
         .gpu
         .iter()
@@ -935,7 +836,7 @@ pub(crate) fn auto_architecture_dot(
                 plan.outputs.len()
             ),
         ),
-        ("vn_export_version", "auto-v1".into()),
+        ("vn_export_version", "auto-v2".into()),
         ("vn_ir_sha256", semantic_ir_sha256.to_owned()),
         ("vn_fp32_profile", format!("{:?}", graph.policy())),
         ("vn_selected_outputs", format!("{:?}", selected)),
@@ -957,7 +858,7 @@ pub(crate) fn auto_architecture_dot(
     }
     struct Context<'a> {
         graph: &'a NeuralGraph,
-        scopes: &'a [Scope],
+        scopes: &'a [ModuleScope],
         parents: &'a [Option<usize>],
         owners: &'a [Option<usize>],
         paths: &'a [String],
@@ -1101,10 +1002,10 @@ pub(crate) fn auto_architecture_dot(
         None,
         &Context {
             graph,
-            scopes: &scopes,
-            parents: &parents,
-            owners: &owners,
-            paths: &paths,
+            scopes,
+            parents,
+            owners,
+            paths,
             selected: &selected,
             reachable: &reachable,
             gpu_status: &gpu_status,
@@ -1257,7 +1158,7 @@ mod tests {
         assert_eq!(dot, auto_architecture_dot(&g2, &p2, &hash).unwrap());
         assert!(dot.contains(&format!(r#"vn_ir_sha256="{hash}""#)));
         assert!(dot.contains("subgraph cluster_m0"));
-        assert!(dot.contains("subgraph cluster_multi0"));
+        assert!(dot.contains("subgraph cluster_m1"));
         assert!(dot.contains("next_state"));
         assert!(dot.contains("readout"));
         assert!(dot.contains("vn_input_ports"));
@@ -1326,12 +1227,9 @@ mod tests {
         assert!(!a.dot.contains(r#"INPUT  ·  n0\\n[2]"#));
         let mut changed = meta.clone();
         changed.version = "0.2.0".into();
-        assert_ne!(
-            a.ir_sha256,
-            snapshot_architecture(&g1, o1, &p1, &changed)
-                .unwrap()
-                .ir_sha256
-        );
+        let changed_snapshot = snapshot_architecture(&g1, o1, &p1, &changed).unwrap();
+        assert_eq!(a.ir_sha256, changed_snapshot.ir_sha256);
+        assert_ne!(a.dot, changed_snapshot.dot);
         changed.input_roles.insert(20, "parameter".into());
         assert!(snapshot_architecture(&g1, o1, &p1, &changed).is_err());
     }

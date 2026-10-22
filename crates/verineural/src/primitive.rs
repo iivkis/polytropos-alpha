@@ -1,7 +1,7 @@
 //! Versioned consumer-defined composite primitives lowered through typed Semantic IR.
 //! This DSL deliberately cannot wrap opaque host callbacks or pretend to certify
 //! unsupported backend operations.
-use crate::{MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, Operation};
+use crate::{MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId, Operation, Shape};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrimitiveExpr {
@@ -10,6 +10,50 @@ pub enum PrimitiveExpr {
 }
 
 impl PrimitiveExpr {
+    pub const fn port(index: usize) -> Self {
+        Self::Port(index)
+    }
+
+    pub fn apply(operation: Operation, inputs: impl IntoIterator<Item = Self>) -> Self {
+        Self::Apply(operation, inputs.into_iter().collect())
+    }
+
+    pub fn add(self, rhs: Self) -> Self {
+        Self::apply(Operation::Add, [self, rhs])
+    }
+
+    pub fn mul(self, rhs: Self) -> Self {
+        Self::apply(Operation::Mul, [self, rhs])
+    }
+
+    pub fn matmul(self, rhs: Self) -> Self {
+        Self::apply(Operation::MatMul, [self, rhs])
+    }
+
+    pub fn bias_add(self, bias: Self) -> Self {
+        Self::apply(Operation::BiasAdd, [self, bias])
+    }
+
+    pub fn relu(self) -> Self {
+        Self::apply(Operation::Relu, [self])
+    }
+
+    pub fn positive_mask(self) -> Self {
+        Self::apply(Operation::PositiveMask, [self])
+    }
+
+    pub fn select_positive(self, when_positive: Self, otherwise: Self) -> Self {
+        Self::apply(Operation::SelectPositive, [self, when_positive, otherwise])
+    }
+
+    pub fn sqrt(self) -> Self {
+        Self::apply(Operation::Sqrt, [self])
+    }
+
+    pub fn reshape(self, shape: Shape) -> Self {
+        Self::apply(Operation::Reshape(shape), [self])
+    }
+
     fn lower(&self, graph: &mut NeuralGraph, ports: &[NodeId]) -> Result<NodeId, NeuralError> {
         match self {
             Self::Port(index) => ports.get(*index).copied().ok_or(NeuralError::InvalidNode),
@@ -24,8 +68,9 @@ impl PrimitiveExpr {
     }
 }
 
-/// A versioned semantic declaration. The expression, rather than a new
-/// closed Operation variant, is the mathematical source for every backend.
+/// A versioned composite declaration lowered entirely through existing typed
+/// operations. It reduces consumer boilerplate, but does not extend the atomic
+/// operation set.
 #[derive(Clone, Debug)]
 pub struct PrimitiveSpec {
     pub id: &'static str,

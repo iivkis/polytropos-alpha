@@ -265,14 +265,9 @@ impl LeanProofEngine {
                 return Err(ProofError::InvalidOutputs);
             }
         }
-        let mut used = BTreeSet::new();
-        let mut pending = outputs.to_vec();
-
-        while let Some(id) = pending.pop() {
-            let node = graph.node(id)?;
-            if !used.insert(id.index()) {
-                continue;
-            }
+        let used = graph.dependency_scope(outputs)?;
+        for &index in &used {
+            let node = &graph.nodes()[index];
             match node.operation {
                 Operation::Input
                 | Operation::Add
@@ -285,22 +280,9 @@ impl LeanProofEngine {
                 | Operation::Reshape(_) => {}
                 _ => {
                     return Err(ProofError::UnsupportedOperation {
-                        node: id.index(),
+                        node: index,
                         operation: node.operation.name(),
                     });
-                }
-            }
-            pending.extend(node.inputs.iter().copied());
-            // Module contracts also introduce dependencies, even when a body
-            // returns a node without using every declared input.
-            for module in graph.modules() {
-                if module.output == id {
-                    pending.extend(module.inputs.iter().copied());
-                }
-            }
-            for module in graph.multi_modules() {
-                if module.outputs.contains(&id) {
-                    pending.extend(module.inputs.iter().copied());
                 }
             }
         }
@@ -1333,26 +1315,7 @@ impl LeanProofEngine {
 }
 
 fn collect_used_nodes(graph: &NeuralGraph, output: NodeId) -> Result<BTreeSet<usize>, ProofError> {
-    let mut used = BTreeSet::new();
-    let mut pending = vec![output];
-    while let Some(id) = pending.pop() {
-        let node = graph.node(id)?;
-        if !used.insert(id.index()) {
-            continue;
-        }
-        pending.extend(node.inputs.iter().copied());
-        for module in graph.modules() {
-            if module.output == id {
-                pending.extend(module.inputs.iter().copied());
-            }
-        }
-        for module in graph.multi_modules() {
-            if module.outputs.contains(&id) {
-                pending.extend(module.inputs.iter().copied());
-            }
-        }
-    }
-    Ok(used)
+    Ok(graph.dependency_scope(&[output])?)
 }
 
 fn module_contains(graph: &NeuralGraph, parent_index: usize, child_index: usize) -> bool {
@@ -1362,9 +1325,7 @@ fn module_contains(graph: &NeuralGraph, parent_index: usize, child_index: usize)
     let modules = graph.modules();
     let parent = &modules[parent_index];
     let child = &modules[child_index];
-    child.body_start >= parent.body_start
-        && child.output.index() >= parent.body_start
-        && child.output.index() <= parent.output.index()
+    child.body_start >= parent.body_start && child.body_end <= parent.body_end
 }
 
 #[derive(Default)]
@@ -1425,7 +1386,7 @@ fn prove_module_node_nonnegative(
     }
 
     let module = &graph.modules()[module_index];
-    if index < module.body_start || index > module.output.index() {
+    if index < module.body_start || index >= module.body_end {
         return Err(ProofError::UnsupportedGuarantee { node: index });
     }
 

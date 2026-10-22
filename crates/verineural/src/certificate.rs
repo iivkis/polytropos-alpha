@@ -363,70 +363,10 @@ impl CertificateEngine {
     }
 }
 
-/// Canonical within the v3 format: graph identity and process-global IDs do
-/// not contribute to the fingerprint; complete semantics and interfaces do.
+/// Certificate selection layered over the one canonical graph serialization.
+/// Graph identity and process-global IDs do not contribute to the fingerprint.
 fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
-    let mut source = format!(
-        "verineural-ir-v3\noutput={}\nfp32={:?}\n",
-        output.index(),
-        graph.policy()
-    );
-    for (index, node) in graph.nodes().iter().enumerate() {
-        let edges = node
-            .inputs
-            .iter()
-            .map(|id| id.index().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        source.push_str(&format!(
-            "node={index};op={:?};inputs={edges};shape={:?};domain={:?};semantics={:?};requires={:?};ensures={:?};claims={:?}\n",
-            node.operation,
-            node.shape.dims(),
-            node.domain,
-            node.semantics,
-            node.contract.requires,
-            node.contract.ensures,
-            node.contract.claims,
-        ));
-    }
-    for module in graph.modules() {
-        source.push_str(&format!(
-            "module={};version={};inputs={:?};body_start={};output={};requires={:?};ensures={:?};claims={:?}\n",
-            module.name,
-            module.semantic_version,
-            module
-                .inputs
-                .iter()
-                .map(|id| id.index())
-                .collect::<Vec<_>>(),
-            module.body_start,
-            module.output.index(),
-            module.contract.requires,
-            module.contract.ensures,
-            module.contract.claims,
-        ));
-    }
-    for module in graph.multi_modules() {
-        source.push_str(&format!(
-            "multi_module={};version={};body=[{},{}) inputs={:?};outputs={:?};contracts={:?}\n",
-            module.name,
-            module.semantic_version,
-            module.body_start,
-            module.body_end,
-            module
-                .inputs
-                .iter()
-                .map(|id| id.index())
-                .collect::<Vec<_>>(),
-            module
-                .outputs
-                .iter()
-                .map(|id| id.index())
-                .collect::<Vec<_>>(),
-            module.contract
-        ));
-    }
-    source
+    format!("{}certificate_output={}\n", graph.canonical_ir(), output.index())
 }
 
 fn input_snapshot(graph: &NeuralGraph, inputs: &[(NodeId, Tensor<f32>)]) -> String {

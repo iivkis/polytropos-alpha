@@ -2149,8 +2149,7 @@ impl RneRangePlan {
         self.module_in_slice(parent)
             && self.module_in_slice(child)
             && child.body_start >= parent.body_start
-            && child.output.index() >= parent.body_start
-            && child.output.index() <= parent.output.index()
+            && child.body_end <= parent.body_end
     }
 
     fn direct_nested_module_indices(
@@ -2268,10 +2267,10 @@ impl RneRangePlan {
                     reason: "module global range proof leaves the compiled output slice",
                 });
             }
-            if index < module.body_start {
+            if index < module.body_start || index >= module.body_end {
                 return Err(NumericError::InvalidInput {
                     node: index,
-                    reason: "module global range proof reaches an undeclared preexisting node",
+                    reason: "module global range proof leaves the declared module body",
                 });
             }
             let node = &self.graph.nodes()[index];

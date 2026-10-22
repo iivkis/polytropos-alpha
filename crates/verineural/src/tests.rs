@@ -383,8 +383,88 @@ fn modules_compose_by_output_contracts() {
     );
     assert_eq!(graph.modules().len(), 2);
     assert_eq!(graph.modules()[0].body_start, 1);
+    assert_eq!(graph.modules()[0].body_end, 2);
     assert_eq!(graph.modules()[1].body_start, 2);
+    assert_eq!(graph.modules()[1].body_end, 3);
     assert_eq!(graph.nodes().len(), 3);
+}
+
+#[test]
+fn closure_composition_owns_the_full_body_not_just_nodes_before_output() {
+    let mut graph = NeuralGraph::default();
+    let tensor_shape = shape(&[2]);
+    let input = graph.input(tensor_shape.clone(), Domain::Finite);
+    let declared_but_unused = graph.input(tensor_shape.clone(), Domain::Finite);
+    let contract = MathContract::new(
+        vec![
+            PortContract::finite(tensor_shape.clone()),
+            PortContract::finite(tensor_shape.clone()),
+        ],
+        PortContract::nonnegative(tensor_shape),
+    );
+    let output = graph
+        .compose(
+            "post_output",
+            "1",
+            &contract,
+            &[input, declared_but_unused],
+            |graph, inputs| {
+                let output = graph.relu(inputs[0])?;
+                let _diagnostic = graph.relu(output)?;
+                Ok(output)
+            },
+        )
+        .unwrap();
+
+    let module = &graph.modules()[0];
+    assert_eq!(module.output, output);
+    assert_eq!(module.body_range(), 2..4);
+    assert_eq!(graph.nodes().len(), 4);
+    assert_eq!(
+        graph.dependency_scope(&[output]).unwrap(),
+        std::collections::BTreeSet::from([0, 1, 2])
+    );
+    check_architecture_connectivity(&graph).unwrap();
+    assert!(graph.canonical_ir().contains("body=2..4"));
+}
+
+#[test]
+fn module_instances_preserve_single_and_multi_application_order() {
+    let mut graph = NeuralGraph::default();
+    let tensor_shape = shape(&[2]);
+    let input = graph.input(tensor_shape.clone(), Domain::Finite);
+    let fork_contract = MultiOutputContract::new(
+        vec![NamedPortContract::new(
+            "input",
+            PortContract::finite(tensor_shape.clone()),
+        )],
+        vec![
+            NamedPortContract::new("left", PortContract::nonnegative(tensor_shape.clone())),
+            NamedPortContract::new("right", PortContract::nonnegative(tensor_shape.clone())),
+        ],
+    );
+    let fork = graph
+        .compose_multi("fork", "1", &fork_contract, &[input], |graph, inputs| {
+            Ok(vec![graph.relu(inputs[0])?, graph.relu(inputs[0])?])
+        })
+        .unwrap();
+    let merge_contract = MathContract::new(
+        vec![PortContract::any(tensor_shape.clone()); 2],
+        PortContract::any(tensor_shape),
+    );
+    graph
+        .compose("merge", "1", &merge_contract, &fork, |graph, inputs| {
+            graph.add(inputs[0], inputs[1])
+        })
+        .unwrap();
+
+    assert_eq!(
+        graph
+            .module_instances()
+            .map(ModuleInstanceRef::name)
+            .collect::<Vec<_>>(),
+        vec!["fork", "merge"]
+    );
 }
 
 #[test]
@@ -1118,7 +1198,7 @@ fn p0_extensible_composite_primitive_reuses_ir_and_proof() {
     let mut graph = NeuralGraph::default();
     // Finite input is necessary for the FP32 NonNegativeFinite guarantee.
     let x = graph.input(shape(&[2]), Domain::Finite);
-    let expr = crate::PrimitiveExpr::Apply(Operation::Relu, vec![crate::PrimitiveExpr::Port(0)]);
+    let expr = crate::PrimitiveExpr::port(0).relu();
     let spec = crate::PrimitiveSpec::new(
         "consumer_relu",
         "1.0",
@@ -1873,14 +1953,9 @@ fn p1_mask_select_lean_contract_and_numeric_gpu_profiles_fail_closed() {
     let condition = graph.input(shape(&[2]), Domain::Any);
     let yes = graph.input(shape(&[2]), Domain::NonNegativeFinite);
     let no = graph.input(shape(&[2]), Domain::NonNegativeFinite);
-    let expr = PrimitiveExpr::Apply(
-        Operation::SelectPositive,
-        vec![
-            PrimitiveExpr::Apply(Operation::PositiveMask, vec![PrimitiveExpr::Port(0)]),
-            PrimitiveExpr::Port(1),
-            PrimitiveExpr::Port(2),
-        ],
-    );
+    let expr = PrimitiveExpr::port(0)
+        .positive_mask()
+        .select_positive(PrimitiveExpr::port(1), PrimitiveExpr::port(2));
     let module = PrimitiveSpec::new(
         "consumer_gated_select",
         "v1",
@@ -1950,14 +2025,8 @@ fn p1_mask_select_lean_contract_and_numeric_gpu_profiles_fail_closed() {
         "incorrect_gated_claim",
         "v1",
         invalid_contract,
-        PrimitiveExpr::Apply(
-            Operation::SelectPositive,
-            vec![
-                PrimitiveExpr::Port(0),
-                PrimitiveExpr::Port(1),
-                PrimitiveExpr::Port(2),
-            ],
-        ),
+        PrimitiveExpr::port(0)
+            .select_positive(PrimitiveExpr::port(1), PrimitiveExpr::port(2)),
     )
     .unwrap();
     let result = bad_module

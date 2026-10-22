@@ -32,6 +32,7 @@ mod architecture;
 mod auto_build;
 mod auto_bundle;
 mod certificate;
+mod canonical;
 mod cuda;
 mod error;
 mod gpu;
@@ -60,7 +61,7 @@ pub use gpu::{
 };
 pub use ir::{
     ContractClaim, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics, MathContract,
-    ModuleInvocation, MultiModuleInvocation, MultiOutputContract, MultiOutputModule,
+    ModuleInstanceRef, ModuleInvocation, MultiModuleInvocation, MultiOutputContract, MultiOutputModule,
     NamedPortContract, NeuralGraph, NeuralModule, Node, NodeId, Operation, OperationSemantics,
     PortContract, ReductionOrder, RoundingMode, SubnormalMode,
 };

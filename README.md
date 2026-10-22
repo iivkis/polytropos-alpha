@@ -38,19 +38,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Для небольшого пользовательского блока отдельный Rust-тип не обязателен: `NeuralGraph::compose` и `compose_multi` используют тот же транзакционный путь проверки, что и `NeuralModule`/`MultiOutputModule`. Повторно используемые типы остаются полезны там, где у компонента есть конфигурация или собственная логика построения.
+
+```rust
+use verineural::{Domain, MathContract, NeuralGraph, PortContract, Shape};
+
+fn build() -> Result<(), Box<dyn std::error::Error>> {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![2])?;
+    let x = graph.input(shape.clone(), Domain::Finite);
+    let contract = MathContract::new(
+        vec![PortContract::finite(shape.clone())],
+        PortContract::nonnegative(shape),
+    )
+    .nonnegative();
+
+    let _y = graph.compose("relu_block", "1", &contract, &[x], |graph, inputs| {
+        graph.relu(inputs[0])
+    })?;
+    Ok(())
+}
+```
+
+`NeuralGraph::canonical_ir()` — единая versioned-сериализация семантики графа. Snapshot, auto-build и certificate layer используют её вместо собственных `Debug`-форматов; выбор output, proof goals и GPU policy остаётся метаданными конкретной сборки и связывается её артефактами/манифестом.
+Текущий формат — `verineural-semantic-ir-v2`. Сохранённые evidence bundles, созданные старым форматом, необходимо пересобрать штатной командой соответствующей лаборатории; старый fingerprint намеренно не считается совместимым.
+
 Полный пример с пользовательским `NeuralModule` и `MathContract` находится в [examples/stage2_graph.rs](crates/verineural/examples/stage2_graph.rs).
 
 ## Автоматическая сборка пользовательских архитектур (новый срез)
 
 `ArchitectureAutoCompiler` объединяет проверку типизированных связей компонентов, генерацию и Lean-аудит всех выбранных выходов и независимых целей, LLVM/PTX lowering каждого поддерживаемого NVIDIA-выхода и один отчёт с гипотезами и статусами. Модули и математические цели объявляются потребителем на Rust; встроенной LLM-архитектуры нет. Неподдерживаемые GPU-операции либо отклоняются (`GpuRequirement::AllOutputs`), либо получают явный статус `unsupported`. **Структурная проверка связей на Rust и доказательство свойств Lean не являются доказательством PTX/SASS и FP32 эквивалентности.**
 
-См. [руководство по автоматической сборке](docs/verineural/AUTO_BUILD.md), `task auto-architecture` и `task verify-auto-architecture`. Для авто-сборки теперь формируются канонический `semantic.ir`, единственный `architecture.dot` с вложенными и многовыходными блоками, `architecture.png` через закреплённый Graphviz, `SHA256SUMS` и replay с повторной проверкой DOT/PNG, Lean/аксиом и существующих LLVM/PTX validation планов без CUDA. Повторный рендер PNG требует Graphviz из Nix devShell. Новый `GpuEngine::compile_outputs` компилирует общую часть многовыходной архитектуры только один раз; `task gpu-multi-output` отдельно проверяет единый captured CUDA Graph с несколькими результатами и двумя replay. Если все выходы GPU-поддержаны, авто-сборка дополнительно прикладывает `gpu_shared` PTX и его переводные контракты к `SHA256SUMS`, сохраняя прежние пути `gpu_0` и т.д. Digest SHA256SUMS следует закреплять вне каталога артефактов. Новый replay-срез ожидает локальных проверок.
+См. [руководство по автоматической сборке](docs/verineural/AUTO_BUILD.md), `task auto-architecture` и `task verify-auto-architecture`. Для авто-сборки теперь формируются канонический graph-only `semantic.ir`, единственный `architecture.dot` с вложенными и многовыходными блоками, `architecture.png` через закреплённый Graphviz, `SHA256SUMS` и replay с повторной проверкой DOT/PNG, Lean/аксиом и существующих LLVM/PTX validation планов без CUDA. Повторный рендер PNG требует Graphviz из Nix devShell. Новый `GpuEngine::compile_outputs` компилирует общую часть многовыходной архитектуры только один раз; `task gpu-multi-output` отдельно проверяет единый captured CUDA Graph с несколькими результатами и двумя replay. Если все выходы GPU-поддержаны, авто-сборка дополнительно прикладывает `gpu_shared` PTX и его переводные контракты к `SHA256SUMS`, сохраняя прежние пути `gpu_0` и т.д. Digest SHA256SUMS следует закреплять вне каталога артефактов. Новый replay-срез ожидает локальных проверок.
 
 ## Stage 9: отдельная исследовательская лаборатория (новый крупный срез, локально не проверен)
 
 Добавлен Rust consumer `labs/coupled-field-0.1.0/` (отдельный Cargo package `coupled-field-lab`), а не очередная готовая модель внутри библиотеки. Он задаёт нетиповую трёхуровневую композицию с **семью экземплярами модулей**, общими параметрами и fork/fan-in: `BoundaryCell → CoupledUnit → CoupledField`. Для конкретных неотрицательных точных FP32-входов независимый `i64`-oracle ожидает `[4, 10, 8, 12]`; глобальный Lean `architecture_global_nonnegative` строится из реального IR с явными исходными предположениями. Baseline и experimental fused исполнения работают через CUDA Graph с обязательной структурной LLVM/PTX validation.
 
-Переиспользуемый Rust API `snapshot_architecture` выводит канонический `semantic.ir` и один полный детерминированный `architecture.dot`: все узлы (включая недостижимые), вложенные `cluster_*`, устойчивые instance paths, входы/параметры, source/port ordering, tensor shapes, domains, контракты, профили FP32, memory/kernel lowering и явные границы гарантий. DOT содержит SHA-256 исходного Semantic IR. Визуальное представление отделено от канонической семантики: в PNG ровно одно ребро на каждую реальную IR-зависимость, без служебных port/relay-стрелок; соответствия входных портов хранятся в `vn_input_port_*` атрибутах и кратко подписаны в заголовке каждого кластера. Внешние входы выровнены слева, а общие параметры могут располагаться ближе к потребителям, операции и уровни модулей различаются цветами, а DOT оставляет Graphviz выбор точек присоединения стрелок, использует зависимости всех типов (включая параметры) для ранжирования и более тщательный поиск раскладки с меньшим числом пересечений. Рендер создаётся с многострочными подписями и DPI 180. Изменение вида не меняет `semantic.ir`, но требует повторной генерации `architecture.dot`/`architecture.png` и `SHA256SUMS`. `ArchitectureSnapshot::write` вызывает **Graphviz из pinned Nix devShell** для генерации sibling `architecture.png`; Lean source, входные биты, параметры, оба GPU PTX/LLVM и translation plan/report попадают в **17-файловый SHA-256 manifest**. Команда `--verify` без CUDA пересобирает IR из Rust и проверяет содержимое DOT, Lean, параметры, ожидаемые биты, независимые планы LLVM/PTX и весь SHA-256 bundle. Все output writers используют единый `--artifact-root`, по умолчанию **корень package лаборатории**; чужая architecture id/version блокирует перезапись. Артефакты лаборатории **не исключаются из Git**: после успешной генерации они должны быть включены в коммит `dev` вместе с `SHA256SUMS`. Команда `task lab-stage9` сама не делает `git add`, `commit` или `push`, поэтому сохранённые на локальной машине evidence-файлы требуется опубликовать отдельным коммитом. `Cargo.lock` обновлён под новый consumer package.
+Переиспользуемый Rust API `snapshot_architecture` выводит канонический `semantic.ir` и один полный детерминированный `architecture.dot`: все узлы (включая недостижимые), вложенные `cluster_*`, устойчивые instance paths, входы/параметры, source/port ordering, tensor shapes, domains, контракты, профили FP32, memory/kernel lowering и явные границы гарантий. DOT содержит SHA-256 исходного Semantic IR. Визуальное представление отделено от канонической семантики: в PNG ровно одно ребро на каждую реальную IR-зависимость, без служебных port/relay-стрелок; соответствия входных/выходных портов хранятся в единых `vn_input_ports`/`vn_output_ports` атрибутах и кратко подписаны в заголовке каждого кластера. Внешние входы выровнены слева, а общие параметры могут располагаться ближе к потребителям, операции и уровни модулей различаются цветами, а DOT оставляет Graphviz выбор точек присоединения стрелок, использует зависимости всех типов (включая параметры) для ранжирования и более тщательный поиск раскладки с меньшим числом пересечений. Рендер создаётся с многострочными подписями и DPI 180. Изменение вида не меняет `semantic.ir`, но требует повторной генерации `architecture.dot`/`architecture.png` и `SHA256SUMS`. `ArchitectureSnapshot::write` вызывает **Graphviz из pinned Nix devShell** для генерации sibling `architecture.png`; Lean source, входные биты, параметры, оба GPU PTX/LLVM и translation plan/report попадают в **17-файловый SHA-256 manifest**. Команда `--verify` без CUDA пересобирает IR из Rust и проверяет содержимое DOT, Lean, параметры, ожидаемые биты, независимые планы LLVM/PTX и весь SHA-256 bundle. Все output writers используют единый `--artifact-root`, по умолчанию **корень package лаборатории**; чужая architecture id/version блокирует перезапись. Артефакты лаборатории **не исключаются из Git**: после успешной генерации они должны быть включены в коммит `dev` вместе с `SHA256SUMS`. Команда `task lab-stage9` сама не делает `git add`, `commit` или `push`, поэтому сохранённые на локальной машине evidence-файлы требуется опубликовать отдельным коммитом. `Cargo.lock` обновлён под новый consumer package.
 
 ```bash
 task lab-stage9
