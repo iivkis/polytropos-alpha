@@ -126,39 +126,53 @@ pub struct LeanAxiomAudit {
     pub axiom_dependencies: BTreeMap<String, Vec<String>>,
 }
 
-
 /// Require one exact Lean response for every expected theorem.
 /// Fail closed on malformed output or any non-allowlisted dependency.
 fn parse_axiom_report(
     stdout: &str,
     theorems: &[String],
 ) -> Result<BTreeMap<String, Vec<String>>, ProofError> {
-    let lines = stdout.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>();
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
     if lines.len() != theorems.len() {
-        return Err(ProofError::LeanRejected { details: "unexpected axiom report length".into() });
+        return Err(ProofError::LeanRejected {
+            details: "unexpected axiom report length".into(),
+        });
     }
     let mut dependencies = BTreeMap::new();
     for (name, line) in theorems.iter().zip(lines) {
         let expected = format!("'VeriNeural.Generated.{name}'");
-        let rest = line.strip_prefix(&expected).ok_or_else(|| ProofError::LeanRejected {
-            details: format!("unexpected axiom theorem identity: {line}"),
-        })?;
+        let rest = line
+            .strip_prefix(&expected)
+            .ok_or_else(|| ProofError::LeanRejected {
+                details: format!("unexpected axiom theorem identity: {line}"),
+            })?;
         let axioms = if rest == " does not depend on any axioms" {
             Vec::new()
-        } else if let Some(items) = rest.strip_prefix(" depends on axioms: [")
+        } else if let Some(items) = rest
+            .strip_prefix(" depends on axioms: [")
             .and_then(|s| s.strip_suffix(']'))
         {
             items.split(", ").map(str::to_owned).collect::<Vec<_>>()
         } else {
-            return Err(ProofError::LeanRejected { details: format!("malformed axiom report: {line}") });
+            return Err(ProofError::LeanRejected {
+                details: format!("malformed axiom report: {line}"),
+            });
         };
-        if axioms.iter().any(|name| name.is_empty() || !ALLOWED_LEAN_AXIOMS.contains(&name.as_str())) {
+        if axioms
+            .iter()
+            .any(|name| name.is_empty() || !ALLOWED_LEAN_AXIOMS.contains(&name.as_str()))
+        {
             return Err(ProofError::LeanRejected {
                 details: format!("unapproved axiom dependencies for {name}: {axioms:?}"),
             });
         }
         if dependencies.insert(name.clone(), axioms).is_some() {
-            return Err(ProofError::LeanRejected { details: format!("duplicate theorem: {name}") });
+            return Err(ProofError::LeanRejected {
+                details: format!("duplicate theorem: {name}"),
+            });
         }
     }
     Ok(dependencies)
@@ -993,7 +1007,10 @@ impl LeanProofEngine {
         let stderr = String::from_utf8_lossy(&result.stderr);
         if !result.status.success() || !stderr.trim().is_empty() {
             return Err(ProofError::LeanRejected {
-                details: format!("axiom audit failed: exit={:?}; stderr={stderr}", result.status.code()),
+                details: format!(
+                    "axiom audit failed: exit={:?}; stderr={stderr}",
+                    result.status.code()
+                ),
             });
         }
         let axiom_dependencies = parse_axiom_report(&stdout, theorems)?;
@@ -1314,7 +1331,12 @@ mod axiom_audit_tests {
 
     #[test]
     fn forbidden_axioms_and_forged_reports_fail_closed() {
-        for axiom in ["sorryAx", "user.hidden", "Classical.choice", "propext, sorryAx"] {
+        for axiom in [
+            "sorryAx",
+            "user.hidden",
+            "Classical.choice",
+            "propext, sorryAx",
+        ] {
             let stdout = format!(
                 "'VeriNeural.Generated.node_2_nonnegative' depends on axioms: [{axiom}]\n\
                  'VeriNeural.Generated.node_3_shape' does not depend on any axioms\n"

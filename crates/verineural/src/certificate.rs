@@ -342,18 +342,21 @@ impl CertificateEngine {
         let audit = self.proof.audit_file(&source_file, &names)?;
         let report = fs::read_to_string(directory.join("report.json"))?;
         let version = format!(
-            "\"lean_checker_version\": \"{}\"", escape_json(&audit.lean_version)
+            "\"lean_checker_version\": \"{}\"",
+            escape_json(&audit.lean_version)
         );
         let policy = "\"lean_axiom_policy\": [\"propext\"]";
         let dependencies = format!(
-            "\"lean_axiom_dependencies\": {{{}}}", axiom_dependencies_json(&audit)
+            "\"lean_axiom_dependencies\": {{{}}}",
+            axiom_dependencies_json(&audit)
         );
         if report.matches(&version).count() != 1
             || report.matches(policy).count() != 1
             || report.matches(&dependencies).count() != 1
         {
             return Err(CertificateError::Integrity(
-                "saved Lean version, axiom policy or dependencies disagree with audited proof".into(),
+                "saved Lean version, axiom policy or dependencies disagree with audited proof"
+                    .into(),
             ));
         }
         Ok(())
@@ -446,11 +449,19 @@ fn input_snapshot(graph: &NeuralGraph, inputs: &[(NodeId, Tensor<f32>)]) -> Stri
 }
 
 fn axiom_dependencies_json(audit: &crate::LeanAxiomAudit) -> String {
-    audit.axiom_dependencies.iter().map(|(theorem, axioms)| {
-        let values = axioms.iter().map(|axiom| format!("\"{}\"", escape_json(axiom)))
-            .collect::<Vec<_>>().join(", ");
-        format!("\"{}\": [{}]", escape_json(theorem), values)
-    }).collect::<Vec<_>>().join(", ")
+    audit
+        .axiom_dependencies
+        .iter()
+        .map(|(theorem, axioms)| {
+            let values = axioms
+                .iter()
+                .map(|axiom| format!("\"{}\"", escape_json(axiom)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("\"{}\": [{}]", escape_json(theorem), values)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn escape_json(value: &str) -> String {
