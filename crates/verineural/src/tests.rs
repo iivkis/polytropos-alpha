@@ -1751,8 +1751,7 @@ fn p1_symbolic_dimensions_fail_closed_on_axes_bounds_and_unbound_results() {
         })
     ));
     let mut illegal_constraint = ParametricMatMul::new();
-    illegal_constraint.signature.constraints =
-        vec![DimensionConstraint::MultipleOf("width", 0)];
+    illegal_constraint.signature.constraints = vec![DimensionConstraint::MultipleOf("width", 0)];
     assert!(matches!(
         graph.apply_parametric_module(&illegal_constraint, &[a, valid]),
         Err(NeuralError::ContractViolation {
@@ -1761,8 +1760,7 @@ fn p1_symbolic_dimensions_fail_closed_on_axes_bounds_and_unbound_results() {
         })
     ));
     let mut unknown_constraint = ParametricMatMul::new();
-    unknown_constraint.signature.constraints =
-        vec![DimensionConstraint::AtLeast("unknown", 1)];
+    unknown_constraint.signature.constraints = vec![DimensionConstraint::AtLeast("unknown", 1)];
     assert!(matches!(
         graph.apply_parametric_module(&unknown_constraint, &[a, valid]),
         Err(NeuralError::ContractViolation {
@@ -1779,14 +1777,16 @@ fn p1_symbolic_specialization_rolls_back_wrong_output_and_preserves_provenance()
         signature: ParametricSignature,
     }
     impl ParametricModule for WrongOutput {
-        fn name(&self) -> &'static str { "wrong_symbolic_output" }
-        fn semantic_version(&self) -> &'static str { "v1" }
-        fn signature(&self) -> &ParametricSignature { &self.signature }
-        fn build(
-            &self,
-            graph: &mut NeuralGraph,
-            inputs: &[NodeId],
-        ) -> Result<NodeId, NeuralError> {
+        fn name(&self) -> &'static str {
+            "wrong_symbolic_output"
+        }
+        fn semantic_version(&self) -> &'static str {
+            "v1"
+        }
+        fn signature(&self) -> &ParametricSignature {
+            &self.signature
+        }
+        fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
             graph.reshape(inputs[0], shape(&[6]))
         }
     }

@@ -79,7 +79,9 @@ fn valid_symbol(name: &str) -> bool {
         return false;
     };
     first.is_ascii_alphabetic()
-        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 fn violation(module: &'static str, detail: &'static str) -> NeuralError {
@@ -138,7 +140,10 @@ impl ParametricSignature {
                 return Err(violation(owner, "constraint uses unbound dimension symbol"));
             };
             if limit == 0 {
-                return Err(violation(owner, "dimension constraint requires positive bound"));
+                return Err(violation(
+                    owner,
+                    "dimension constraint requires positive bound",
+                ));
             }
             let satisfied = match *constraint {
                 DimensionConstraint::AtLeast(..) => actual >= limit,
@@ -150,24 +155,33 @@ impl ParametricSignature {
             }
         }
 
-        let output_dims = self.output.shape.dims.iter().map(|dim| match dim {
-            Dimension::Fixed(0) => Err(violation(owner, "zero symbolic constant dimension")),
-            Dimension::Fixed(size) => Ok(*size),
-            Dimension::Symbol(symbol) => {
-                if !valid_symbol(symbol) {
-                    return Err(violation(owner, "invalid dimension symbol name"));
+        let output_dims = self
+            .output
+            .shape
+            .dims
+            .iter()
+            .map(|dim| match dim {
+                Dimension::Fixed(0) => Err(violation(owner, "zero symbolic constant dimension")),
+                Dimension::Fixed(size) => Ok(*size),
+                Dimension::Symbol(symbol) => {
+                    if !valid_symbol(symbol) {
+                        return Err(violation(owner, "invalid dimension symbol name"));
+                    }
+                    bindings
+                        .get(symbol)
+                        .copied()
+                        .ok_or_else(|| violation(owner, "output uses unbound dimension symbol"))
                 }
-                bindings.get(symbol).copied()
-                    .ok_or_else(|| violation(owner, "output uses unbound dimension symbol"))
-            }
-        }).collect::<Result<Vec<_>, _>>()?;
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let output = Shape::new(output_dims)?;
-        let requires = actual_inputs.iter().zip(&self.inputs)
+        let requires = actual_inputs
+            .iter()
+            .zip(&self.inputs)
             .map(|(actual, declared)| PortContract::new(actual.clone(), declared.domain))
             .collect::<Vec<_>>();
-        let mut contract = MathContract::new(
-            requires, PortContract::new(output, self.output.domain),
-        );
+        let mut contract =
+            MathContract::new(requires, PortContract::new(output, self.output.domain));
         contract.claims.clone_from(&self.claims);
         Ok((contract, DimensionBindings { values: bindings }))
     }
@@ -211,9 +225,10 @@ impl NeuralGraph {
         module: &M,
         inputs: &[NodeId],
     ) -> Result<(NodeId, DimensionBindings), NeuralError> {
-        let shapes = inputs.iter().map(|&input| {
-            Ok(self.node(input)?.shape.clone())
-        }).collect::<Result<Vec<_>, NeuralError>>()?;
+        let shapes = inputs
+            .iter()
+            .map(|&input| Ok(self.node(input)?.shape.clone()))
+            .collect::<Result<Vec<_>, NeuralError>>()?;
         let (contract, bindings) = module.signature().specialize(module.name(), &shapes)?;
         let bounded = BoundModule { module, contract };
         let output = self.apply_module(&bounded, inputs)?;

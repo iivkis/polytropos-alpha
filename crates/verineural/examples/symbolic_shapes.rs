@@ -4,9 +4,8 @@
 use std::path::Path;
 
 use verineural::{
-    ContractClaim, Dimension, DimensionConstraint, Domain, GpuEngine, LeanProofEngine,
-    NeuralError, NeuralGraph, NodeId, ParametricModule,
-    ParametricSignature, Shape, SymbolicPort, SymbolicShape,
+    ContractClaim, Dimension, DimensionConstraint, Domain, GpuEngine, LeanProofEngine, NeuralError,
+    NeuralGraph, NodeId, ParametricModule, ParametricSignature, Shape, SymbolicPort, SymbolicShape,
 };
 
 struct GenericMatMul {
@@ -53,7 +52,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let a = graph.input(Shape::new(vec![m, k])?, Domain::NonNegativeFinite);
         let b = graph.input(Shape::new(vec![k, n])?, Domain::NonNegativeFinite);
         let (output, bindings) = graph.apply_parametric_module(&matmul, &[a, b])?;
-        println!("specialized {bindings:?} -> {:?}", graph.node(output)?.shape.dims());
+        println!(
+            "specialized {bindings:?} -> {:?}",
+            graph.node(output)?.shape.dims()
+        );
         outputs.push(output);
     }
 
@@ -63,8 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (checked, audit) = checker.verify_certified(&proof, &root.join("symbols.lean"))?;
     println!(
         "Lean checked {} obligations with axiom policy {:?}",
-        checked.theorem_names.len(), audit.axiom_dependencies.values()
-            .flatten().collect::<std::collections::BTreeSet<_>>()
+        checked.theorem_names.len(),
+        audit
+            .axiom_dependencies
+            .values()
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>()
     );
 
     let gpu = GpuEngine::default();
