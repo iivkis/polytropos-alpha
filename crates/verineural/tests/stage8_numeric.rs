@@ -914,10 +914,11 @@ fn stage8_module_boundary_rejects_undeclared_capture_before_numeric_proof() {
         .apply_module(&declared_module, &[declared, captured])
         .unwrap();
     let plan = RneRangePlan::compile(&graph, output, 10, 16).unwrap();
-    assert!(plan
-        .lean_source()
-        .unwrap()
-        .contains("theorem module_0_global_contract"));
+    assert!(
+        plan.lean_source()
+            .unwrap()
+            .contains("theorem module_0_global_contract")
+    );
 }
 
 #[test]
