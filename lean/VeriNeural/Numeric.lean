@@ -321,6 +321,7 @@ The LLVM/PTX/GPU implementation remains outside this proof boundary.
 
 theorem within_natAbs_le {bound value : Int} (h : Within bound value) :
     Int.ofNat value.natAbs ≤ bound := by
+  rw [Int.ofNat_eq_natCast]
   rcases h with ⟨hlower, hupper⟩
   by_cases hnonneg : 0 ≤ value
   · have habs : (value.natAbs : Int) = value :=
@@ -365,10 +366,7 @@ theorem binary32_rne_shift_le_of_bound
           8388608 * binary32Step (maxShift + 1) ≤
             8388608 * binary32Step shift :=
         Int.mul_le_mul_of_nonneg_left hstep (by decide)
-      have hcontradiction :
-          bound < Int.ofNat exact.natAbs :=
-        lt_of_lt_of_le hlimit (le_trans hscaled hlower)
-      exact False.elim ((not_lt_of_ge hmag) hcontradiction)
+      omega
 
 theorem binary32_rne_within_maxStep
     {exact rounded bound : Int} {shift maxShift : Nat}
