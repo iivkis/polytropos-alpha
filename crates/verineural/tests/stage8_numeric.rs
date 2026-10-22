@@ -1,10 +1,6 @@
 use verineural::{Domain, ExactFp32Plan, NeuralGraph, NumericError, Shape, Tensor};
 
-fn plan() -> (
-    NeuralGraph,
-    verineural::NodeId,
-    [verineural::NodeId; 3],
-) {
+fn plan() -> (NeuralGraph, verineural::NodeId, [verineural::NodeId; 3]) {
     let mut graph = NeuralGraph::default();
     let shape = Shape::new(vec![2, 3]).unwrap();
     let x = graph.input(shape.clone(), Domain::Finite);
@@ -39,11 +35,7 @@ fn inputs(ids: [verineural::NodeId; 3]) -> [(verineural::NodeId, Tensor<f32>); 3
         ),
         (
             ids[2],
-            Tensor::new(
-                Shape::new(vec![3]).unwrap(),
-                vec![1.0, -5.0, 2.0],
-            )
-            .unwrap(),
+            Tensor::new(Shape::new(vec![3]).unwrap(), vec![1.0, -5.0, 2.0]).unwrap(),
         ),
     ]
 }

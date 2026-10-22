@@ -10,8 +10,8 @@ use std::path::Path;
 use std::process::Command;
 
 use verineural::{
-    Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, NeuralGraph,
-    ReluFusion, Shape, Tensor,
+    Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, NeuralGraph, ReluFusion,
+    Shape, Tensor,
 };
 
 const FILES: [&str; 7] = [
@@ -102,8 +102,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let baseline =
         GpuEngine::default().with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Disabled)?);
-    let fused =
-        GpuEngine::default().with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Experimental)?);
+    let fused = GpuEngine::default()
+        .with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Experimental)?);
     for (label, engine) in [("baseline", &baseline), ("fused", &fused)] {
         let gpu_plan = engine.compile(&graph, output)?;
         if label == "fused" && gpu_plan.removed_kernel_count() != 2 {
@@ -162,7 +162,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         ExactFp32Plan::input_bound(),
         plan.output_bound()
     );
-    println!("Manifest SHA256 (pin externally): {}", sha256(&root.join("SHA256SUMS"))?);
+    println!(
+        "Manifest SHA256 (pin externally): {}",
+        sha256(&root.join("SHA256SUMS"))?
+    );
     println!(
         "Lean proves composed ideal Int bounds; IEEE RNE, LLVM/PTX and hardware remain trusted"
     );

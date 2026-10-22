@@ -12,9 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use crate::{
-    LeanProofEngine, NeuralError, NeuralGraph, NodeId, Operation, ProofError, Tensor,
-};
+use crate::{LeanProofEngine, NeuralError, NeuralGraph, NodeId, Operation, ProofError, Tensor};
 
 const EXACT_F32_INTEGER_LIMIT: i64 = 1 << 24;
 const SOURCE_INTEGER_LIMIT: i64 = 1 << 20;
@@ -24,10 +22,21 @@ const NUMERIC_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Numeric.lea
 pub enum NumericError {
     Graph(NeuralError),
     Proof(ProofError),
-    UnsupportedOperation { node: usize, operation: &'static str },
-    UnsupportedRange { node: usize, bound: i64 },
-    InvalidInput { node: usize, reason: &'static str },
-    MissingInput { node: usize },
+    UnsupportedOperation {
+        node: usize,
+        operation: &'static str,
+    },
+    UnsupportedRange {
+        node: usize,
+        bound: i64,
+    },
+    InvalidInput {
+        node: usize,
+        reason: &'static str,
+    },
+    MissingInput {
+        node: usize,
+    },
     OutputBits {
         index: usize,
         expected: u32,
@@ -41,7 +50,10 @@ impl fmt::Display for NumericError {
             Self::Graph(err) => write!(f, "invalid neural graph: {err}"),
             Self::Proof(err) => write!(f, "numerical Lean model: {err}"),
             Self::UnsupportedOperation { node, operation } => {
-                write!(f, "exact-integer FP32 subset rejects {operation} at node {node}")
+                write!(
+                    f,
+                    "exact-integer FP32 subset rejects {operation} at node {node}"
+                )
             }
             Self::UnsupportedRange { node, bound } => write!(
                 f,
@@ -278,9 +290,7 @@ impl ExactFp32Plan {
         let mut given = BTreeMap::new();
         for (id, tensor) in values {
             let node = self.graph.node(*id)?;
-            if !matches!(node.operation, Operation::Input)
-                || !self.inputs.contains(id)
-            {
+            if !matches!(node.operation, Operation::Input) || !self.inputs.contains(id) {
                 return Err(NumericError::InvalidInput {
                     node: id.index(),
                     reason: "input is outside this numeric output slice",
@@ -357,12 +367,12 @@ impl ExactFp32Plan {
                 _ => unreachable!("checked in compile"),
             };
             debug_assert_eq!(output.len(), node.shape.element_count());
-            debug_assert!(
-                output.iter().all(|x| x.abs() <= self.bounds[&index])
-            );
+            debug_assert!(output.iter().all(|x| x.abs() <= self.bounds[&index]));
             values.insert(index, output);
         }
-        let out = values.remove(&self.output.index()).expect("reachable output");
+        let out = values
+            .remove(&self.output.index())
+            .expect("reachable output");
         let shape = self.graph.node(self.output)?.shape.clone();
         let floats = out.into_iter().map(|i| i as f32).collect();
         Ok(Tensor::new(shape, floats)?)
@@ -380,12 +390,7 @@ impl ExactFp32Plan {
                 reason: "GPU output shape differs from exact-integer reference",
             });
         }
-        for (index, (&target, &actual)) in expected
-            .values()
-            .iter()
-            .zip(gpu.values())
-            .enumerate()
-        {
+        for (index, (&target, &actual)) in expected.values().iter().zip(gpu.values()).enumerate() {
             if target.to_bits() != actual.to_bits() {
                 return Err(NumericError::OutputBits {
                     index,
