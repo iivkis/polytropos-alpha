@@ -1073,12 +1073,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Nonnegative ideal-Int MatMul reduction followed by row-major BiasAdd
     // broadcast, with explicit input, matrix-weight and bias assumptions.
     let mut property_matmul_graph = NeuralGraph::default();
-    let property_matmul_x =
-        property_matmul_graph.input(Shape::new(vec![2, 3])?, Domain::Finite);
-    let property_matmul_w =
-        property_matmul_graph.input(Shape::new(vec![3, 2])?, Domain::Finite);
-    let property_matmul_b =
-        property_matmul_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let property_matmul_x = property_matmul_graph.input(Shape::new(vec![2, 3])?, Domain::Finite);
+    let property_matmul_w = property_matmul_graph.input(Shape::new(vec![3, 2])?, Domain::Finite);
+    let property_matmul_b = property_matmul_graph.input(Shape::new(vec![2])?, Domain::Finite);
     let property_matmul_product = property_matmul_graph.apply_module(
         &GlobalNonnegativeMatMul::new()?,
         &[property_matmul_x, property_matmul_w],
@@ -1093,10 +1090,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         &[property_matmul_x, property_matmul_w, property_matmul_b],
     )?;
     let property_matmul_source = property_matmul_program.source();
-    if !property_matmul_source
-        .contains("VeriNeural.matmul_nonnegative (m := 2) (k := 3) (n := 2)")
-        || !property_matmul_source
-            .contains("VeriNeural.biasAdd_nonnegative (m := 2) (n := 2)")
+    if !property_matmul_source.contains("VeriNeural.matmul_nonnegative (m := 2) (k := 3) (n := 2)")
+        || !property_matmul_source.contains("VeriNeural.biasAdd_nonnegative (m := 2) (n := 2)")
         || !property_matmul_source.contains("have arch_module_0 := module_0_global_nonnegative")
         || !property_matmul_source.contains("have arch_module_1 := module_1_global_nonnegative")
     {
