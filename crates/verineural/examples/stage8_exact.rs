@@ -708,8 +708,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let deep_output = deep_graph.apply_module(
         &deep_module,
         &[
-            deep_x, deep_w1a, deep_b1a, deep_w2a, deep_b2a, deep_w1b, deep_b1b, deep_w2b,
-            deep_b2b,
+            deep_x, deep_w1a, deep_b1a, deep_w2a, deep_b2a, deep_w1b, deep_b1b, deep_w2b, deep_b2b,
         ],
     )?;
     let deep_plan = RneRangePlan::compile(&deep_graph, deep_output, 10, 16)?;
