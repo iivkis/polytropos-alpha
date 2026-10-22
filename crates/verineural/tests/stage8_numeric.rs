@@ -304,6 +304,8 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
     assert!(after_rne.contains("dag_plan.lean_source()?"));
     assert!(after_rne.contains("numeric_nested.lean"));
     assert!(after_rne.contains("nested_plan.lean_source()?"));
+    assert!(after_rne.contains("numeric_nested_deep.lean"));
+    assert!(after_rne.contains("deep_plan.lean_source()?"));
 }
 
 #[test]
@@ -751,6 +753,92 @@ fn stage8_whole_module_theorem_composes_direct_nested_module_theorems() {
     assert!(outer.contains("have nested_module_0 := module_0_global_contract"));
     assert!(outer.contains("have nested_module_1 := module_1_global_contract"));
     assert!(!outer.contains("exact node_9_range_rule"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+struct DeepNestedWrapper {
+    contract: MathContract,
+}
+
+impl DeepNestedWrapper {
+    fn new() -> Self {
+        Self {
+            contract: NestedResidualPair::new().contract.clone(),
+        }
+    }
+}
+
+impl NeuralModule for DeepNestedWrapper {
+    fn name(&self) -> &'static str {
+        "deep_nested_wrapper"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        let pair = NestedResidualPair::new();
+        graph.apply_module(&pair, inputs)
+    }
+}
+
+#[test]
+fn stage8_whole_module_theorem_reuses_nested_theorems_recursively() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![1, 2]).unwrap(), Domain::Finite);
+    let w1a = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2a = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w1b = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2b = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let wrapper = DeepNestedWrapper::new();
+    let output = graph
+        .apply_module(&wrapper, &[x, w1a, b1a, w2a, b2a, w1b, b1b, w2b, b2b])
+        .unwrap();
+
+    assert_eq!(graph.modules().len(), 4);
+    assert_eq!(graph.modules()[0].name, "residual_ffn");
+    assert_eq!(graph.modules()[1].name, "residual_ffn");
+    assert_eq!(graph.modules()[2].name, "nested_residual_pair");
+    assert_eq!(graph.modules()[3].name, "deep_nested_wrapper");
+
+    let plan = RneRangePlan::compile(&graph, output, 10, 16).unwrap();
+    let contract = plan.output_contract();
+    assert_eq!(contract.fraction_bits(), 50);
+    assert_eq!(contract.ideal_bound_ticks(), 53_928_163_016_704);
+    assert_eq!(contract.epsilon_ticks(), 184_963_072);
+
+    let source = plan.lean_source().unwrap();
+    assert!(source.contains("theorem module_2_global_contract"));
+    assert!(source.contains("theorem module_3_global_contract"));
+    let pair = source
+        .split("theorem module_2_global_contract")
+        .nth(1)
+        .unwrap()
+        .split("theorem module_3_global_contract")
+        .next()
+        .unwrap();
+    assert!(pair.contains("have nested_module_0 := module_0_global_contract"));
+    assert!(pair.contains("have nested_module_1 := module_1_global_contract"));
+
+    let outer = source
+        .split("theorem module_3_global_contract")
+        .nth(1)
+        .unwrap();
+    assert!(outer.contains("have nested_module_2 := module_2_global_contract"));
+    assert!(!outer.contains("have nested_module_0 := module_0_global_contract"));
+    assert!(!outer.contains("have nested_module_1 := module_1_global_contract"));
+    assert!(!outer.contains("exact node_9_range_rule"));
+    assert!(!source.contains("theorem architecture_global_contract"));
     assert!(!source.contains("sorry"));
     assert!(!source.contains("admit"));
 }

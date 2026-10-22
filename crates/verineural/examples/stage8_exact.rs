@@ -15,7 +15,7 @@ use verineural::{
     RneRangePlan, Shape, Tensor,
 };
 
-const FILES: [&str; 38] = [
+const FILES: [&str; 40] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -54,6 +54,8 @@ const FILES: [&str; 38] = [
     "architecture_dag_contract.txt",
     "numeric_nested.lean",
     "nested_contract.txt",
+    "numeric_nested_deep.lean",
+    "nested_deep_contract.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -95,6 +97,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_architecture.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_architecture_dag.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_nested.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_nested_deep.lean"))?;
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
         "Scope: ideal integer ranges, concrete dyadic RNE traces, and reusable bounded RNE/module contracts; not machine FP32 certification"
@@ -115,7 +118,7 @@ struct NestedResidualPair {
 }
 
 impl NestedResidualPair {
-    fn new() -> Result<Self, Box<dyn Error>> {
+    fn new() -> Result<Self, verineural::NeuralError> {
         let x = Shape::new(vec![1, 2])?;
         let matrix = Shape::new(vec![2, 2])?;
         let bias = Shape::new(vec![2])?;
@@ -162,6 +165,37 @@ impl NeuralModule for NestedResidualPair {
             &block,
             &[hidden, inputs[5], inputs[6], inputs[7], inputs[8]],
         )
+    }
+}
+
+struct DeepNestedWrapper {
+    contract: MathContract,
+}
+
+impl DeepNestedWrapper {
+    fn new() -> Result<Self, verineural::NeuralError> {
+        Ok(Self {
+            contract: NestedResidualPair::new()?.contract.clone(),
+        })
+    }
+}
+
+impl NeuralModule for DeepNestedWrapper {
+    fn name(&self) -> &'static str {
+        "deep_nested_wrapper"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        let pair = NestedResidualPair::new()?;
+        graph.apply_module(&pair, inputs)
     }
 }
 
@@ -657,6 +691,72 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Recursive hierarchy: a wrapper contains NestedResidualPair, which itself
+    // contains two ResidualFfn modules. The outer theorem must consume only the
+    // direct child theorem; the child theorem recursively consumes its own children.
+    let mut deep_graph = NeuralGraph::default();
+    let deep_x = deep_graph.input(Shape::new(vec![1, 2])?, Domain::Finite);
+    let deep_w1a = deep_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let deep_b1a = deep_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let deep_w2a = deep_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let deep_b2a = deep_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let deep_w1b = deep_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let deep_b1b = deep_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let deep_w2b = deep_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let deep_b2b = deep_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let deep_module = DeepNestedWrapper::new()?;
+    let deep_output = deep_graph.apply_module(
+        &deep_module,
+        &[
+            deep_x, deep_w1a, deep_b1a, deep_w2a, deep_b2a, deep_w1b, deep_b1b, deep_w2b,
+            deep_b2b,
+        ],
+    )?;
+    let deep_plan = RneRangePlan::compile(&deep_graph, deep_output, 10, 16)?;
+    let deep_contract = deep_plan.output_contract();
+    if deep_contract.fraction_bits() != 50
+        || deep_contract.ideal_bound_ticks() != 53_928_163_016_704
+        || deep_contract.epsilon_ticks() != 184_963_072
+    {
+        return Err(io::Error::other("unexpected Stage 8 deep nested contract").into());
+    }
+    let deep_source = deep_plan.lean_source()?;
+    let pair_section = deep_source
+        .split("theorem module_2_global_contract")
+        .nth(1)
+        .and_then(|rest| rest.split("theorem module_3_global_contract").next())
+        .ok_or_else(|| io::Error::other("missing Stage 8 nested pair theorem section"))?;
+    let outer_section = deep_source
+        .split("theorem module_3_global_contract")
+        .nth(1)
+        .ok_or_else(|| io::Error::other("missing Stage 8 deep wrapper theorem"))?;
+    if !pair_section.contains("have nested_module_0 := module_0_global_contract")
+        || !pair_section.contains("have nested_module_1 := module_1_global_contract")
+        || !outer_section.contains("have nested_module_2 := module_2_global_contract")
+        || outer_section.contains("have nested_module_0 := module_0_global_contract")
+        || outer_section.contains("have nested_module_1 := module_1_global_contract")
+    {
+        return Err(io::Error::other("missing recursive Stage 8 nested theorem reuse").into());
+    }
+    write_checked_lean(&root.join("numeric_nested_deep.lean"), &deep_source)?;
+    fs::write(
+        root.join("nested_deep_contract.txt"),
+        format!(
+            "outer_module=deep_nested_wrapper\ndirect_child_modules=1\nrecursive_depth=3\n\
+             theorem=module_3_global_contract\nsource_fraction_bits={}\n\
+             source_bound_ticks={}\noutput_fraction_bits={}\n\
+             ideal_bound_ticks={}\nepsilon_ticks={}\nactual_bound_ticks={}\n\
+             epsilon={:.12e}\n",
+            deep_plan.source_fraction_bits(),
+            deep_plan.source_bound_ticks(),
+            deep_contract.fraction_bits(),
+            deep_contract.ideal_bound_ticks(),
+            deep_contract.epsilon_ticks(),
+            deep_contract.actual_bound_ticks(),
+            deep_contract.epsilon(),
+        ),
+    )?;
+
     let input_snapshot = inputs
         .iter()
         .map(|(id, tensor)| {
@@ -748,11 +848,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         nested_contract.epsilon_ticks()
     );
     println!(
+        "Stage 8 deep nested hierarchy: recursive_depth=3, q_out={}, ideal_bound={}, epsilon={} ticks",
+        deep_contract.fraction_bits(),
+        deep_contract.ideal_bound_ticks(),
+        deep_contract.epsilon_ticks()
+    );
+    println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, and nested-module theorem reuse; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, and recursive nested-module theorem reuse through depth 3; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }
