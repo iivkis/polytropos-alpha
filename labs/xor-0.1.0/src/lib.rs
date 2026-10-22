@@ -177,7 +177,7 @@ pub fn build() -> Result<Lab, Box<dyn Error>> {
             (inputs[3].index(), "parameter".into()),
             (inputs[4].index(), "parameter".into()),
         ]),
-        global_property: "xor_output_nonnegative".into(),
+        global_property: "architecture_global_nonnegative".into(),
     };
     Ok(Lab {
         graph,
@@ -278,6 +278,26 @@ mod tests {
             .source()
             .contains("theorem architecture_property_xor_output_nonnegative"));
         assert!(!plan.architecture.theorem_names().is_empty());
+        // DOT's exported global-property identity must match a real Lean
+        // architecture theorem, not merely the consumer's goal nickname.
+        let gpu = verineural::GpuEngine::default()
+            .compile(&lab.graph, lab.output)
+            .unwrap();
+        let snapshot =
+            verineural::snapshot_architecture(&lab.graph, lab.output, &gpu, &lab.metadata)
+                .unwrap();
+        assert!(snapshot
+            .dot
+            .contains("vn_global_property=\\\"architecture_global_nonnegative\\\""));
+        let mut invalid_meta = lab.metadata.clone();
+        invalid_meta.global_property = "xor_output_nonnegative".into();
+        assert!(verineural::snapshot_architecture(
+            &lab.graph,
+            lab.output,
+            &gpu,
+            &invalid_meta
+        )
+        .is_err());
         assert!(LeanProofEngine::default()
             .generate_global_nonnegative(&lab.graph, lab.output, &[])
             .unwrap()

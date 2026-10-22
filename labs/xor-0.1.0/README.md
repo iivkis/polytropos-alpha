@@ -24,14 +24,16 @@ integers exactly representable in binary32.
 The CPU-only tests check composition, static proof/GPU plan generation and
 rejection of malformed shape and nonfinite parameters. The run command
 uses VeriNeural's auto compiler to generate a Lean architecture proof and
-independent nonnegativity goal, audit axioms, lower to LLVM NVPTX/PTX, then
+independent nonnegativity goal, check the canonical
+architecture_global_nonnegative theorem, audit axioms, lower to LLVM NVPTX/PTX, then
 execute the same graph using NVIDIA CUDA Graph and compare all four FP32
 outputs bitwise with an independent Boolean XOR oracle. It also exports
 the Semantic IR plus the DOT and PNG diagram.
 
 Artifacts are generated under target/verineural/xor-lab. The offline verify
 command checks the persisted IR/diagram, Lean/axiom and NVPTX translation
-bundle, explicit input/parameter/output bits and the SHA-256 manifests.
+bundle, the separately generated architecture.lean theorem, explicit
+input/parameter/output bits and the SHA-256 manifests.
 It does not execute CUDA again. Pin the printed manifest hash separately
 if provenance across machines matters.
 

@@ -8,12 +8,13 @@ use std::io;
 use std::path::Path;
 use std::process::Command;
 use verineural::{
-    ArchitectureAutoCompiler, GpuEngine, GpuRequirement, snapshot_architecture,
+    ArchitectureAutoCompiler, GpuEngine, GpuRequirement, LeanProofEngine, snapshot_architecture,
 };
 use xor_lab::{Lab, build, CASES};
 
-const EVIDENCE: [&str; 9] = [
+const EVIDENCE: [&str; 10] = [
     "architecture.identity",
+    "architecture.lean",
     "semantic.ir",
     "architecture.dot",
     "architecture.png",
@@ -59,8 +60,9 @@ fn expected_bits() -> String {
 fn report(ir_sha256: &str) -> String {
     format!(
         "architecture=xor-mlp\nversion=0.1.0\nsemantic_ir_sha256={ir_sha256}\n\
+         global_property=architecture_global_nonnegative\n\
          goal=xor_output_nonnegative\n\
-         lean=ideal-Int-nonnegative-kernel-checked-under-declared-assumptions\n\
+         lean=two-ideal-Int-nonnegative-kernel-checked-theorems\n\
          xor_truth_table=4-of-4-bitwise-gpu-tested\n\
          fp32=concrete-small-integers-only\n\
          translation=llvm-ptx-structurally-validated\n\
@@ -78,6 +80,11 @@ fn run(verify: bool) -> Result<(), Box<dyn Error>> {
     let engine = GpuEngine::default();
     let program = engine.compile(&lab.graph, lab.output)?;
     let snapshot = snapshot_architecture(&lab.graph, lab.output, &program, &lab.metadata)?;
+    // This exact global theorem is what ArchitectureMetadata advertises.
+    // The auto compiler separately verifies the consumer's named goal.
+    let global_proof = LeanProofEngine::default()
+        .generate_global_nonnegative(&lab.graph, lab.output, &[])?;
+    let lean = LeanProofEngine::default();
     if verify {
         compiler.verify_bundle(
             &lab.graph,
@@ -88,6 +95,12 @@ fn run(verify: bool) -> Result<(), Box<dyn Error>> {
             None,
         )?;
         snapshot.verify(root)?;
+        let saved_global = root.join("architecture.lean");
+        if fs::read_to_string(&saved_global)? != global_proof.source() {
+            return Err(invalid("global Lean theorem differs from current Rust graph").into());
+        }
+        lean.check_file(&saved_global)?;
+        lean.audit_file(&saved_global, global_proof.theorem_names())?;
         if fs::read_to_string(root.join("architecture.identity"))?
             != "id=xor-mlp\nversion=0.1.0\n"
             || fs::read_to_string(root.join("inputs.bits"))? != lab.input_bits()
@@ -121,6 +134,7 @@ fn run(verify: bool) -> Result<(), Box<dyn Error>> {
         GpuRequirement::AllOutputs,
         root,
     )?;
+    lean.verify_certified(&global_proof, &root.join("architecture.lean"))?;
     snapshot.write(root)?;
     fs::write(root.join("architecture.identity"), "id=xor-mlp\nversion=0.1.0\n")?;
     fs::write(root.join("inputs.bits"), lab.input_bits())?;
