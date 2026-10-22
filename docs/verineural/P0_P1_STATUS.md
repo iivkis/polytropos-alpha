@@ -8,7 +8,7 @@ Implemented API slices:
 - **P04**: module bodies cannot capture undeclared external nodes, return an output they do not own, or introduce hidden inputs. Nested module bindings and rollback are checked.
 - **P05**: `ProofGoal` supports independently named nonnegativity and equality goals with separate checks. Global nonnegativity still uses the existing restricted module-composition proof.
 - **P06**: `verify_certified` reruns Lean `#print axioms`, checks the exact theorem identities, and records every transitive axiom dependency. Only foundational `propext` is allowlisted as explicit Lean TCB; `sorryAx`, user axioms, `Classical.choice` and unreviewed axioms fail closed. Stage 5 issue/replay compare the saved checker version, axiom policy and actual dependencies. Other evidence paths still need integration.
-- **P07**: atomic named multi-output module boundary with per-port contracts, provenance and claim obligations. Global theorem composition across multi-output module boundaries is not implemented.
+- **P07**: atomic named multi-output module boundary, stable `output_named` lookup, and `LeanProofEngine::generate_outputs` generating one ideal-Int Lean artifact for multiple chosen outputs (including fork/fan-in consumers). Each reachable named input/output port has explicit shape obligations; supported output domain and user claims generate separate theorems. Unsupported input claims are rejected at construction instead of silently ignored. This is *not* yet universal global theorem composition across multi-output boundaries.
 
 Open requirements:
 - **P02/P08/P10**: genuinely new atomic tensor primitives, reductions, indexing, comparison, symbolic dimensions, generic dtypes, views/strides, and complete GPU/Lean lowering.

@@ -376,6 +376,19 @@ pub struct MultiModuleInvocation {
     pub contract: MultiOutputContract,
 }
 
+impl MultiModuleInvocation {
+    /// Resolve an output by its declared stable port name, rather than relying
+    /// on the caller to remember a positional result index.
+    pub fn output_named(&self, name: &str) -> Option<NodeId> {
+        self.contract
+            .outputs
+            .iter()
+            .zip(&self.outputs)
+            .find(|(port, _)| port.name == name)
+            .map(|(_, &output)| output)
+    }
+}
+
 /// Append-only Semantic Neural IR with graph-scoped edges and checked contracts.
 #[derive(Clone, Debug)]
 pub struct NeuralGraph {
@@ -679,6 +692,15 @@ impl NeuralGraph {
                     });
                 }
             }
+        }
+        // Input-port claims cannot be silently treated as proved output
+        // properties. Until predicate-valued preconditions are supported,
+        // callers may constrain inputs only via the checked shape/domain port.
+        if contract.inputs.iter().any(|port| !port.claims.is_empty()) {
+            return Err(NeuralError::ContractViolation {
+                module: module.name(),
+                detail: "input port claims are unsupported",
+            });
         }
         for (&input, port) in inputs.iter().zip(&contract.inputs) {
             let node = self.node(input)?;

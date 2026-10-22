@@ -1228,3 +1228,144 @@ fn p1_multi_output_rejects_hidden_capture_and_reuses_port_namespaces() {
     assert_eq!(graph.nodes().len(), 2);
     assert!(graph.multi_modules().is_empty());
 }
+
+#[test]
+fn p1_multi_output_single_lean_artifact_checks_named_ports_and_downstream() {
+    struct Transition {
+        contract: MultiOutputContract,
+    }
+    impl MultiOutputModule for Transition {
+        fn name(&self) -> &'static str {
+            "consumer_transition"
+        }
+        fn contract(&self) -> &MultiOutputContract {
+            &self.contract
+        }
+        fn build(
+            &self,
+            graph: &mut NeuralGraph,
+            inputs: &[NodeId],
+        ) -> Result<Vec<NodeId>, NeuralError> {
+            Ok(vec![
+                graph.relu(inputs[0])?,
+                graph.reshape(inputs[0], shape(&[2]))?,
+            ])
+        }
+    }
+
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let state = NamedPortContract {
+        name: "next_state",
+        port: port(&[2], Domain::NonNegativeFinite),
+        claims: vec![ContractClaim::Nonnegative],
+    };
+    let readout = NamedPortContract {
+        name: "readout",
+        port: port(&[2], Domain::NonNegativeFinite),
+        claims: vec![ContractClaim::EqualsInput(0)],
+    };
+    let transition = Transition {
+        contract: MultiOutputContract {
+            inputs: vec![NamedPortContract::new(
+                "state",
+                port(&[2], Domain::NonNegativeFinite),
+            )],
+            outputs: vec![state, readout],
+        },
+    };
+    let outputs = graph.apply_multi_module(&transition, &[x]).unwrap();
+    let instance = &graph.multi_modules()[0];
+    assert_eq!(instance.output_named("next_state"), Some(outputs[0]));
+    assert_eq!(instance.output_named("readout"), Some(outputs[1]));
+    assert_eq!(instance.output_named("unknown"), None);
+
+    // Both outputs are independently usable in a larger consumer DAG.
+    let combined = graph.add(outputs[0], outputs[1]).unwrap();
+    let program = LeanProofEngine::default()
+        .generate_outputs(&graph, &[outputs[0], outputs[1], combined])
+        .unwrap();
+    for theorem in [
+        "multi_0_input_0_shape",
+        "multi_0_input_0_nonnegative",
+        "multi_0_port_0_shape",
+        "multi_0_port_0_nonnegative",
+        "multi_0_port_0_claim_0",
+        "multi_0_port_1_shape",
+        "multi_0_port_1_nonnegative",
+        "multi_0_port_1_claim_0",
+        "node_3_semantics",
+    ] {
+        assert!(program.theorem_names().iter().any(|name| name == theorem), "{theorem}");
+    }
+    assert!(program.source().contains("(node_2 x_0) = (node_0 x_0)"));
+    assert_eq!(
+        program.theorem_names().len(),
+        program.theorem_names().iter().collect::<std::collections::BTreeSet<_>>().len(),
+    );
+}
+
+#[test]
+fn p1_multi_output_proof_rejects_empty_duplicate_foreign_and_unchecked_input_claims() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let other_graph = NeuralGraph::default();
+    let foreign = {
+        let mut other_graph = other_graph;
+        other_graph.input(shape(&[2]), Domain::NonNegativeFinite)
+    };
+    let proof = LeanProofEngine::default();
+    assert!(matches!(
+        proof.generate_outputs(&graph, &[]),
+        Err(ProofError::InvalidOutputs)
+    ));
+    assert!(matches!(
+        proof.generate_outputs(&graph, &[x, x]),
+        Err(ProofError::InvalidOutputs)
+    ));
+    assert!(matches!(
+        proof.generate_outputs(&graph, &[x, foreign]),
+        Err(ProofError::InvalidGraph(NeuralError::InvalidNode))
+    ));
+
+    struct ClaimedInput {
+        contract: MultiOutputContract,
+    }
+    impl MultiOutputModule for ClaimedInput {
+        fn name(&self) -> &'static str {
+            "unverified_input_predicate"
+        }
+        fn contract(&self) -> &MultiOutputContract {
+            &self.contract
+        }
+        fn build(
+            &self,
+            graph: &mut NeuralGraph,
+            inputs: &[NodeId],
+        ) -> Result<Vec<NodeId>, NeuralError> {
+            Ok(vec![graph.relu(inputs[0])?])
+        }
+    }
+    let module = ClaimedInput {
+        contract: MultiOutputContract {
+            inputs: vec![NamedPortContract {
+                name: "x",
+                port: port(&[2], Domain::NonNegativeFinite),
+                claims: vec![ContractClaim::Nonnegative],
+            }],
+            outputs: vec![NamedPortContract::new(
+                "result",
+                port(&[2], Domain::NonNegativeFinite),
+            )],
+        },
+    };
+    assert!(matches!(
+        graph.apply_multi_module(&module, &[x]),
+        Err(NeuralError::ContractViolation {
+            detail: "input port claims are unsupported",
+            ..
+        })
+    ));
+    assert_eq!(graph.nodes().len(), 1);
+    assert!(graph.multi_modules().is_empty());
+}

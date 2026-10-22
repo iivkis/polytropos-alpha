@@ -28,6 +28,7 @@ pub enum ProofError {
         node: usize,
     },
     InvalidGoalName,
+    InvalidOutputs,
     Io(std::io::Error),
     LeanRejected {
         details: String,
@@ -58,6 +59,9 @@ impl fmt::Display for ProofError {
             }
             Self::InvalidGoalName => {
                 write!(f, "property name must be a nonempty Lean-safe identifier")
+            }
+            Self::InvalidOutputs => {
+                write!(f, "Lean proof requires a nonempty set of distinct output nodes")
             }
             Self::Io(error) => write!(f, "Lean checker I/O failure: {error}"),
             Self::LeanRejected { details } => write!(f, "Lean proof rejected: {details}"),
@@ -234,8 +238,30 @@ impl LeanProofEngine {
     /// Sqrt and MatMul fail closed, even though they are available to the Rust
     /// reference engine. The input nonnegativity assumptions are explicit.
     pub fn generate(&self, graph: &NeuralGraph, output: NodeId) -> Result<LeanProgram, ProofError> {
+        self.generate_outputs(graph, &[output])
+    }
+
+    /// Generate one consistent Lean model and *all* reachable obligations for
+    /// several outputs, including distinct named ports of a multi-output module.
+    /// This is a single ideal-Int proof artifact, not a GPU or FP32 certificate.
+    /// Requests are required to be nonempty and distinct; foreign nodes fail.
+    pub fn generate_outputs(
+        &self,
+        graph: &NeuralGraph,
+        outputs: &[NodeId],
+    ) -> Result<LeanProgram, ProofError> {
+        if outputs.is_empty() {
+            return Err(ProofError::InvalidOutputs);
+        }
+        let mut seen = BTreeSet::new();
+        for &output in outputs {
+            graph.node(output)?;
+            if !seen.insert(output.index()) {
+                return Err(ProofError::InvalidOutputs);
+            }
+        }
         let mut used = BTreeSet::new();
-        let mut pending = vec![output];
+        let mut pending = outputs.to_vec();
 
         while let Some(id) = pending.pop() {
             let node = graph.node(id)?;
@@ -597,19 +623,62 @@ impl LeanProofEngine {
             if !module.outputs.iter().any(|o| used.contains(&o.index())) {
                 continue;
             }
-            for (port_index, (&output, port)) in module
-                .outputs
-                .iter()
-                .zip(&module.contract.outputs)
-                .enumerate()
+
+            // All input ports are part of the declared module interface, even
+            // if a particular output does not use the associated tensor.
+            for (port_index, (&input, port)) in
+                module.inputs.iter().zip(&module.contract.inputs).enumerate()
+            {
+                let actual = graph.node(input)?;
+                emit_decidable(
+                    &mut source,
+                    &mut theorems,
+                    format!("multi_{module_index}_input_{port_index}_shape"),
+                    format!("{} = {}", shape_expr(&actual.shape), shape_expr(&port.port.shape)),
+                );
+                if port.port.domain == Domain::NonNegativeFinite {
+                    if actual.domain != Domain::NonNegativeFinite {
+                        return Err(ProofError::UnsupportedGuarantee { node: input.index() });
+                    }
+                    emit_nonnegative_alias(
+                        &mut source,
+                        &mut theorems,
+                        format!("multi_{module_index}_input_{port_index}_nonnegative"),
+                        &proof_params,
+                        &call(input.index()),
+                        &proof_call(input.index()),
+                    );
+                }
+            }
+
+            for (port_index, (&output, port)) in
+                module.outputs.iter().zip(&module.contract.outputs).enumerate()
             {
                 if !used.contains(&output.index()) {
                     continue;
                 }
+                let actual = graph.node(output)?;
+                emit_decidable(
+                    &mut source,
+                    &mut theorems,
+                    format!("multi_{module_index}_port_{port_index}_shape"),
+                    format!("{} = {}", shape_expr(&actual.shape), shape_expr(&port.port.shape)),
+                );
+                if port.port.domain == Domain::NonNegativeFinite {
+                    if actual.domain != Domain::NonNegativeFinite {
+                        return Err(ProofError::UnsupportedGuarantee { node: output.index() });
+                    }
+                    emit_nonnegative_alias(
+                        &mut source,
+                        &mut theorems,
+                        format!("multi_{module_index}_port_{port_index}_nonnegative"),
+                        &proof_params,
+                        &call(output.index()),
+                        &proof_call(output.index()),
+                    );
+                }
                 for (claim_index, claim) in port.claims.iter().enumerate() {
-                    let name =
-                        format!("multi_{module_index}_port_{port_index}_claim_{claim_index}");
-                    let actual = graph.node(output)?;
+                    let name = format!("multi_{module_index}_port_{port_index}_claim_{claim_index}");
                     match claim {
                         ContractClaim::Nonnegative => {
                             if actual.domain != Domain::NonNegativeFinite {
