@@ -652,7 +652,7 @@ impl NeuralGraph {
             return Err(NeuralError::ContractViolation { module: module.name(), detail: "incorrect multi-output result count" });
         }
         candidate.validate_body(body_start, module_start, multi_start, inputs, &outputs, module.name())?;
-        if outputs.iter().collect::<std::collections::BTreeSet<_>>().len() != outputs.len() {
+        if outputs.iter().map(|id| id.index()).collect::<std::collections::BTreeSet<_>>().len() != outputs.len() {
             return Err(NeuralError::ContractViolation { module: module.name(), detail: "duplicate output identity" });
         }
         for (&id, port) in outputs.iter().zip(&contract.outputs) {
