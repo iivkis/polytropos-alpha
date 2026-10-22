@@ -105,7 +105,7 @@ theorem foldl_within_sum (f : Nat → Int) (bound : Int) :
         intro x hx
         exact hxs x (by simp [hx])
       have hstep := within_add hacc hj
-      simpa [List.foldl_cons, Nat.cast_add, add_mul, add_assoc, add_comm,
+      simpa [List.foldl_cons, Int.natCast_add, add_mul, add_assoc, add_comm,
         add_left_comm] using
         (ih (acc + f j) (budget + bound) hrest hstep)
 
