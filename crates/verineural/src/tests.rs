@@ -1047,7 +1047,7 @@ fn p0_independent_claims_are_theorems_not_structural_inference() {
     let out = graph.apply_module(&module, &[x]).unwrap();
     let proof = LeanProofEngine::default().generate(&graph, out).unwrap();
     assert!(proof.source().contains("theorem module_0_claim_0"));
-    assert!(proof.source().contains("node_1 x_0 = (node_0 x_0)"));
+    assert!(proof.source().contains("(node_1 x_0) = (node_0 x_0)"));
     let goal = crate::ProofGoal { name: "identity".into(), output: out,
         kind: crate::ProofGoalKind::EqualTo { other: x } };
     assert!(LeanProofEngine::default().generate_goal(&graph, &goal).unwrap()

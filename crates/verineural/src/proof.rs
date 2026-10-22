@@ -206,6 +206,11 @@ impl LeanProofEngine {
                     pending.extend(module.inputs.iter().copied());
                 }
             }
+            for module in graph.multi_modules() {
+                if module.outputs.contains(&id) {
+                    pending.extend(module.inputs.iter().copied());
+                }
+            }
         }
 
         let sources = used
@@ -913,6 +918,11 @@ fn collect_used_nodes(graph: &NeuralGraph, output: NodeId) -> Result<BTreeSet<us
         pending.extend(node.inputs.iter().copied());
         for module in graph.modules() {
             if module.output == id {
+                pending.extend(module.inputs.iter().copied());
+            }
+        }
+        for module in graph.multi_modules() {
+            if module.outputs.contains(&id) {
                 pending.extend(module.inputs.iter().copied());
             }
         }
