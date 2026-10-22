@@ -171,7 +171,10 @@ impl ArchitectureSnapshot {
         fs::create_dir_all(root)?;
         fs::write(root.join("semantic.ir"), &self.semantic_ir)?;
         fs::write(root.join("architecture.dot"), &self.dot)?;
-        render_dot_png(&root.join("architecture.dot"), &root.join("architecture.png"))
+        render_dot_png(
+            &root.join("architecture.dot"),
+            &root.join("architecture.png"),
+        )
     }
 
     /// Checks the exact deterministic Semantic IR and DOT content independently
@@ -759,7 +762,6 @@ pub fn snapshot_architecture(
     })
 }
 
-
 /// One architecture-neutral DOT containing *all* Semantic IR nodes, including
 /// unselected nodes, and typed port mappings of both module kinds.
 ///
@@ -770,8 +772,7 @@ pub(crate) fn auto_architecture_dot(
     plan: &crate::AutoBuildPlan,
     semantic_ir_sha256: &str,
 ) -> io::Result<String> {
-    if semantic_ir_sha256.len() != 64
-        || !semantic_ir_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    if semantic_ir_sha256.len() != 64 || !semantic_ir_sha256.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err(bad("invalid canonical Semantic IR SHA-256 for DOT"));
     }
@@ -794,8 +795,12 @@ pub(crate) fn auto_architecture_dot(
             id: format!("m{i}"),
             start: module.body_start,
             end: module.output.index() + 1,
-            inputs: module.inputs.iter().enumerate()
-                .map(|(p, id)| (format!("input_{p}"), id.index())).collect(),
+            inputs: module
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(p, id)| (format!("input_{p}"), id.index()))
+                .collect(),
             outputs: vec![("output".to_owned(), module.output.index())],
             contract: format!("{:?}", module.contract),
         });
@@ -807,10 +812,18 @@ pub(crate) fn auto_architecture_dot(
             id: format!("multi{i}"),
             start: module.body_start,
             end: module.body_end,
-            inputs: module.inputs.iter().zip(&module.contract.inputs)
-                .map(|(id, port)| (port.name.to_owned(), id.index())).collect(),
-            outputs: module.outputs.iter().zip(&module.contract.outputs)
-                .map(|(id, port)| (port.name.to_owned(), id.index())).collect(),
+            inputs: module
+                .inputs
+                .iter()
+                .zip(&module.contract.inputs)
+                .map(|(id, port)| (port.name.to_owned(), id.index()))
+                .collect(),
+            outputs: module
+                .outputs
+                .iter()
+                .zip(&module.contract.outputs)
+                .map(|(id, port)| (port.name.to_owned(), id.index()))
+                .collect(),
             contract: format!("{:?}", module.contract),
         });
     }
@@ -827,7 +840,9 @@ pub(crate) fn auto_architecture_dot(
     for (i, scope) in scopes.iter().enumerate() {
         let mut candidates = Vec::new();
         for (j, other) in scopes.iter().enumerate() {
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             let overlaps = scope.start < other.end && other.start < scope.end;
             let contained = other.start <= scope.start && scope.end <= other.end;
             let contains = scope.start <= other.start && other.end <= scope.end;
@@ -852,21 +867,37 @@ pub(crate) fn auto_architecture_dot(
     for (i, p) in paths.iter_mut().enumerate() {
         *p = path_of(i, &scopes, &parents);
     }
-    let owners = (0..n).map(|i| {
-        (0..scopes.len())
-            .filter(|&j| i >= scopes[j].start && i < scopes[j].end)
-            .min_by_key(|&j| (scopes[j].end - scopes[j].start, j))
-    }).collect::<Vec<_>>();
-    let selected = plan.outputs.iter().map(|id| id.index()).collect::<BTreeSet<_>>();
+    let owners = (0..n)
+        .map(|i| {
+            (0..scopes.len())
+                .filter(|&j| i >= scopes[j].start && i < scopes[j].end)
+                .min_by_key(|&j| (scopes[j].end - scopes[j].start, j))
+        })
+        .collect::<Vec<_>>();
+    let selected = plan
+        .outputs
+        .iter()
+        .map(|id| id.index())
+        .collect::<BTreeSet<_>>();
     // All nodes are drawn, but Lean only models reachable dependencies.
     let mut reachable = BTreeSet::new();
     let mut pending = plan.outputs.clone();
     while let Some(id) = pending.pop() {
-        if !reachable.insert(id.index()) { continue; }
-        pending.extend(graph.node(id).map_err(|err| bad(err.to_string()))?
-            .inputs.iter().copied());
+        if !reachable.insert(id.index()) {
+            continue;
+        }
+        pending.extend(
+            graph
+                .node(id)
+                .map_err(|err| bad(err.to_string()))?
+                .inputs
+                .iter()
+                .copied(),
+        );
         for module in graph.modules() {
-            if module.output == id { pending.extend(module.inputs.iter().copied()); }
+            if module.output == id {
+                pending.extend(module.inputs.iter().copied());
+            }
         }
         for module in graph.multi_modules() {
             if module.outputs.contains(&id) {
@@ -874,12 +905,14 @@ pub(crate) fn auto_architecture_dot(
             }
         }
     }
-    let gpu_status = plan.gpu.iter().map(|entry| match entry {
-        crate::PlannedGpu::Supported { output, .. } =>
-            (output.index(), "nvptx-supported"),
-        crate::PlannedGpu::Unsupported { output, .. } =>
-            (output.index(), "unsupported"),
-    }).collect::<BTreeMap<_, _>>();
+    let gpu_status = plan
+        .gpu
+        .iter()
+        .map(|entry| match entry {
+            crate::PlannedGpu::Supported { output, .. } => (output.index(), "nvptx-supported"),
+            crate::PlannedGpu::Unsupported { output, .. } => (output.index(), "unsupported"),
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut dot = String::from(
         r##"digraph verineural_auto {
   graph [rankdir=LR, compound=true, newrank=true, splines=spline,
@@ -893,18 +926,32 @@ pub(crate) fn auto_architecture_dot(
 "##,
     );
     for (key, value) in [
-        ("label", format!(
-            "VeriNeural · auto architecture\n{} nodes · {} module instances · {} outputs",
-            n, scopes.len(), plan.outputs.len()
-        )),
+        (
+            "label",
+            format!(
+                "VeriNeural · auto architecture\n{} nodes · {} module instances · {} outputs",
+                n,
+                scopes.len(),
+                plan.outputs.len()
+            ),
+        ),
         ("vn_export_version", "auto-v1".into()),
         ("vn_ir_sha256", semantic_ir_sha256.to_owned()),
         ("vn_fp32_profile", format!("{:?}", graph.policy())),
         ("vn_selected_outputs", format!("{:?}", selected)),
-        ("vn_lean_assurance", "ideal-Int;conditional-source-assumptions;kernel-checked-at-build".into()),
-        ("vn_gpu_assurance", "LLVM/PTX-structural;JIT-SASS-not-proven".into()),
+        (
+            "vn_lean_assurance",
+            "ideal-Int;conditional-source-assumptions;kernel-checked-at-build".into(),
+        ),
+        (
+            "vn_gpu_assurance",
+            "LLVM/PTX-structural;JIT-SASS-not-proven".into(),
+        ),
         ("vn_connectivity", "Rust-structural-validation".into()),
-        ("vn_unmodeled", "arbitrary-dtype;implicit-broadcast;machine-equivalence".into()),
+        (
+            "vn_unmodeled",
+            "arbitrary-dtype;implicit-broadcast;machine-equivalence".into(),
+        ),
     ] {
         writeln!(dot, "  {key}={};", quoted(&value)).expect("writing DOT");
     }
@@ -920,7 +967,11 @@ pub(crate) fn auto_architecture_dot(
     }
     fn render_scope(parent: Option<usize>, context: &Context<'_>, depth: usize, dot: &mut String) {
         let pad = "  ".repeat(depth + 1);
-        for (i, node) in context.graph.nodes().iter().enumerate()
+        for (i, node) in context
+            .graph
+            .nodes()
+            .iter()
+            .enumerate()
             .filter(|(i, _)| context.owners[*i] == parent)
         {
             let kind = if context.selected.contains(&i) {
@@ -943,40 +994,73 @@ pub(crate) fn auto_architecture_dot(
                 ("vn_id", format!("n{i}")),
                 ("vn_kind", kind.to_owned()),
                 ("vn_op", node.operation.name().to_owned()),
-                ("vn_instance_path", parent.map_or_else(|| "root".to_owned(),
-                    |p| context.paths[p].clone())),
-                ("vn_inputs", format!("{:?}", node.inputs.iter()
-                    .map(|id| id.index()).collect::<Vec<_>>())),
+                (
+                    "vn_instance_path",
+                    parent.map_or_else(|| "root".to_owned(), |p| context.paths[p].clone()),
+                ),
+                (
+                    "vn_inputs",
+                    format!(
+                        "{:?}",
+                        node.inputs.iter().map(|id| id.index()).collect::<Vec<_>>()
+                    ),
+                ),
                 ("vn_shape", format!("{:?}", node.shape.dims())),
                 ("vn_dtype", "binary32".into()),
                 ("vn_layout", "row-major".into()),
                 ("vn_domain", format!("{:?}", node.domain)),
                 ("vn_contract", format!("{:?}", node.contract)),
                 ("vn_semantics", format!("{:?}", node.semantics)),
-                ("vn_selected_output", context.selected.contains(&i).to_string()),
-                ("vn_reachable_from_outputs", context.reachable.contains(&i).to_string()),
-                ("vn_gpu_lowering", context.gpu_status.get(&i).copied()
-                    .unwrap_or("no-selected-output-profile").to_owned()),
-                ("vn_proof_status", if context.reachable.contains(&i) {
-                    "ideal-Int;checked-in-auto-bundle"
-                } else {
-                    "unselected;no-Lean-obligation"
-                }.into()),
+                (
+                    "vn_selected_output",
+                    context.selected.contains(&i).to_string(),
+                ),
+                (
+                    "vn_reachable_from_outputs",
+                    context.reachable.contains(&i).to_string(),
+                ),
+                (
+                    "vn_gpu_lowering",
+                    context
+                        .gpu_status
+                        .get(&i)
+                        .copied()
+                        .unwrap_or("no-selected-output-profile")
+                        .to_owned(),
+                ),
+                (
+                    "vn_proof_status",
+                    if context.reachable.contains(&i) {
+                        "ideal-Int;checked-in-auto-bundle"
+                    } else {
+                        "unselected;no-Lean-obligation"
+                    }
+                    .into(),
+                ),
             ];
             writeln!(dot, "{pad}n{i} [{}];", attrs(&properties)).expect("writing DOT");
         }
-        for (i, scope) in context.scopes.iter().enumerate()
+        for (i, scope) in context
+            .scopes
+            .iter()
+            .enumerate()
             .filter(|(i, _)| context.parents[*i] == parent)
         {
             writeln!(dot, "{pad}subgraph cluster_{} {{", scope.id).expect("writing DOT");
             let inner = format!("{pad}  ");
             let (fill, outline) = cluster_theme(depth);
-            let in_ports = scope.inputs.iter()
+            let in_ports = scope
+                .inputs
+                .iter()
                 .map(|(name, index)| format!("{name}:n{index}"))
-                .collect::<Vec<_>>().join("  ");
-            let out_ports = scope.outputs.iter()
+                .collect::<Vec<_>>()
+                .join("  ");
+            let out_ports = scope
+                .outputs
+                .iter()
                 .map(|(name, index)| format!("{name}:n{index}"))
-                .collect::<Vec<_>>().join("  ");
+                .collect::<Vec<_>>()
+                .join("  ");
             for (key, value) in [
                 ("style", "rounded,filled".into()),
                 ("fillcolor", fill.into()),
@@ -986,18 +1070,26 @@ pub(crate) fn auto_architecture_dot(
                 ("labelloc", "t".into()),
                 ("labeljust", "l".into()),
                 ("margin", "22".into()),
-                ("label", format!(
-                    "{} · {}\n{} → {}",
-                    scope.name.replace('_', " ").to_uppercase(),
-                    scope.id, in_ports, out_ports,
-                )),
+                (
+                    "label",
+                    format!(
+                        "{} · {}\n{} → {}",
+                        scope.name.replace('_', " ").to_uppercase(),
+                        scope.id,
+                        in_ports,
+                        out_ports,
+                    ),
+                ),
                 ("vn_instance_path", context.paths[i].clone()),
                 ("vn_definition_id", scope.name.to_owned()),
                 ("vn_semantic_version", scope.version.to_owned()),
                 ("vn_contract", scope.contract.clone()),
                 ("vn_input_ports", format!("{:?}", scope.inputs)),
                 ("vn_output_ports", format!("{:?}", scope.outputs)),
-                ("vn_proof_status", "module-contracts-checkable;see-Lean-artifact".into()),
+                (
+                    "vn_proof_status",
+                    "module-contracts-checkable;see-Lean-artifact".into(),
+                ),
             ] {
                 writeln!(dot, "{inner}{key}={};", quoted(&value)).expect("writing DOT");
             }
@@ -1005,23 +1097,38 @@ pub(crate) fn auto_architecture_dot(
             writeln!(dot, "{pad}}}").expect("writing DOT");
         }
     }
-    render_scope(None, &Context {
-        graph,
-        scopes: &scopes,
-        parents: &parents,
-        owners: &owners,
-        paths: &paths,
-        selected: &selected,
-        reachable: &reachable,
-        gpu_status: &gpu_status,
-    }, 0, &mut dot);
-    let inputs = graph.nodes().iter().enumerate()
+    render_scope(
+        None,
+        &Context {
+            graph,
+            scopes: &scopes,
+            parents: &parents,
+            owners: &owners,
+            paths: &paths,
+            selected: &selected,
+            reachable: &reachable,
+            gpu_status: &gpu_status,
+        },
+        0,
+        &mut dot,
+    );
+    let inputs = graph
+        .nodes()
+        .iter()
+        .enumerate()
         .filter_map(|(i, node)| matches!(node.operation, Operation::Input).then_some(i))
         .collect::<Vec<_>>();
     if !inputs.is_empty() {
-        writeln!(dot, "  {{ rank=same; {} }}", inputs.iter()
-            .map(|i| format!("n{i};")).collect::<Vec<_>>().join(" "))
-            .expect("writing DOT");
+        writeln!(
+            dot,
+            "  {{ rank=same; {} }}",
+            inputs
+                .iter()
+                .map(|i| format!("n{i};"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .expect("writing DOT");
     }
     // Exactly one rendered edge for every real Semantic IR dependency.
     // Module port mappings are attributes, never extra visual relay edges.
@@ -1032,9 +1139,14 @@ pub(crate) fn auto_architecture_dot(
             let properties = [
                 ("color", color.into()),
                 ("penwidth", width.into()),
-                ("weight", if owners[i] == owners[input.index()] {
-                    "5".into()
-                } else { "2".into() }),
+                (
+                    "weight",
+                    if owners[i] == owners[input.index()] {
+                        "5".into()
+                    } else {
+                        "2".into()
+                    },
+                ),
                 ("minlen", "1".into()),
                 ("constraint", "true".into()),
                 ("vn_semantic_src", format!("n{}", input.index())),
@@ -1045,8 +1157,13 @@ pub(crate) fn auto_architecture_dot(
                 ("vn_dtype", "binary32".into()),
                 ("vn_role", "data".into()),
             ];
-            writeln!(dot, "  n{} -> n{i} [{}];", input.index(), attrs(&properties))
-                .expect("writing DOT");
+            writeln!(
+                dot,
+                "  n{} -> n{i} [{}];",
+                input.index(),
+                attrs(&properties)
+            )
+            .expect("writing DOT");
         }
     }
     dot.push_str("}\n");
@@ -1064,21 +1181,40 @@ mod tests {
             ArchitectureAutoCompiler, GpuRequirement, MathContract, MultiOutputContract,
             MultiOutputModule, NamedPortContract, NeuralError, NeuralModule, PortContract,
         };
-        struct Activation { contract: MathContract }
+        struct Activation {
+            contract: MathContract,
+        }
         impl NeuralModule for Activation {
-            fn name(&self) -> &'static str { "consumer_activation" }
-            fn contract(&self) -> &MathContract { &self.contract }
-            fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId])
-                -> Result<NodeId, NeuralError> {
+            fn name(&self) -> &'static str {
+                "consumer_activation"
+            }
+            fn contract(&self) -> &MathContract {
+                &self.contract
+            }
+            fn build(
+                &self,
+                graph: &mut NeuralGraph,
+                inputs: &[NodeId],
+            ) -> Result<NodeId, NeuralError> {
                 graph.relu(inputs[0])
             }
         }
-        struct Step { contract: MultiOutputContract, child: Activation }
+        struct Step {
+            contract: MultiOutputContract,
+            child: Activation,
+        }
         impl MultiOutputModule for Step {
-            fn name(&self) -> &'static str { "consumer_step" }
-            fn contract(&self) -> &MultiOutputContract { &self.contract }
-            fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId])
-                -> Result<Vec<NodeId>, NeuralError> {
+            fn name(&self) -> &'static str {
+                "consumer_step"
+            }
+            fn contract(&self) -> &MultiOutputContract {
+                &self.contract
+            }
+            fn build(
+                &self,
+                graph: &mut NeuralGraph,
+                inputs: &[NodeId],
+            ) -> Result<Vec<NodeId>, NeuralError> {
                 let next = graph.apply_module(&self.child, &[inputs[0]])?;
                 let readout = graph.add(next, inputs[1])?;
                 Ok(vec![next, readout])
@@ -1109,7 +1245,8 @@ mod tests {
             };
             let outputs = graph.apply_multi_module(&module, &[a, b]).unwrap();
             let plan = ArchitectureAutoCompiler::default()
-                .plan(&graph, &outputs, &[], GpuRequirement::AllOutputs).unwrap();
+                .plan(&graph, &outputs, &[], GpuRequirement::AllOutputs)
+                .unwrap();
             (graph, plan)
         }
 
