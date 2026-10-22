@@ -36,8 +36,8 @@ mod gpu;
 mod ir;
 mod modules;
 mod numeric;
-mod proof;
 mod primitive;
+mod proof;
 mod special;
 mod subnormal;
 mod tensor;
@@ -61,8 +61,11 @@ pub use numeric::{
     ExactFp32Plan, NumericError, RneErrorContract, RneFp32Plan, RneFp32Trace,
     RneModuleErrorContract, RneRangePlan, RneThresholdEvidence, RneThresholdSide,
 };
-pub use proof::{CheckedLean, LeanAxiomAudit, LeanProgram, LeanProofEngine, ProofAssumption, ProofError, ProofGoal, ProofGoalKind};
 pub use primitive::{PrimitiveExpr, PrimitiveSpec};
+pub use proof::{
+    CheckedLean, LeanAxiomAudit, LeanProgram, LeanProofEngine, ProofAssumption, ProofError,
+    ProofGoal, ProofGoalKind,
+};
 pub use special::{
     Fp32SpecialExpected, special_add_boundary, special_mul_bias_relu_boundary,
     special_mul_boundary, special_relu_boundary,

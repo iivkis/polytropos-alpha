@@ -256,7 +256,11 @@ pub struct MathContract {
 
 impl MathContract {
     pub fn new(requires: Vec<PortContract>, ensures: PortContract) -> Self {
-        Self { requires, ensures, claims: Vec::new() }
+        Self {
+            requires,
+            ensures,
+            claims: Vec::new(),
+        }
     }
 
     /// The declared claim is checked in the Lean backend, not in this builder.
@@ -322,7 +326,9 @@ pub trait NeuralModule {
     fn name(&self) -> &'static str;
     fn contract(&self) -> &MathContract;
     fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError>;
-    fn semantic_version(&self) -> &'static str { "unversioned" }
+    fn semantic_version(&self) -> &'static str {
+        "unversioned"
+    }
 }
 
 /// Named output contracts for a multi-output module.
@@ -335,7 +341,11 @@ pub struct NamedPortContract {
 
 impl NamedPortContract {
     pub fn new(name: &'static str, port: PortContract) -> Self {
-        Self { name, port, claims: Vec::new() }
+        Self {
+            name,
+            port,
+            claims: Vec::new(),
+        }
     }
 }
 
@@ -348,8 +358,11 @@ pub struct MultiOutputContract {
 pub trait MultiOutputModule {
     fn name(&self) -> &'static str;
     fn contract(&self) -> &MultiOutputContract;
-    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<Vec<NodeId>, NeuralError>;
-    fn semantic_version(&self) -> &'static str { "unversioned" }
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId])
+    -> Result<Vec<NodeId>, NeuralError>;
+    fn semantic_version(&self) -> &'static str {
+        "unversioned"
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -526,31 +539,49 @@ impl NeuralGraph {
         name: &'static str,
     ) -> Result<(), NeuralError> {
         if self.nodes.len() == body_start || outputs.is_empty() {
-            return Err(NeuralError::ContractViolation { module: name, detail: "empty body or outputs" });
+            return Err(NeuralError::ContractViolation {
+                module: name,
+                detail: "empty body or outputs",
+            });
         }
         for &output in outputs {
             self.node(output)?;
             if output.index < body_start {
-                return Err(NeuralError::ContractViolation { module: name, detail: "output not owned by module" });
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "output not owned by module",
+                });
             }
         }
         let authorized = |id: NodeId| id.index >= body_start || allowed.contains(&id);
         for node in &self.nodes[body_start..] {
             if matches!(node.operation, Operation::Input) {
-                return Err(NeuralError::ContractViolation { module: name, detail: "module declared a hidden source input" });
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "module declared a hidden source input",
+                });
             }
             if node.inputs.iter().any(|&id| !authorized(id)) {
-                return Err(NeuralError::ContractViolation { module: name, detail: "undeclared external capture" });
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "undeclared external capture",
+                });
             }
         }
         for nested in &self.modules[modules_start..] {
             if nested.inputs.iter().any(|&id| !authorized(id)) {
-                return Err(NeuralError::ContractViolation { module: name, detail: "nested module captured undeclared input" });
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "nested module captured undeclared input",
+                });
             }
         }
         for nested in &self.multi_modules[multi_start..] {
             if nested.inputs.iter().any(|&id| !authorized(id)) {
-                return Err(NeuralError::ContractViolation { module: name, detail: "nested multi-module captured undeclared input" });
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "nested multi-module captured undeclared input",
+                });
             }
         }
         Ok(())
@@ -591,7 +622,14 @@ impl NeuralGraph {
         let multi_start = self.multi_modules.len();
         let mut candidate = self.clone();
         let output = module.build(&mut candidate, inputs)?;
-        candidate.validate_body(body_start, module_start, multi_start, inputs, &[output], module.name())?;
+        candidate.validate_body(
+            body_start,
+            module_start,
+            multi_start,
+            inputs,
+            &[output],
+            module.name(),
+        )?;
         let actual = candidate.node(output)?;
         if actual.shape != contract.ensures.shape {
             return Err(NeuralError::ShapeMismatch {
@@ -626,23 +664,35 @@ impl NeuralGraph {
     ) -> Result<Vec<NodeId>, NeuralError> {
         let contract = module.contract();
         if inputs.len() != contract.inputs.len() || contract.outputs.is_empty() {
-            return Err(NeuralError::ContractViolation { module: module.name(), detail: "incorrect multi-output arity" });
+            return Err(NeuralError::ContractViolation {
+                module: module.name(),
+                detail: "incorrect multi-output arity",
+            });
         }
         for ports in [&contract.inputs, &contract.outputs] {
             let mut names = std::collections::BTreeSet::new();
             for port in ports {
                 if port.name.is_empty() || !names.insert(port.name) {
-                    return Err(NeuralError::ContractViolation { module: module.name(), detail: "empty or duplicated named port" });
+                    return Err(NeuralError::ContractViolation {
+                        module: module.name(),
+                        detail: "empty or duplicated named port",
+                    });
                 }
             }
         }
         for (&input, port) in inputs.iter().zip(&contract.inputs) {
             let node = self.node(input)?;
             if node.shape != port.port.shape {
-                return Err(NeuralError::ShapeMismatch { expected: port.port.shape.clone(), actual: node.shape.clone() });
+                return Err(NeuralError::ShapeMismatch {
+                    expected: port.port.shape.clone(),
+                    actual: node.shape.clone(),
+                });
             }
             if !node.domain.satisfies(port.port.domain) {
-                return Err(NeuralError::DomainNotEstablished { required: port.port.domain, actual: node.domain });
+                return Err(NeuralError::DomainNotEstablished {
+                    required: port.port.domain,
+                    actual: node.domain,
+                });
             }
         }
         let body_start = self.nodes.len();
@@ -651,19 +701,44 @@ impl NeuralGraph {
         let mut candidate = self.clone();
         let outputs = module.build(&mut candidate, inputs)?;
         if outputs.len() != contract.outputs.len() {
-            return Err(NeuralError::ContractViolation { module: module.name(), detail: "incorrect multi-output result count" });
+            return Err(NeuralError::ContractViolation {
+                module: module.name(),
+                detail: "incorrect multi-output result count",
+            });
         }
-        candidate.validate_body(body_start, module_start, multi_start, inputs, &outputs, module.name())?;
-        if outputs.iter().map(|id| id.index()).collect::<std::collections::BTreeSet<_>>().len() != outputs.len() {
-            return Err(NeuralError::ContractViolation { module: module.name(), detail: "duplicate output identity" });
+        candidate.validate_body(
+            body_start,
+            module_start,
+            multi_start,
+            inputs,
+            &outputs,
+            module.name(),
+        )?;
+        if outputs
+            .iter()
+            .map(|id| id.index())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != outputs.len()
+        {
+            return Err(NeuralError::ContractViolation {
+                module: module.name(),
+                detail: "duplicate output identity",
+            });
         }
         for (&id, port) in outputs.iter().zip(&contract.outputs) {
             let node = candidate.node(id)?;
             if node.shape != port.port.shape {
-                return Err(NeuralError::ShapeMismatch { expected: port.port.shape.clone(), actual: node.shape.clone() });
+                return Err(NeuralError::ShapeMismatch {
+                    expected: port.port.shape.clone(),
+                    actual: node.shape.clone(),
+                });
             }
             if !node.domain.satisfies(port.port.domain) {
-                return Err(NeuralError::DomainNotEstablished { required: port.port.domain, actual: node.domain });
+                return Err(NeuralError::DomainNotEstablished {
+                    required: port.port.domain,
+                    actual: node.domain,
+                });
             }
         }
         candidate.multi_modules.push(MultiModuleInvocation {

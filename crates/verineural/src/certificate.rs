@@ -144,7 +144,9 @@ impl CertificateEngine {
 
         let result: Result<Stage5Report, CertificateError> = (|| {
             let model = self.proof.generate(graph, output)?;
-            let (checked, audit) = self.proof.verify_certified(&model, &directory.join("proof.lean"))?;
+            let (checked, audit) = self
+                .proof
+                .verify_certified(&model, &directory.join("proof.lean"))?;
             let program = self.gpu.compile(graph, output)?;
             let actual = self.gpu.execute(&program, inputs, directory)?;
             if actual.shape() != cpu_reference.shape() {
@@ -322,18 +324,26 @@ impl CertificateEngine {
         let source_file = directory.join("proof.lean");
         self.proof.check_file(&source_file)?;
         let lean = fs::read_to_string(&source_file)?;
-        let generated = lean.split_once("namespace VeriNeural.Generated")
+        let generated = lean
+            .split_once("namespace VeriNeural.Generated")
             .map(|(_, tail)| tail)
-            .ok_or_else(|| CertificateError::Integrity("missing generated Lean namespace".into()))?;
-        let names = generated.lines().filter_map(|line| {
-            line.trim_start().strip_prefix("theorem ")
-                .and_then(|line| line.split_whitespace().next())
-                .map(ToOwned::to_owned)
-        }).collect::<Vec<_>>();
+            .ok_or_else(|| {
+                CertificateError::Integrity("missing generated Lean namespace".into())
+            })?;
+        let names = generated
+            .lines()
+            .filter_map(|line| {
+                line.trim_start()
+                    .strip_prefix("theorem ")
+                    .and_then(|line| line.split_whitespace().next())
+                    .map(ToOwned::to_owned)
+            })
+            .collect::<Vec<_>>();
         let audit = self.proof.audit_file(&source_file, &names)?;
         let report = fs::read_to_string(directory.join("report.json"))?;
         if !report.contains(&format!(
-            "\"lean_checker_version\": \"{}\"", escape_json(&audit.lean_version),
+            "\"lean_checker_version\": \"{}\"",
+            escape_json(&audit.lean_version),
         )) {
             return Err(CertificateError::Integrity(
                 "saved report Lean version differs from current audited checker".into(),
@@ -389,9 +399,20 @@ fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
     for module in graph.multi_modules() {
         source.push_str(&format!(
             "multi_module={};version={};body=[{},{}) inputs={:?};outputs={:?};contracts={:?}\n",
-            module.name, module.semantic_version, module.body_start, module.body_end,
-            module.inputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
-            module.outputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
+            module.name,
+            module.semantic_version,
+            module.body_start,
+            module.body_end,
+            module
+                .inputs
+                .iter()
+                .map(|id| id.index())
+                .collect::<Vec<_>>(),
+            module
+                .outputs
+                .iter()
+                .map(|id| id.index())
+                .collect::<Vec<_>>(),
             module.contract
         ));
     }

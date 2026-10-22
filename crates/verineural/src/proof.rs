@@ -56,7 +56,9 @@ impl fmt::Display for ProofError {
                     "global proof assumption at node {node} must be a reachable source input"
                 )
             }
-            Self::InvalidGoalName => write!(f, "property name must be a nonempty Lean-safe identifier"),
+            Self::InvalidGoalName => {
+                write!(f, "property name must be a nonempty Lean-safe identifier")
+            }
             Self::Io(error) => write!(f, "Lean checker I/O failure: {error}"),
             Self::LeanRejected { details } => write!(f, "Lean proof rejected: {details}"),
         }
@@ -499,22 +501,34 @@ impl LeanProofEngine {
                 match claim {
                     ContractClaim::Nonnegative => {
                         if actual.domain != Domain::NonNegativeFinite {
-                            return Err(ProofError::UnsupportedGuarantee { node: module.output.index() });
+                            return Err(ProofError::UnsupportedGuarantee {
+                                node: module.output.index(),
+                            });
                         }
-                        emit_nonnegative_alias(&mut source, &mut theorems, name,
-                            &proof_params, &call(module.output.index()),
-                            &proof_call(module.output.index()));
+                        emit_nonnegative_alias(
+                            &mut source,
+                            &mut theorems,
+                            name,
+                            &proof_params,
+                            &call(module.output.index()),
+                            &proof_call(module.output.index()),
+                        );
                     }
                     ContractClaim::EqualsInput(port) => {
                         let Some(&input) = module.inputs.get(*port) else {
-                            return Err(ProofError::UnsupportedGuarantee { node: module.output.index() });
+                            return Err(ProofError::UnsupportedGuarantee {
+                                node: module.output.index(),
+                            });
                         };
                         if actual.shape != graph.node(input)?.shape {
-                            return Err(ProofError::UnsupportedGuarantee { node: module.output.index() });
+                            return Err(ProofError::UnsupportedGuarantee {
+                                node: module.output.index(),
+                            });
                         }
                         source.push_str(&format!(
                             "theorem {name} {params} : {} = {} := by\n  rfl\n\n",
-                            call(module.output.index()), call(input.index())
+                            call(module.output.index()),
+                            call(input.index())
                         ));
                         theorems.push(name);
                     }
@@ -523,30 +537,53 @@ impl LeanProofEngine {
         }
 
         for (module_index, module) in graph.multi_modules().iter().enumerate() {
-            if !module.outputs.iter().any(|o| used.contains(&o.index())) { continue; }
-            for (port_index, (&output, port)) in module.outputs.iter().zip(&module.contract.outputs).enumerate() {
-                if !used.contains(&output.index()) { continue; }
+            if !module.outputs.iter().any(|o| used.contains(&o.index())) {
+                continue;
+            }
+            for (port_index, (&output, port)) in module
+                .outputs
+                .iter()
+                .zip(&module.contract.outputs)
+                .enumerate()
+            {
+                if !used.contains(&output.index()) {
+                    continue;
+                }
                 for (claim_index, claim) in port.claims.iter().enumerate() {
-                    let name = format!("multi_{module_index}_port_{port_index}_claim_{claim_index}");
+                    let name =
+                        format!("multi_{module_index}_port_{port_index}_claim_{claim_index}");
                     let actual = graph.node(output)?;
                     match claim {
                         ContractClaim::Nonnegative => {
                             if actual.domain != Domain::NonNegativeFinite {
-                                return Err(ProofError::UnsupportedGuarantee { node: output.index() });
+                                return Err(ProofError::UnsupportedGuarantee {
+                                    node: output.index(),
+                                });
                             }
-                            emit_nonnegative_alias(&mut source, &mut theorems, name,
-                                &proof_params, &call(output.index()), &proof_call(output.index()));
+                            emit_nonnegative_alias(
+                                &mut source,
+                                &mut theorems,
+                                name,
+                                &proof_params,
+                                &call(output.index()),
+                                &proof_call(output.index()),
+                            );
                         }
                         ContractClaim::EqualsInput(index) => {
                             let Some(&input) = module.inputs.get(*index) else {
-                                return Err(ProofError::UnsupportedGuarantee { node: output.index() });
+                                return Err(ProofError::UnsupportedGuarantee {
+                                    node: output.index(),
+                                });
                             };
                             if actual.shape != graph.node(input)?.shape {
-                                return Err(ProofError::UnsupportedGuarantee { node: output.index() });
+                                return Err(ProofError::UnsupportedGuarantee {
+                                    node: output.index(),
+                                });
                             }
                             source.push_str(&format!(
                                 "theorem {name} {params} : {} = {} := by\n  rfl\n\n",
-                                call(output.index()), call(input.index())
+                                call(output.index()),
+                                call(input.index())
                             ));
                             theorems.push(name);
                         }
@@ -795,15 +832,28 @@ impl LeanProofEngine {
     /// Produce an independently requested theorem. Every goal gets its own
     /// program and result; invalid equality is rejected by Lean, never inferred
     /// from the output shape or a generator-created RHS.
-    pub fn generate_goal(&self, graph: &NeuralGraph, goal: &ProofGoal) -> Result<LeanProgram, ProofError> {
-        let valid = !goal.name.is_empty() && goal.name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    pub fn generate_goal(
+        &self,
+        graph: &NeuralGraph,
+        goal: &ProofGoal,
+    ) -> Result<LeanProgram, ProofError> {
+        let valid = !goal.name.is_empty()
+            && goal
+                .name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_')
             && goal.name.as_bytes()[0].is_ascii_alphabetic();
-        if !valid { return Err(ProofError::InvalidGoalName); }
+        if !valid {
+            return Err(ProofError::InvalidGoalName);
+        }
         match &goal.kind {
             ProofGoalKind::Nonnegative { assumptions } => {
-                let mut program = self.generate_global_nonnegative(graph, goal.output, assumptions)?;
-                program.source = program.source.replace("architecture_global_nonnegative",
-                    &format!("architecture_property_{}", goal.name));
+                let mut program =
+                    self.generate_global_nonnegative(graph, goal.output, assumptions)?;
+                program.source = program.source.replace(
+                    "architecture_global_nonnegative",
+                    &format!("architecture_property_{}", goal.name),
+                );
                 if let Some(last) = program.theorems.last_mut() {
                     *last = format!("architecture_property_{}", goal.name);
                 }
@@ -811,18 +861,38 @@ impl LeanProofEngine {
             }
             ProofGoalKind::EqualTo { other } => {
                 let used = collect_used_nodes(graph, goal.output)?;
-                if !used.contains(&other.index()) || graph.node(goal.output)?.shape != graph.node(*other)?.shape {
-                    return Err(ProofError::UnsupportedGuarantee { node: other.index() });
+                if !used.contains(&other.index())
+                    || graph.node(goal.output)?.shape != graph.node(*other)?.shape
+                {
+                    return Err(ProofError::UnsupportedGuarantee {
+                        node: other.index(),
+                    });
                 }
                 let mut program = self.generate(graph, goal.output)?;
-                let source_nodes = used.iter()
+                let source_nodes = used
+                    .iter()
                     .filter(|&&index| matches!(graph.nodes()[index].operation, Operation::Input))
-                    .copied().collect::<Vec<_>>();
-                let params = source_nodes.iter().map(|&i| format!("(x_{i} : VeriNeural.Tensor {})",
-                    graph.nodes()[i].shape.element_count())).collect::<Vec<_>>().join(" ");
-                let args = source_nodes.iter().map(|&i| format!("x_{i}")).collect::<Vec<_>>().join(" ");
+                    .copied()
+                    .collect::<Vec<_>>();
+                let params = source_nodes
+                    .iter()
+                    .map(|&i| {
+                        format!(
+                            "(x_{i} : VeriNeural.Tensor {})",
+                            graph.nodes()[i].shape.element_count()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let args = source_nodes
+                    .iter()
+                    .map(|&i| format!("x_{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let terminator = "end VeriNeural.Generated\n";
-                program.source.truncate(program.source.len() - terminator.len());
+                program
+                    .source
+                    .truncate(program.source.len() - terminator.len());
                 let name = format!("architecture_property_{}", goal.name);
                 program.source.push_str(&format!(
                     "-- User-owned equality goal, independently checked by Lean.\n                     theorem {name} {params} : node_{} {args} = node_{} {args} := by\n  rfl\n\n{terminator}",
@@ -837,7 +907,9 @@ impl LeanProofEngine {
     /// Stronger checker profile: all transitive axioms must be absent. Lean's
     /// kernel, its imported library and executable version remain explicit TCB.
     pub fn verify_certified(
-        &self, program: &LeanProgram, output_file: &Path,
+        &self,
+        program: &LeanProgram,
+        output_file: &Path,
     ) -> Result<(CheckedLean, LeanAxiomAudit), ProofError> {
         let checked = self.verify(program, output_file)?;
         let audit = self.audit_file(output_file, &program.theorems)?;
@@ -846,15 +918,23 @@ impl LeanProofEngine {
 
     /// Recheck transitive axioms in a saved Lean artifact. No user axiom,
     /// sorryAx, native_decide assumption or other axiom can be admitted here.
-    pub fn audit_file(&self, source_file: &Path, theorems: &[String]) -> Result<LeanAxiomAudit, ProofError> {
-        if theorems.is_empty() || theorems.iter().any(|name| name.is_empty()
-            || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
+    pub fn audit_file(
+        &self,
+        source_file: &Path,
+        theorems: &[String],
+    ) -> Result<LeanAxiomAudit, ProofError> {
+        if theorems.is_empty()
+            || theorems.iter().any(|name| {
+                name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+            })
         {
             return Err(ProofError::InvalidGoalName);
         }
         let version = Command::new(&self.executable).arg("--version").output()?;
         if !version.status.success() {
-            return Err(ProofError::LeanRejected { details: "Lean version unavailable".into() });
+            return Err(ProofError::LeanRejected {
+                details: "Lean version unavailable".into(),
+            });
         }
         let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
         let audit_path = source_file.with_extension("axiom-audit.lean");
@@ -868,16 +948,28 @@ impl LeanProofEngine {
         let result = result?;
         let stdout = String::from_utf8_lossy(&result.stdout);
         let stderr = String::from_utf8_lossy(&result.stderr);
-        let lines = stdout.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>();
-        if !result.status.success() || !stderr.trim().is_empty()
+        let lines = stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !result.status.success()
+            || !stderr.trim().is_empty()
             || lines.len() != theorems.len()
-            || lines.iter().any(|line| !line.contains("does not depend on any axioms"))
+            || lines
+                .iter()
+                .any(|line| !line.contains("does not depend on any axioms"))
         {
             return Err(ProofError::LeanRejected {
-                details: format!("certified axiom audit failed; exit={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}", result.status.code()),
+                details: format!(
+                    "certified axiom audit failed; exit={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                    result.status.code()
+                ),
             });
         }
-        Ok(LeanAxiomAudit { lean_version: version, theorem_names: theorems.to_vec() })
+        Ok(LeanAxiomAudit {
+            lean_version: version,
+            theorem_names: theorems.to_vec(),
+        })
     }
 
     /// Write and run Lean. Even a successful generation is *unverified* until

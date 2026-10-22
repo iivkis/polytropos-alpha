@@ -14,7 +14,9 @@ impl PrimitiveExpr {
         match self {
             Self::Port(index) => ports.get(*index).copied().ok_or(NeuralError::InvalidNode),
             Self::Apply(operation, inputs) => {
-                let ids = inputs.iter().map(|e| e.lower(graph, ports))
+                let ids = inputs
+                    .iter()
+                    .map(|e| e.lower(graph, ports))
                     .collect::<Result<Vec<_>, _>>()?;
                 graph.apply(operation.clone(), &ids)
             }
@@ -33,12 +35,24 @@ pub struct PrimitiveSpec {
 }
 
 impl PrimitiveSpec {
-    pub fn new(id: &'static str, version: &'static str, contract: MathContract, expression: PrimitiveExpr)
-        -> Result<Self, NeuralError> {
+    pub fn new(
+        id: &'static str,
+        version: &'static str,
+        contract: MathContract,
+        expression: PrimitiveExpr,
+    ) -> Result<Self, NeuralError> {
         if id.is_empty() || version.is_empty() {
-            return Err(NeuralError::ContractViolation { module: id, detail: "primitive id and version must be nonempty" });
+            return Err(NeuralError::ContractViolation {
+                module: id,
+                detail: "primitive id and version must be nonempty",
+            });
         }
-        Ok(Self { id, version, contract, expression })
+        Ok(Self {
+            id,
+            version,
+            contract,
+            expression,
+        })
     }
 
     pub fn apply(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
@@ -47,9 +61,15 @@ impl PrimitiveSpec {
 }
 
 impl NeuralModule for PrimitiveSpec {
-    fn name(&self) -> &'static str { self.id }
-    fn contract(&self) -> &MathContract { &self.contract }
-    fn semantic_version(&self) -> &'static str { self.version }
+    fn name(&self) -> &'static str {
+        self.id
+    }
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+    fn semantic_version(&self) -> &'static str {
+        self.version
+    }
     fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
         self.expression.lower(graph, inputs)
     }
