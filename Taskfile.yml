@@ -115,3 +115,13 @@ tasks:
     desc: Benchmark four CUDA Graph workload sizes, input rebinding, and FP32 bitwise checks (developer-run)
     cmds:
       - cargo run -p verineural --example stage7_benchmark --release
+
+  numeric-stage8:
+    desc: Check Stage 8 exact-integer FP32 range proof, run baseline/fused CUDA, and pin evidence
+    cmds:
+      - cargo run -p verineural --example stage8_exact
+
+  verify-numeric-stage8:
+    desc: Verify saved Stage 8 Lean proof and SHA-256 artifacts without CUDA
+    cmds:
+      - cargo run -p verineural --example stage8_exact -- --verify

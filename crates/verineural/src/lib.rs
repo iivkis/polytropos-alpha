@@ -16,6 +16,7 @@ mod error;
 mod gpu;
 mod ir;
 mod modules;
+mod numeric;
 mod proof;
 mod tensor;
 
@@ -31,6 +32,7 @@ pub use ir::{
     RoundingMode, SubnormalMode,
 };
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
+pub use numeric::{ExactFp32Plan, NumericError};
 pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
 pub use tensor::{Shape, Tensor, TensorShape};
 
