@@ -499,14 +499,13 @@ impl TranslationPlan {
                         "fused three-operation chain changed at node {node}"
                     )));
                 }
-            } else if relu != 0 {
-                if !(ir.contains("%fused_result = select i1 %keep_fused")
+            } else if relu != 0
+                && !(ir.contains("%fused_result = select i1 %keep_fused")
                     || ir.contains("%value = select i1 %keep"))
-                {
-                    return Err(invalid(format!(
-                        "ReLU branch semantics changed at node {node}"
-                    )));
-                }
+            {
+                return Err(invalid(format!(
+                    "ReLU branch semantics changed at node {node}"
+                )));
             }
             // Each supported template has a fixed operand/result binding.
             // Opcode counts alone would allow an optimizer to use a different
