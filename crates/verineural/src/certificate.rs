@@ -144,7 +144,7 @@ impl CertificateEngine {
 
         let result: Result<Stage5Report, CertificateError> = (|| {
             let model = self.proof.generate(graph, output)?;
-            let checked = self.proof.verify(&model, &directory.join("proof.lean"))?;
+            let (checked, audit) = self.proof.verify_certified(&model, &directory.join("proof.lean"))?;
             let program = self.gpu.compile(graph, output)?;
             let actual = self.gpu.execute(&program, inputs, directory)?;
             if actual.shape() != cpu_reference.shape() {
@@ -267,6 +267,11 @@ impl CertificateEngine {
                 actual.values().len(),
                 artifacts,
             );
+            let report = report.replace(
+                "\"lean_hypotheses\":",
+                &format!("\"lean_checker_version\": \"{}\",\n  \"lean_axiom_audit\": \"no-transitive-axioms\",\n  \"lean_hypotheses\":",
+                    escape_json(&audit.lean_version)),
+            );
             fs::write(directory.join("report.json"), report)?;
             fs::write(directory.join(MANIFEST), manifest_contents(directory)?)?;
             self.verify_bundle(directory)?;
@@ -314,7 +319,18 @@ impl CertificateEngine {
                 "SHA256SUMS differs from one or more artifacts".into(),
             ));
         }
-        self.proof.check_file(&directory.join("proof.lean"))?;
+        let source_file = directory.join("proof.lean");
+        self.proof.check_file(&source_file)?;
+        let lean = fs::read_to_string(&source_file)?;
+        let generated = lean.split_once("namespace VeriNeural.Generated")
+            .map(|(_, tail)| tail)
+            .ok_or_else(|| CertificateError::Integrity("missing generated Lean namespace".into()))?;
+        let names = generated.lines().filter_map(|line| {
+            line.trim_start().strip_prefix("theorem ")
+                .and_then(|line| line.split_whitespace().next())
+                .map(ToOwned::to_owned)
+        }).collect::<Vec<_>>();
+        self.proof.audit_file(&source_file, &names)?;
         Ok(())
     }
 }
@@ -323,7 +339,7 @@ impl CertificateEngine {
 /// not contribute to the fingerprint; complete semantics and interfaces do.
 fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
     let mut source = format!(
-        "verineural-ir-v2\noutput={}\nfp32={:?}\n",
+        "verineural-ir-v3\noutput={}\nfp32={:?}\n",
         output.index(),
         graph.policy()
     );
@@ -335,19 +351,21 @@ fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
             .collect::<Vec<_>>()
             .join(",");
         source.push_str(&format!(
-            "node={index};op={:?};inputs={edges};shape={:?};domain={:?};semantics={:?};requires={:?};ensures={:?}\n",
+            "node={index};op={:?};inputs={edges};shape={:?};domain={:?};semantics={:?};requires={:?};ensures={:?};claims={:?}\n",
             node.operation,
             node.shape.dims(),
             node.domain,
             node.semantics,
             node.contract.requires,
             node.contract.ensures,
+            node.contract.claims,
         ));
     }
     for module in graph.modules() {
         source.push_str(&format!(
-            "module={};inputs={:?};body_start={};output={};requires={:?};ensures={:?}\n",
+            "module={};version={};inputs={:?};body_start={};output={};requires={:?};ensures={:?};claims={:?}\n",
             module.name,
+            module.semantic_version,
             module
                 .inputs
                 .iter()
@@ -357,6 +375,16 @@ fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
             module.output.index(),
             module.contract.requires,
             module.contract.ensures,
+            module.contract.claims,
+        ));
+    }
+    for module in graph.multi_modules() {
+        source.push_str(&format!(
+            "multi_module={};version={};body=[{},{}) inputs={:?};outputs={:?};contracts={:?}\n",
+            module.name, module.semantic_version, module.body_start, module.body_end,
+            module.inputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
+            module.outputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
+            module.contract
         ));
     }
     source

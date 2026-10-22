@@ -840,14 +840,26 @@ impl LeanProofEngine {
         &self, program: &LeanProgram, output_file: &Path,
     ) -> Result<(CheckedLean, LeanAxiomAudit), ProofError> {
         let checked = self.verify(program, output_file)?;
+        let audit = self.audit_file(output_file, &program.theorems)?;
+        Ok((checked, audit))
+    }
+
+    /// Recheck transitive axioms in a saved Lean artifact. No user axiom,
+    /// sorryAx, native_decide assumption or other axiom can be admitted here.
+    pub fn audit_file(&self, source_file: &Path, theorems: &[String]) -> Result<LeanAxiomAudit, ProofError> {
+        if theorems.is_empty() || theorems.iter().any(|name| name.is_empty()
+            || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
+        {
+            return Err(ProofError::InvalidGoalName);
+        }
         let version = Command::new(&self.executable).arg("--version").output()?;
         if !version.status.success() {
             return Err(ProofError::LeanRejected { details: "Lean version unavailable".into() });
         }
         let version = String::from_utf8_lossy(&version.stdout).trim().to_owned();
-        let audit_path = output_file.with_extension("axiom-audit.lean");
-        let mut audit_source = program.source.clone();
-        for name in &program.theorems {
+        let audit_path = source_file.with_extension("axiom-audit.lean");
+        let mut audit_source = fs::read_to_string(source_file)?;
+        for name in theorems {
             audit_source.push_str(&format!("\n#print axioms VeriNeural.Generated.{name}\n"));
         }
         fs::write(&audit_path, audit_source)?;
@@ -858,14 +870,14 @@ impl LeanProofEngine {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let lines = stdout.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>();
         if !result.status.success() || !stderr.trim().is_empty()
-            || lines.len() != program.theorems.len()
+            || lines.len() != theorems.len()
             || lines.iter().any(|line| !line.contains("does not depend on any axioms"))
         {
             return Err(ProofError::LeanRejected {
                 details: format!("certified axiom audit failed; exit={:?}\nstdout:\n{stdout}\nstderr:\n{stderr}", result.status.code()),
             });
         }
-        Ok((checked, LeanAxiomAudit { lean_version: version, theorem_names: program.theorems.clone() }))
+        Ok(LeanAxiomAudit { lean_version: version, theorem_names: theorems.to_vec() })
     }
 
     /// Write and run Lean. Even a successful generation is *unverified* until
