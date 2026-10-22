@@ -508,17 +508,16 @@ impl LeanProofEngine {
         let eligible = modules
             .iter()
             .enumerate()
-            .filter_map(|(index, module)| {
-                used.contains(&module.output.index()).then_some(index)
-            })
+            .filter_map(|(index, module)| used.contains(&module.output.index()).then_some(index))
             .collect::<Vec<_>>();
         let top_level = eligible
             .iter()
             .copied()
             .filter(|&child_index| {
-                !eligible.iter().copied().any(|parent_index| {
-                    module_contains(graph, parent_index, child_index)
-                })
+                !eligible
+                    .iter()
+                    .copied()
+                    .any(|parent_index| module_contains(graph, parent_index, child_index))
             })
             .collect::<Vec<_>>();
 
@@ -526,9 +525,7 @@ impl LeanProofEngine {
         for module_index in top_level {
             let output_index = modules[module_index].output.index();
             if producers.insert(output_index, module_index).is_some() {
-                return Err(ProofError::UnsupportedGuarantee {
-                    node: output_index,
-                });
+                return Err(ProofError::UnsupportedGuarantee { node: output_index });
             }
         }
         let Some(&final_module) = producers.get(&output.index()) else {
@@ -545,19 +542,15 @@ impl LeanProofEngine {
             if !selected.insert(module_index) {
                 continue;
             }
-            if (0..module_index).any(|child_index| {
-                module_contains(graph, module_index, child_index)
-            }) {
+            if (0..module_index)
+                .any(|child_index| module_contains(graph, module_index, child_index))
+            {
                 return Err(ProofError::UnsupportedGuarantee {
                     node: modules[module_index].output.index(),
                 });
             }
 
-            let proof = build_module_nonnegative_proof(
-                graph,
-                module_index,
-                &arguments,
-            )?;
+            let proof = build_module_nonnegative_proof(graph, module_index, &arguments)?;
             for &port in &proof.required_ports {
                 let input = modules[module_index].inputs[port];
                 if assumption_set.contains(&input.index()) {
@@ -585,7 +578,9 @@ impl LeanProofEngine {
                 details: "generated Lean source has no namespace terminator".to_owned(),
             });
         }
-        program.source.truncate(program.source.len() - namespace_end.len());
+        program
+            .source
+            .truncate(program.source.len() - namespace_end.len());
 
         for &module_index in &selected {
             let module = &modules[module_index];
@@ -619,11 +614,7 @@ impl LeanProofEngine {
 
         let global_hypotheses = required_assumptions
             .iter()
-            .map(|&index| {
-                format!(
-                    "(arch_h_{index} : VeriNeural.Nonnegative x_{index})"
-                )
-            })
+            .map(|&index| format!("(arch_h_{index} : VeriNeural.Nonnegative x_{index})"))
             .collect::<Vec<_>>()
             .join(" ");
         let global_params = if global_hypotheses.is_empty() {
@@ -733,10 +724,7 @@ impl LeanProofEngine {
     }
 }
 
-fn collect_used_nodes(
-    graph: &NeuralGraph,
-    output: NodeId,
-) -> Result<BTreeSet<usize>, ProofError> {
+fn collect_used_nodes(graph: &NeuralGraph, output: NodeId) -> Result<BTreeSet<usize>, ProofError> {
     let mut used = BTreeSet::new();
     let mut pending = vec![output];
     while let Some(id) = pending.pop() {

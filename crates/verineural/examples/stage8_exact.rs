@@ -124,10 +124,7 @@ impl GlobalAddModule {
     fn new(shape: Shape) -> Self {
         let any = |shape| PortContract::new(shape, Domain::Any);
         Self {
-            contract: MathContract::new(
-                vec![any(shape.clone()), any(shape.clone())],
-                any(shape),
-            ),
+            contract: MathContract::new(vec![any(shape.clone()), any(shape.clone())], any(shape)),
         }
     }
 }
@@ -158,10 +155,7 @@ impl GlobalMulModule {
     fn new(shape: Shape) -> Self {
         let any = |shape| PortContract::new(shape, Domain::Any);
         Self {
-            contract: MathContract::new(
-                vec![any(shape.clone()), any(shape.clone())],
-                any(shape),
-            ),
+            contract: MathContract::new(vec![any(shape.clone()), any(shape.clone())], any(shape)),
         }
     }
 }
@@ -853,10 +847,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         || !property_source.contains("have arch_module_2 := module_2_global_nonnegative")
         || !property_source.contains("exact arch_module_2")
     {
-        return Err(io::Error::other(
-            "missing Stage 8 global architecture nonnegative proof",
-        )
-        .into());
+        return Err(
+            io::Error::other("missing Stage 8 global architecture nonnegative proof").into(),
+        );
     }
     write_checked_lean(&root.join("architecture_property.lean"), property_source)?;
     fs::write(
