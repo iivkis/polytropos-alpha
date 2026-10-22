@@ -7,6 +7,10 @@
 //! concrete GPU output bitwise. Correct IEEE RNE hardware/LLVM behavior is
 //! STILL TRUSTED, not proved by this engine. Non-integral or negative-zero
 //! inputs and unsupported operators fail closed.
+//!
+//! A second, narrower slice models concrete fractional dyadic traces under
+//! round-to-nearest, ties-to-even and composes a nonzero absolute error budget
+//! for Add/BiasAdd/Relu/Reshape. The LLVM/PTX/GPU execution link remains TCB.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -512,7 +516,6 @@ impl ExactFp32Plan {
     }
 }
 
-
 /// A concrete Stage 8 rounding slice for fractional dyadic inputs.
 ///
 /// Values are represented internally as exact integer ticks of 2^-fraction_bits.
@@ -748,7 +751,7 @@ impl RneFp32Plan {
             for i in 0..len {
                 let observed = trace.actual[i]
                     .checked_sub(trace.ideal[i])
-                    .and_then(i64::checked_abs)
+                    .and_then(|value| value.checked_abs())
                     .ok_or(NumericError::InvalidInput {
                         node: index,
                         reason: "RNE trace error overflow",
@@ -774,7 +777,7 @@ impl RneFp32Plan {
             .map(|(&actual, &ideal)| {
                 actual
                     .checked_sub(ideal)
-                    .and_then(i64::checked_abs)
+                    .and_then(|value| value.checked_abs())
                     .expect("validated RNE error")
             })
             .max()
@@ -813,6 +816,12 @@ impl RneFp32Plan {
         bias_len: Option<usize>,
     ) -> Result<RneNodeTrace, NumericError> {
         let len = left.actual.len();
+        if matches!(bias_len, Some(0)) {
+            return Err(NumericError::InvalidInput {
+                node: node_index,
+                reason: "bias width must be positive in RNE trace",
+            });
+        }
         let mut ideal = Vec::with_capacity(len);
         let mut actual = Vec::with_capacity(len);
         let mut epsilon = Vec::with_capacity(len);
@@ -1100,7 +1109,7 @@ fn round_ticks_to_binary32(
         let remainder = magnitude & (step - 1);
         let half = step >> 1;
         let increment = remainder > half || (remainder == half && quotient & 1 == 1);
-        let rounded_quotient = quotient + u64::from(increment);
+        let rounded_quotient = quotient + if increment { 1 } else { 0 };
         rounded_quotient
             .checked_shl(shift)
             .ok_or("binary32 rounding overflow")?
@@ -1124,7 +1133,7 @@ fn encode_representable_ticks(
     if value == 0 {
         return Ok(0);
     }
-    let sign = u32::from(value < 0);
+    let sign = if value < 0 { 1 } else { 0 };
     let magnitude = value.unsigned_abs();
     if magnitude > i64::MAX as u64 {
         return Err("fixed-point magnitude exceeds supported i64 range");
