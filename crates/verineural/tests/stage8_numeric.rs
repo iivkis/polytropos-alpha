@@ -1,4 +1,6 @@
-use verineural::{Domain, ExactFp32Plan, NeuralGraph, NumericError, Shape, Tensor};
+use verineural::{
+    Domain, ExactFp32Plan, NeuralGraph, NumericError, RneFp32Plan, Shape, Tensor,
+};
 
 fn plan() -> (NeuralGraph, verineural::NodeId, [verineural::NodeId; 3]) {
     let mut graph = NeuralGraph::default();
@@ -284,4 +286,99 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
         first_graph
             .contains("write_checked_lean(&root.join(\"numeric.lean\"), &plan.lean_source()?)?")
     );
+}
+
+
+#[test]
+fn stage8_fractional_rne_trace_accumulates_nonzero_epsilon() {
+    let mut graph = NeuralGraph::default();
+    let matrix = Shape::new(vec![1, 1]).unwrap();
+    let x = graph.input(matrix.clone(), Domain::Finite);
+    let y = graph.input(matrix, Domain::Finite);
+    let bias = graph.input(Shape::new(vec![1]).unwrap(), Domain::Finite);
+    let sum = graph.add(x, y).unwrap();
+    let biased = graph.bias_add(sum, bias).unwrap();
+    let output = graph.relu(biased).unwrap();
+
+    // q = 20. 0x41000001 is 8 + 2^-20, 0x35800000 is 2^-20.
+    // First add: 16 + 2^-20 is exactly halfway between two binary32 values
+    // and ties to even at 16. The bias repeats the same loss.
+    let inputs = [
+        (
+            x,
+            Tensor::new(
+                Shape::new(vec![1, 1]).unwrap(),
+                vec![f32::from_bits(0x4100_0001)],
+            )
+            .unwrap(),
+        ),
+        (
+            y,
+            Tensor::new(
+                Shape::new(vec![1, 1]).unwrap(),
+                vec![f32::from_bits(0x4100_0000)],
+            )
+            .unwrap(),
+        ),
+        (
+            bias,
+            Tensor::new(
+                Shape::new(vec![1]).unwrap(),
+                vec![f32::from_bits(0x3580_0000)],
+            )
+            .unwrap(),
+        ),
+    ];
+
+    let plan = RneFp32Plan::compile(&graph, output, 20).unwrap();
+    let trace = plan.trace(&inputs).unwrap();
+    assert_eq!(plan.fraction_bits(), 20);
+    assert_eq!(trace.ideal_output_ticks(), &[16_777_218]);
+    assert_eq!(trace.rounded_output_ticks(), &[16_777_216]);
+    assert_eq!(trace.observed_error_ticks(), 2);
+    // The Lean composition deliberately uses a conservative one-ulp budget
+    // for each rounding site, so two sites produce four ticks.
+    assert_eq!(trace.epsilon_ticks(), 4);
+    assert_eq!(trace.expected().values()[0].to_bits(), 0x4180_0000);
+    trace.compare_gpu(trace.expected()).unwrap();
+
+    let source = trace.lean_source();
+    assert!(source.contains("Binary32RneTick 16777217 16777216 1"));
+    assert!(source.contains("VeriNeural.approx_add_round"));
+    assert!(source.contains("theorem output_elem_0_fp32_error"));
+    assert!(source.contains("ApproxWithin 4 16777218 16777216"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+#[test]
+fn stage8_fractional_rne_slice_fails_closed_outside_its_model() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![1]).unwrap();
+    let x = graph.input(shape.clone(), Domain::Finite);
+    let y = graph.input(shape, Domain::Finite);
+    let product = graph.mul(x, y).unwrap();
+    assert!(matches!(
+        RneFp32Plan::compile(&graph, product, 20),
+        Err(NumericError::UnsupportedOperation { .. })
+    ));
+
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![1]).unwrap(), Domain::Finite);
+    let output = graph.relu(x).unwrap();
+    let plan = RneFp32Plan::compile(&graph, output, 20).unwrap();
+
+    for value in [-0.0f32, f32::from_bits(1), 0.1f32, f32::INFINITY] {
+        let input = [(
+            x,
+            Tensor::new(Shape::new(vec![1]).unwrap(), vec![value]).unwrap(),
+        )];
+        assert!(
+            plan.trace(&input).is_err(),
+            "value should be rejected by the q=20 RNE slice: {:08x}",
+            value.to_bits()
+        );
+    }
+    assert!(RneFp32Plan::compile(&graph, output, 0).is_err());
+    assert!(RneFp32Plan::compile(&graph, output, 31).is_err());
 }
