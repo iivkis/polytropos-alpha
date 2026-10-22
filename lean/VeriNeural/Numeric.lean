@@ -245,12 +245,14 @@ theorem binary32_rne_within_step {exact rounded : Int} {shift : Nat}
     rcases hnearest with hlt | heq
     · omega
     · omega
+  have hupper :
+      rounded - exact ≤ Int.ofNat (rounded - exact).natAbs :=
+    Int.le_natAbs
+  have hlower :
+      -(rounded - exact) ≤ Int.ofNat (rounded - exact).natAbs := by
+    simpa only [Int.natAbs_neg] using
+      (Int.le_natAbs (a := -(rounded - exact)))
   unfold ApproxWithin Within
-  have hnonnegative : 0 ≤ ((rounded - exact).natAbs : Int) := by omega
-  rcases Int.natAbs_eq (rounded - exact) with hs | hs
-  · rw [hs]
-    constructor <;> omega
-  · rw [hs]
-    constructor <;> omega
+  constructor <;> omega
 
 end VeriNeural
