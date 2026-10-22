@@ -1101,14 +1101,18 @@ impl GpuEngine {
         }
 
         let last = program.graph.node(program.output)?;
-        let output_addresses = program.outputs.iter().map(|&id| {
-            let node = program.graph.node(id)?;
-            let address = *buffers.get(&id.index()).ok_or(GpuError::InvalidInput {
-                node: id.index(),
-                reason: "selected output does not own a live CUDA buffer",
-            })?;
-            Ok((id, node.shape.clone(), address))
-        }).collect::<Result<Vec<_>, GpuError>>()?;
+        let output_addresses = program
+            .outputs
+            .iter()
+            .map(|&id| {
+                let node = program.graph.node(id)?;
+                let address = *buffers.get(&id.index()).ok_or(GpuError::InvalidInput {
+                    node: id.index(),
+                    reason: "selected output does not own a live CUDA buffer",
+                })?;
+                Ok((id, node.shape.clone(), address))
+            })
+            .collect::<Result<Vec<_>, GpuError>>()?;
         Ok(GpuExecution {
             session,
             program: program.clone(),

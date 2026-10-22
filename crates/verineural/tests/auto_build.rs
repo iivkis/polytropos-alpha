@@ -352,7 +352,6 @@ fn auto_build_creates_dot_and_png_before_manifest_and_replays_without_mutation()
     std::fs::remove_dir_all(root).unwrap();
 }
 
-
 #[test]
 fn auto_builder_plans_one_shared_nvptx_module_for_all_supported_outputs() {
     let mut graph = NeuralGraph::default();
@@ -364,20 +363,36 @@ fn auto_builder_plans_one_shared_nvptx_module_for_all_supported_outputs() {
     let final_sum = graph.add(left, right).unwrap();
     let auto = ArchitectureAutoCompiler::default();
 
-    let plan = auto.plan(
-        &graph, &[left, right, final_sum], &[], GpuRequirement::AllOutputs,
-    ).unwrap();
+    let plan = auto
+        .plan(
+            &graph,
+            &[left, right, final_sum],
+            &[],
+            GpuRequirement::AllOutputs,
+        )
+        .unwrap();
     assert_eq!(plan.gpu.len(), 3);
     let shared = plan.shared_gpu.as_ref().unwrap();
     assert_eq!(shared.outputs(), &[left, right, final_sum]);
     assert_eq!(shared.kernel_count().unwrap(), 4);
-    assert_eq!(shared.llvm_ir().matches("define ptx_kernel void @vn_node_").count(), 4);
+    assert_eq!(
+        shared
+            .llvm_ir()
+            .matches("define ptx_kernel void @vn_node_")
+            .count(),
+        4
+    );
     assert_eq!(shared.source_inputs(), &[a, b]);
 
     let unsupported = graph.positive_mask(a).unwrap();
-    let partial = auto.plan(
-        &graph, &[final_sum, unsupported], &[], GpuRequirement::AllowUnsupported,
-    ).unwrap();
+    let partial = auto
+        .plan(
+            &graph,
+            &[final_sum, unsupported],
+            &[],
+            GpuRequirement::AllowUnsupported,
+        )
+        .unwrap();
     assert!(partial.shared_gpu.is_none());
     assert!(matches!(partial.gpu[0], PlannedGpu::Supported { .. }));
     assert!(matches!(partial.gpu[1], PlannedGpu::Unsupported { .. }));

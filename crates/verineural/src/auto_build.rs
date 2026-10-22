@@ -438,7 +438,9 @@ impl ArchitectureAutoCompiler {
             }
         }
         let shared_gpu = if outputs.len() > 1
-            && gpu.iter().all(|part| matches!(part, PlannedGpu::Supported { .. }))
+            && gpu
+                .iter()
+                .all(|part| matches!(part, PlannedGpu::Supported { .. }))
         {
             let program = self.gpu.compile_outputs(graph, outputs)?;
             (program.kernel_count()? > 0).then_some(Box::new(program))
@@ -611,7 +613,11 @@ fn report_text(graph: &NeuralGraph, report: &AutoBuildReport) -> String {
     if let Some(ptx) = &report.shared_gpu_ptx {
         text.push_str(&format!(
             "gpu_shared=status=structurally-translated;outputs={:?};ptx={}\n",
-            report.output_evidence.iter().map(|item| item.node).collect::<Vec<_>>(),
+            report
+                .output_evidence
+                .iter()
+                .map(|item| item.node)
+                .collect::<Vec<_>>(),
             ptx.display()
         ));
     }
@@ -794,9 +800,11 @@ fn verify_gpu_translation(
         )));
     }
     let ptx = fs::read_to_string(directory.join("graph.ptx"))?;
-    let checked = translation.validate(program.llvm_ir(), &ptx).map_err(|err| {
-        AutoBuildError::Integrity(format!("{label} LLVM/PTX translation rejected: {err}"))
-    })?;
+    let checked = translation
+        .validate(program.llvm_ir(), &ptx)
+        .map_err(|err| {
+            AutoBuildError::Integrity(format!("{label} LLVM/PTX translation rejected: {err}"))
+        })?;
     if fs::read_to_string(directory.join("translation.report"))? != checked.to_text() {
         return Err(AutoBuildError::Integrity(format!(
             "{label} translation report mismatch"

@@ -1,8 +1,7 @@
 //! A shared GPU program is a union of reachable Semantic IR nodes, not one
 //! separately compiled PTX graph per requested result.
 use verineural::{
-    Domain, GpuEngine, GpuError, GpuLaunchConfig, NeuralGraph, NodeId, ReluFusion,
-    Shape,
+    Domain, GpuEngine, GpuError, GpuLaunchConfig, NeuralGraph, NodeId, ReluFusion, Shape,
 };
 
 fn make() -> (NeuralGraph, [NodeId; 2], [NodeId; 4]) {
@@ -26,18 +25,35 @@ fn shared_gpu_program_emits_common_kernel_only_once_and_orders_results() {
     assert_eq!(program.output(), outputs[0]);
     assert_eq!(program.source_inputs(), &sources);
     assert_eq!(program.kernel_count().unwrap(), 4);
-    assert_eq!(program.llvm_ir().matches("define ptx_kernel void @vn_node_").count(), 4);
-    let root_nodes = program.translation_plan().unwrap().kernels
-        .iter().map(|k| k.node).collect::<Vec<_>>();
-    assert_eq!(root_nodes, outputs.iter().map(|id| id.index()).collect::<Vec<_>>());
+    assert_eq!(
+        program
+            .llvm_ir()
+            .matches("define ptx_kernel void @vn_node_")
+            .count(),
+        4
+    );
+    let root_nodes = program
+        .translation_plan()
+        .unwrap()
+        .kernels
+        .iter()
+        .map(|k| k.node)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        root_nodes,
+        outputs.iter().map(|id| id.index()).collect::<Vec<_>>()
+    );
 
     // Without shared compilation, all four root programs repeat producers.
-    let independent_kernels: usize = outputs.iter().map(|&id| {
-        engine.compile(&graph, id).unwrap().kernel_count().unwrap()
-    }).sum();
+    let independent_kernels: usize = outputs
+        .iter()
+        .map(|&id| engine.compile(&graph, id).unwrap().kernel_count().unwrap())
+        .sum();
     assert!(independent_kernels > program.kernel_count().unwrap());
 
-    let reversed = engine.compile_outputs(&graph, &[outputs[3], outputs[0]]).unwrap();
+    let reversed = engine
+        .compile_outputs(&graph, &[outputs[3], outputs[0]])
+        .unwrap();
     assert_eq!(reversed.outputs(), &[outputs[3], outputs[0]]);
     assert_eq!(reversed.kernel_count().unwrap(), 4);
 }
@@ -45,10 +61,11 @@ fn shared_gpu_program_emits_common_kernel_only_once_and_orders_results() {
 #[test]
 fn shared_gpu_fusion_preserves_selected_intermediate_outputs() {
     let (graph, _sources, outputs) = make();
-    let engine = GpuEngine::default().with_launch_config(
-        GpuLaunchConfig::new(128, ReluFusion::Experimental).unwrap()
-    );
-    let observable = engine.compile_outputs(&graph, &[outputs[0], outputs[1]]).unwrap();
+    let engine = GpuEngine::default()
+        .with_launch_config(GpuLaunchConfig::new(128, ReluFusion::Experimental).unwrap());
+    let observable = engine
+        .compile_outputs(&graph, &[outputs[0], outputs[1]])
+        .unwrap();
     assert_eq!(observable.kernel_count().unwrap(), 2);
     assert!(!observable.fused_relus().contains_key(&outputs[1].index()));
 
@@ -92,7 +109,10 @@ fn shared_gpu_compilation_rejects_empty_duplicate_foreign_and_unsupported_roots(
     let bad = next.positive_mask(input).unwrap();
     assert!(matches!(
         engine.compile_outputs(&next, &[input, bad]),
-        Err(GpuError::UnsupportedOperation { operation: "positive_mask", .. })
+        Err(GpuError::UnsupportedOperation {
+            operation: "positive_mask",
+            ..
+        })
     ));
 }
 
@@ -103,7 +123,9 @@ fn shared_gpu_keeps_reshape_alias_and_live_input_union() {
     let y = g.input(Shape::new(vec![4]).unwrap(), Domain::Finite);
     let reshaped = g.reshape(x, Shape::new(vec![4]).unwrap()).unwrap();
     let sum = g.add(reshaped, y).unwrap();
-    let plan = GpuEngine::default().compile_outputs(&g, &[reshaped, sum]).unwrap();
+    let plan = GpuEngine::default()
+        .compile_outputs(&g, &[reshaped, sum])
+        .unwrap();
     assert_eq!(plan.source_inputs(), &[x, y]);
     assert_eq!(plan.kernel_count().unwrap(), 1);
     assert_eq!(plan.outputs(), &[reshaped, sum]);
@@ -120,4 +142,3 @@ fn shared_gpu_supports_standalone_inputs_without_any_kernel() {
     assert_eq!(program.kernel_count().unwrap(), 0);
     assert_eq!(program.outputs(), &[a, b]);
 }
-
