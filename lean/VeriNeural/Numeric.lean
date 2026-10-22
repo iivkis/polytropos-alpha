@@ -105,9 +105,14 @@ theorem foldl_within_sum (f : Nat → Int) (bound : Int) :
         intro x hx
         exact hxs x (by simp [hx])
       have hstep := within_add hacc hj
-      simpa [List.foldl_cons, Int.natCast_add, add_mul, add_assoc, add_comm,
-        add_left_comm] using
-        (ih (acc + f j) (budget + bound) hrest hstep)
+      have hbudget :
+          budget + ((j :: rest).length : Int) * bound =
+            (budget + bound) + (rest.length : Int) * bound := by
+        simp only [List.length_cons, Int.natCast_add, Int.natCast_one,
+          Int.add_mul, Int.one_mul]
+        omega
+      rw [List.foldl_cons, hbudget]
+      exact ih (acc + f j) (budget + bound) hrest hstep
 
 /-- Row-major dot product with no FMA and a left-to-right reduction.
     Every intermediate product and partial sum has a symbolic bound. -/
@@ -126,7 +131,9 @@ theorem tensor_within_matmul {m k n : Nat}
     simpa [f, flatGet, haddr.1, haddr.2] using
       (within_mul (ha ⟨(i.val / n) * k + j, haddr.1⟩)
         (hb ⟨j * n + i.val % n, haddr.2⟩))
-  have hzero : Within 0 (0 : Int) := by decide
+  have hzero : Within 0 (0 : Int) := by
+    unfold Within
+    constructor <;> omega
   have h := foldl_within_sum f (boundA * boundB) (List.range k)
     0 0 hf hzero
   simpa [matmul, f, List.length_range] using h
