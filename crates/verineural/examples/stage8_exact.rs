@@ -10,11 +10,11 @@ use std::path::Path;
 use std::process::Command;
 
 use verineural::{
-    Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, MathContract, NeuralGraph,
-    NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd, ResidualFfn, RneFp32Plan,
-    RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx, subnormal_add_exact_bits,
-    subnormal_mul_rne_bits, subnormal_relu_bits, special_mul_bias_relu_boundary,
-    Fp32SpecialExpected,
+    Domain, ExactFp32Plan, Fp32SpecialExpected, GpuEngine, GpuLaunchConfig, LeanProofEngine,
+    MathContract, NeuralGraph, NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd,
+    ResidualFfn, RneFp32Plan, RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx,
+    special_mul_bias_relu_boundary, subnormal_add_exact_bits, subnormal_mul_rne_bits,
+    subnormal_relu_bits,
 };
 
 const FILES: [&str; 72] = [
@@ -1048,14 +1048,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         0x7f80_0000, // +inf * -1 + 0 -> -inf, ReLU +0
     ];
     let special_rhs: [u32; SPECIAL_PROBE_LANES] = [
-        0x3f80_0000, 0x3f80_0000, 0x7f80_0000, 0x3f80_0000,
-        0x4000_0000, 0x4000_0000, 0x3f80_0000, 0xbf80_0000,
-        0x3f80_0000, 0x3f80_0000, 0x3f80_0000, 0x3f80_0000,
+        0x3f80_0000,
+        0x3f80_0000,
+        0x7f80_0000,
+        0x3f80_0000,
+        0x4000_0000,
+        0x4000_0000,
+        0x3f80_0000,
+        0xbf80_0000,
+        0x3f80_0000,
+        0x3f80_0000,
+        0x3f80_0000,
+        0x3f80_0000,
         0xbf80_0000,
     ];
-    let special_bias: [u32; SPECIAL_PROBE_LANES] = [
-        0, 0, 0, 0, 0, 0, 0, 0x8000_0000, 0xbf80_0000, 0, 0, 0, 0,
-    ];
+    let special_bias: [u32; SPECIAL_PROBE_LANES] =
+        [0, 0, 0, 0, 0, 0, 0, 0x8000_0000, 0xbf80_0000, 0, 0, 0, 0];
     let fixed_expected: [Fp32SpecialExpected; SPECIAL_PROBE_LANES] = [
         Fp32SpecialExpected::Exact(0x7f80_0000),
         Fp32SpecialExpected::Exact(0),
@@ -1080,7 +1088,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         if oracle != Some(fixed_expected[lane]) {
             return Err(io::Error::other(format!(
                 "special FP32 independent fixture disagreement at lane {lane}"
-            )).into());
+            ))
+            .into());
         }
     }
     let mut special_graph = NeuralGraph::default();
@@ -1096,40 +1105,57 @@ fn main() -> Result<(), Box<dyn Error>> {
             special_x,
             Tensor::new(
                 special_shape.clone(),
-                special_lhs.iter().map(|&bits| f32::from_bits(bits)).collect(),
+                special_lhs
+                    .iter()
+                    .map(|&bits| f32::from_bits(bits))
+                    .collect(),
             )?,
         ),
         (
             special_y,
             Tensor::new(
                 special_shape,
-                special_rhs.iter().map(|&bits| f32::from_bits(bits)).collect(),
+                special_rhs
+                    .iter()
+                    .map(|&bits| f32::from_bits(bits))
+                    .collect(),
             )?,
         ),
         (
             special_b,
             Tensor::new(
                 Shape::new(vec![SPECIAL_PROBE_LANES])?,
-                special_bias.iter().map(|&bits| f32::from_bits(bits)).collect(),
+                special_bias
+                    .iter()
+                    .map(|&bits| f32::from_bits(bits))
+                    .collect(),
             )?,
         ),
     ];
     fs::write(
         root.join("special_inputs.bits"),
         (0..SPECIAL_PROBE_LANES)
-            .map(|lane| format!(
-                "{:08x} {:08x} {:08x}\n",
-                special_lhs[lane], special_rhs[lane], special_bias[lane]
-            ))
+            .map(|lane| {
+                format!(
+                    "{:08x} {:08x} {:08x}\n",
+                    special_lhs[lane], special_rhs[lane], special_bias[lane]
+                )
+            })
             .collect::<String>(),
     )?;
     for (label, filename, engine) in [
-        ("baseline_special", "special_baseline_output.bits", &baseline),
+        (
+            "baseline_special",
+            "special_baseline_output.bits",
+            &baseline,
+        ),
         ("fused_special", "special_fused_output.bits", &fused),
     ] {
         let program = engine.compile(&special_graph, special_result)?;
         if label == "fused_special" && program.removed_kernel_count() != 2 {
-            return Err(io::Error::other("special FP32 probe expected guarded full-chain fusion").into());
+            return Err(
+                io::Error::other("special FP32 probe expected guarded full-chain fusion").into(),
+            );
         }
         let output = engine.execute(&program, &special_inputs, &root.join(label))?;
         if output.values().len() != SPECIAL_PROBE_LANES {
@@ -1142,7 +1168,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err(io::Error::other(format!(
                     "{label} special FP32 lane {lane}: expected={}, got={observed:08x}",
                     fixed_expected[lane].description()
-                )).into());
+                ))
+                .into());
             }
             bits.push_str(&format!("{observed:08x}\n"));
         }
@@ -1151,7 +1178,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             "Stage 8 {label}: {SPECIAL_PROBE_LANES} FP32 special/overflow/zero lanes match bit-class oracle"
         );
     }
-    fs::write(root.join("special_evidence.txt"), special_values_report(root)?)?;
+    fs::write(
+        root.join("special_evidence.txt"),
+        special_values_report(root)?,
+    )?;
     write_checked_lean(
         &root.join("numeric_special.lean"),
         include_str!("../../../lean/VeriNeural/Special.lean"),
@@ -1789,7 +1819,9 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 gradual underflow: 8 signed/subnormal lanes in both baseline/fused kernels; integer bit oracle plus Lean half-tick model"
     );
-    println!("Stage 8 FP32 special-value boundary: 13 lanes baseline/fused with exact-bit or quiet-NaN class oracle");
+    println!(
+        "Stage 8 FP32 special-value boundary: 13 lanes baseline/fused with exact-bit or quiet-NaN class oracle"
+    );
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?

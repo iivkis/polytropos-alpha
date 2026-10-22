@@ -45,9 +45,7 @@ fn is_quiet_nan(bits: u32) -> bool {
 }
 
 fn is_signaling_nan(bits: u32) -> bool {
-    bits & 0x7f80_0000 == INFINITY
-        && bits & 0x007f_ffff != 0
-        && bits & 0x0040_0000 == 0
+    bits & 0x7f80_0000 == INFINITY && bits & 0x007f_ffff != 0 && bits & 0x0040_0000 == 0
 }
 
 fn is_zero(bits: u32) -> bool {
@@ -112,22 +110,26 @@ pub fn special_add_boundary(
         return None;
     }
     if is_infinite(lhs_bits) || is_infinite(rhs_bits) {
-        return Some(if is_infinite(lhs_bits)
-            && is_infinite(rhs_bits)
-            && sign_of(lhs_bits) != sign_of(rhs_bits)
-        {
-            Fp32SpecialExpected::QuietNaN
-        } else {
-            Fp32SpecialExpected::Exact(if is_infinite(lhs_bits) {
-                lhs_bits
+        return Some(
+            if is_infinite(lhs_bits)
+                && is_infinite(rhs_bits)
+                && sign_of(lhs_bits) != sign_of(rhs_bits)
+            {
+                Fp32SpecialExpected::QuietNaN
             } else {
-                rhs_bits
-            })
-        });
+                Fp32SpecialExpected::Exact(if is_infinite(lhs_bits) {
+                    lhs_bits
+                } else {
+                    rhs_bits
+                })
+            },
+        );
     }
     if is_zero(lhs_bits) && is_zero(rhs_bits) {
         // Round-to-nearest: -0 + -0 is -0; opposite signed zeros give +0.
-        return Some(Fp32SpecialExpected::Exact(sign_of(lhs_bits) & sign_of(rhs_bits)));
+        return Some(Fp32SpecialExpected::Exact(
+            sign_of(lhs_bits) & sign_of(rhs_bits),
+        ));
     }
     if is_zero(lhs_bits) {
         return Some(Fp32SpecialExpected::Exact(rhs_bits));
@@ -156,9 +158,7 @@ pub fn special_add_boundary(
 pub fn special_relu_boundary(input: Fp32SpecialExpected) -> Fp32SpecialExpected {
     match input {
         Fp32SpecialExpected::QuietNaN => Fp32SpecialExpected::QuietNaN,
-        Fp32SpecialExpected::Exact(bits) if sign_of(bits) != 0 => {
-            Fp32SpecialExpected::Exact(0)
-        }
+        Fp32SpecialExpected::Exact(bits) if sign_of(bits) != 0 => Fp32SpecialExpected::Exact(0),
         exact => exact,
     }
 }
@@ -196,7 +196,10 @@ mod tests {
             (INFINITY, SIGN | ONE, 0, Fp32SpecialExpected::Exact(0)),
         ];
         for (lhs, rhs, bias, expected) in lanes {
-            assert_eq!(special_mul_bias_relu_boundary(lhs, rhs, bias), Some(expected));
+            assert_eq!(
+                special_mul_bias_relu_boundary(lhs, rhs, bias),
+                Some(expected)
+            );
         }
         assert!(Fp32SpecialExpected::QuietNaN.accepts(0x7fc0_0000));
         assert!(Fp32SpecialExpected::QuietNaN.accepts(0xffd2_0000));
@@ -207,7 +210,10 @@ mod tests {
     #[test]
     fn exceptional_oracle_fails_closed_for_unmodeled_values() {
         assert_eq!(special_mul_boundary(0x7f80_0001, ONE), None);
-        assert_eq!(special_add_boundary(Fp32SpecialExpected::Exact(ONE), 0x7f80_0001), None);
+        assert_eq!(
+            special_add_boundary(Fp32SpecialExpected::Exact(ONE), 0x7f80_0001),
+            None
+        );
         assert_eq!(special_mul_boundary(0x3fc0_0000, 0x3fc0_0000), None);
         assert_eq!(
             special_add_boundary(Fp32SpecialExpected::Exact(ONE), ONE),
