@@ -56,10 +56,7 @@ impl fmt::Display for NumericError {
             Self::Graph(err) => write!(f, "invalid neural graph: {err}"),
             Self::Proof(err) => write!(f, "numerical Lean model: {err}"),
             Self::UnsupportedOperation { node, operation } => {
-                write!(
-                    f,
-                    "numeric FP32 subset rejects {operation} at node {node}"
-                )
+                write!(f, "numeric FP32 subset rejects {operation} at node {node}")
             }
             Self::UnsupportedRange { node, bound } => write!(
                 f,
@@ -898,42 +895,36 @@ impl RneFp32Plan {
 
         for i in 0..len {
             let j = bias_len.map_or(i, |width| i % width);
-            let left_ideal = rescale_i64(left.ideal[i], left_shift).ok_or(
-                NumericError::InvalidInput {
+            let left_ideal =
+                rescale_i64(left.ideal[i], left_shift).ok_or(NumericError::InvalidInput {
                     node: node_index,
                     reason: "ideal dyadic addition rescale overflow",
-                },
-            )?;
-            let right_ideal = rescale_i64(right.ideal[j], right_shift).ok_or(
-                NumericError::InvalidInput {
+                })?;
+            let right_ideal =
+                rescale_i64(right.ideal[j], right_shift).ok_or(NumericError::InvalidInput {
                     node: node_index,
                     reason: "ideal dyadic addition rescale overflow",
-                },
-            )?;
-            let left_actual = rescale_i64(left.actual[i], left_shift).ok_or(
-                NumericError::InvalidInput {
+                })?;
+            let left_actual =
+                rescale_i64(left.actual[i], left_shift).ok_or(NumericError::InvalidInput {
                     node: node_index,
                     reason: "rounded dyadic addition rescale overflow",
-                },
-            )?;
-            let right_actual = rescale_i64(right.actual[j], right_shift).ok_or(
-                NumericError::InvalidInput {
+                })?;
+            let right_actual =
+                rescale_i64(right.actual[j], right_shift).ok_or(NumericError::InvalidInput {
                     node: node_index,
                     reason: "rounded dyadic addition rescale overflow",
-                },
-            )?;
-            let left_epsilon = rescale_i64(left.epsilon[i], left_shift).ok_or(
-                NumericError::InvalidInput {
+                })?;
+            let left_epsilon =
+                rescale_i64(left.epsilon[i], left_shift).ok_or(NumericError::InvalidInput {
                     node: node_index,
                     reason: "dyadic addition error rescale overflow",
-                },
-            )?;
-            let right_epsilon = rescale_i64(right.epsilon[j], right_shift).ok_or(
-                NumericError::InvalidInput {
+                })?;
+            let right_epsilon =
+                rescale_i64(right.epsilon[j], right_shift).ok_or(NumericError::InvalidInput {
                     node: node_index,
                     reason: "dyadic addition error rescale overflow",
-                },
-            )?;
+                })?;
             let ideal_value =
                 left_ideal
                     .checked_add(right_ideal)
@@ -992,13 +983,12 @@ impl RneFp32Plan {
         left_element: usize,
         right_element: usize,
     ) -> Result<(i64, i64, i64, RneWitness), NumericError> {
-        let fraction_bits = left
-            .fraction_bits
-            .checked_add(right.fraction_bits)
-            .ok_or(NumericError::InvalidInput {
+        let fraction_bits = left.fraction_bits.checked_add(right.fraction_bits).ok_or(
+            NumericError::InvalidInput {
                 node: node_index,
                 reason: "RNE product fractional-width overflow",
-            })?;
+            },
+        )?;
         let ideal = left.ideal[left_element]
             .checked_mul(right.ideal[right_element])
             .ok_or(NumericError::InvalidInput {
@@ -1011,27 +1001,31 @@ impl RneFp32Plan {
                 node: node_index,
                 reason: "rounded dyadic product overflow",
             })?;
-        let (rounded, _bits, shift) = round_ticks_to_binary32(pre_round, fraction_bits)
-            .map_err(|reason| NumericError::InvalidInput {
-                node: node_index,
-                reason,
+        let (rounded, _bits, shift) =
+            round_ticks_to_binary32(pre_round, fraction_bits).map_err(|reason| {
+                NumericError::InvalidInput {
+                    node: node_index,
+                    reason,
+                }
             })?;
         let step = binary32_step_i64(shift).ok_or(NumericError::InvalidInput {
             node: node_index,
             reason: "binary32 product ulp step overflow",
         })?;
-        let bound_ideal_left = left.ideal[left_element]
-            .checked_abs()
-            .ok_or(NumericError::InvalidInput {
-                node: node_index,
-                reason: "ideal product bound overflow",
-            })?;
-        let bound_actual_right = right.actual[right_element]
-            .checked_abs()
-            .ok_or(NumericError::InvalidInput {
-                node: node_index,
-                reason: "actual product bound overflow",
-            })?;
+        let bound_ideal_left =
+            left.ideal[left_element]
+                .checked_abs()
+                .ok_or(NumericError::InvalidInput {
+                    node: node_index,
+                    reason: "ideal product bound overflow",
+                })?;
+        let bound_actual_right =
+            right.actual[right_element]
+                .checked_abs()
+                .ok_or(NumericError::InvalidInput {
+                    node: node_index,
+                    reason: "actual product bound overflow",
+                })?;
         let propagated = left.epsilon[left_element]
             .checked_mul(bound_actual_right)
             .and_then(|v| {
@@ -1124,30 +1118,27 @@ impl RneFp32Plan {
                 for j in 0..inner {
                     let left_element = row * inner + j;
                     let right_element = j * cols + col;
-                    let (
-                        product_ideal,
-                        product_actual,
-                        product_epsilon,
-                        product_rounding,
-                    ) = self.trace_mul_element(
+                    let (product_ideal, product_actual, product_epsilon, product_rounding) = self
+                        .trace_mul_element(
                         node_index,
                         left,
                         right,
                         left_element,
                         right_element,
                     )?;
-                    let next_ideal = sum_ideal
-                        .checked_add(product_ideal)
-                        .ok_or(NumericError::InvalidInput {
-                            node: node_index,
-                            reason: "ideal MatMul reduction overflow",
-                        })?;
-                    let pre_round = sum_actual
-                        .checked_add(product_actual)
-                        .ok_or(NumericError::InvalidInput {
+                    let next_ideal =
+                        sum_ideal
+                            .checked_add(product_ideal)
+                            .ok_or(NumericError::InvalidInput {
+                                node: node_index,
+                                reason: "ideal MatMul reduction overflow",
+                            })?;
+                    let pre_round = sum_actual.checked_add(product_actual).ok_or(
+                        NumericError::InvalidInput {
                             node: node_index,
                             reason: "rounded MatMul reduction overflow",
-                        })?;
+                        },
+                    )?;
                     let (next_actual, _bits, shift) =
                         round_ticks_to_binary32(pre_round, fraction_bits).map_err(|reason| {
                             NumericError::InvalidInput {
@@ -1255,23 +1246,17 @@ impl RneFp32Plan {
                             rescale_i64(left_trace.ideal[element], left_shift).expect("validated");
                         let left_actual =
                             rescale_i64(left_trace.actual[element], left_shift).expect("validated");
-                        let left_epsilon =
-                            rescale_i64(left_trace.epsilon[element], left_shift).expect("validated");
-                        let right_ideal = rescale_i64(
-                            right_trace.ideal[right_element],
-                            right_shift,
-                        )
-                        .expect("validated");
-                        let right_actual = rescale_i64(
-                            right_trace.actual[right_element],
-                            right_shift,
-                        )
-                        .expect("validated");
-                        let right_epsilon = rescale_i64(
-                            right_trace.epsilon[right_element],
-                            right_shift,
-                        )
-                        .expect("validated");
+                        let left_epsilon = rescale_i64(left_trace.epsilon[element], left_shift)
+                            .expect("validated");
+                        let right_ideal =
+                            rescale_i64(right_trace.ideal[right_element], right_shift)
+                                .expect("validated");
+                        let right_actual =
+                            rescale_i64(right_trace.actual[right_element], right_shift)
+                                .expect("validated");
+                        let right_epsilon =
+                            rescale_i64(right_trace.epsilon[right_element], right_shift)
+                                .expect("validated");
                         let witness = trace.rounding[element].expect("add rounding witness");
                         let round_name = format!("rne_node_{index}_elem_{element}_round");
                         source.push_str(&format!(
@@ -1306,8 +1291,9 @@ impl RneFp32Plan {
                         let round_name = format!("rne_node_{index}_elem_{element}_round");
                         let bound_ideal_left =
                             left_trace.ideal[element].checked_abs().expect("validated");
-                        let bound_actual_right =
-                            right_trace.actual[element].checked_abs().expect("validated");
+                        let bound_actual_right = right_trace.actual[element]
+                            .checked_abs()
+                            .expect("validated");
                         source.push_str(&format!(
                             "theorem {round_name} :\n  \
                              VeriNeural.Binary32RneTick {} {} {} := by\n  \
@@ -1357,9 +1343,8 @@ impl RneFp32Plan {
                             let product_error_name = format!(
                                 "rne_node_{index}_elem_{element}_product_{step_index}_error"
                             );
-                            let sum_round_name = format!(
-                                "rne_node_{index}_elem_{element}_sum_{step_index}_round"
-                            );
+                            let sum_round_name =
+                                format!("rne_node_{index}_elem_{element}_sum_{step_index}_round");
                             let sum_error_name = format!(
                                 "rne_node_{index}_elem_{element}_sum_{}_error",
                                 step_index + 1

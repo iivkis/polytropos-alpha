@@ -476,14 +476,8 @@ fn stage8_fractional_matmul_models_separate_mul_add_reduction() {
 
     let value = f32::from_bits(0x4100_0001);
     let inputs = [
-        (
-            lhs,
-            Tensor::new(lhs_shape, vec![value, value]).unwrap(),
-        ),
-        (
-            rhs,
-            Tensor::new(rhs_shape, vec![value, value]).unwrap(),
-        ),
+        (lhs, Tensor::new(lhs_shape, vec![value, value]).unwrap()),
+        (rhs, Tensor::new(rhs_shape, vec![value, value]).unwrap()),
     ];
 
     let plan = RneFp32Plan::compile(&graph, output, 20).unwrap();

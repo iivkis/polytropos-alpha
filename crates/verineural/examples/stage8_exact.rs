@@ -300,31 +300,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     // discrepancy on the q=40 output proof lattice.
     let mut rne_mat_graph = NeuralGraph::default();
     let rne_mat_value = f32::from_bits(0x4100_0001);
-    let rne_mat_lhs = Tensor::new(
-        Shape::new(vec![1, 2])?,
-        vec![rne_mat_value, rne_mat_value],
-    )?;
-    let rne_mat_rhs = Tensor::new(
-        Shape::new(vec![2, 1])?,
-        vec![rne_mat_value, rne_mat_value],
-    )?;
+    let rne_mat_lhs = Tensor::new(Shape::new(vec![1, 2])?, vec![rne_mat_value, rne_mat_value])?;
+    let rne_mat_rhs = Tensor::new(Shape::new(vec![2, 1])?, vec![rne_mat_value, rne_mat_value])?;
     let rne_mat_lhs_id = rne_mat_graph.input(rne_mat_lhs.shape().clone(), Domain::Finite);
     let rne_mat_rhs_id = rne_mat_graph.input(rne_mat_rhs.shape().clone(), Domain::Finite);
     let rne_mat_output = rne_mat_graph.matmul(rne_mat_lhs_id, rne_mat_rhs_id)?;
-    let rne_mat_inputs = [
-        (rne_mat_lhs_id, rne_mat_lhs),
-        (rne_mat_rhs_id, rne_mat_rhs),
-    ];
+    let rne_mat_inputs = [(rne_mat_lhs_id, rne_mat_lhs), (rne_mat_rhs_id, rne_mat_rhs)];
     let rne_mat_plan = RneFp32Plan::compile(&rne_mat_graph, rne_mat_output, 20)?;
     let rne_mat_trace = rne_mat_plan.trace(&rne_mat_inputs)?;
     if rne_mat_plan.output_fraction_bits() != 40
         || rne_mat_trace.observed_error_ticks() != 2
         || rne_mat_trace.epsilon_ticks() == 0
     {
-        return Err(io::Error::other(
-            "unexpected Stage 8 fractional MatMul RNE/error trace",
-        )
-        .into());
+        return Err(
+            io::Error::other("unexpected Stage 8 fractional MatMul RNE/error trace").into(),
+        );
     }
     write_checked_lean(
         &root.join("numeric_rne_matmul.lean"),
