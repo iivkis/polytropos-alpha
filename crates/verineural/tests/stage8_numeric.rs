@@ -1,6 +1,4 @@
-use verineural::{
-    Domain, ExactFp32Plan, NeuralGraph, NumericError, RneFp32Plan, Shape, Tensor,
-};
+use verineural::{Domain, ExactFp32Plan, NeuralGraph, NumericError, RneFp32Plan, Shape, Tensor};
 
 fn plan() -> (NeuralGraph, verineural::NodeId, [verineural::NodeId; 3]) {
     let mut graph = NeuralGraph::default();
@@ -357,7 +355,6 @@ fn stage8_fractional_rne_trace_accumulates_nonzero_epsilon() {
     assert!(!source.contains("admit"));
 }
 
-
 #[test]
 fn stage8_fractional_rne_ties_choose_even_for_both_signs() {
     let mut graph = NeuralGraph::default();
@@ -370,10 +367,7 @@ fn stage8_fractional_rne_ties_choose_even_for_both_signs() {
             x,
             Tensor::new(
                 shape.clone(),
-                vec![
-                    f32::from_bits(0x4100_0002),
-                    f32::from_bits(0xc100_0002),
-                ],
+                vec![f32::from_bits(0x4100_0002), f32::from_bits(0xc100_0002)],
             )
             .unwrap(),
         ),
@@ -381,10 +375,7 @@ fn stage8_fractional_rne_ties_choose_even_for_both_signs() {
             y,
             Tensor::new(
                 shape,
-                vec![
-                    f32::from_bits(0x4100_0001),
-                    f32::from_bits(0xc100_0001),
-                ],
+                vec![f32::from_bits(0x4100_0001), f32::from_bits(0xc100_0001)],
             )
             .unwrap(),
         ),
@@ -395,10 +386,7 @@ fn stage8_fractional_rne_ties_choose_even_for_both_signs() {
         .trace(&inputs)
         .unwrap();
     assert_eq!(trace.ideal_output_ticks(), &[16_777_219, -16_777_219]);
-    assert_eq!(
-        trace.rounded_output_ticks(),
-        &[16_777_220, -16_777_220]
-    );
+    assert_eq!(trace.rounded_output_ticks(), &[16_777_220, -16_777_220]);
     assert_eq!(
         trace
             .expected()
@@ -408,14 +396,17 @@ fn stage8_fractional_rne_ties_choose_even_for_both_signs() {
             .collect::<Vec<_>>(),
         vec![0x4180_0002, 0xc180_0002]
     );
-    assert!(trace
-        .lean_source()
-        .contains("Binary32RneTick 16777219 16777220 1"));
-    assert!(trace
-        .lean_source()
-        .contains("Binary32RneTick -16777219 -16777220 1"));
+    assert!(
+        trace
+            .lean_source()
+            .contains("Binary32RneTick 16777219 16777220 1")
+    );
+    assert!(
+        trace
+            .lean_source()
+            .contains("Binary32RneTick -16777219 -16777220 1")
+    );
 }
-
 
 #[test]
 fn stage8_fractional_rne_slice_fails_closed_outside_its_model() {

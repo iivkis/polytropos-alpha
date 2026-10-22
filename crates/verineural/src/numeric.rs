@@ -692,10 +692,7 @@ impl RneFp32Plan {
     /// Execute the independent fixed-point/RNE oracle and build a concrete
     /// Lean proof trace. The returned f32 values are constructed from bits;
     /// the oracle itself never performs f32 addition or rounding.
-    pub fn trace(
-        &self,
-        inputs: &[(NodeId, Tensor<f32>)],
-    ) -> Result<RneFp32Trace, NumericError> {
+    pub fn trace(&self, inputs: &[(NodeId, Tensor<f32>)]) -> Result<RneFp32Trace, NumericError> {
         let given = self.checked_tick_inputs(inputs)?;
         let mut nodes = BTreeMap::<usize, RneNodeTrace>::new();
 
@@ -829,31 +826,29 @@ impl RneFp32Plan {
 
         for i in 0..len {
             let j = bias_len.map_or(i, |width| i % width);
-            let ideal_value = left.ideal[i]
-                .checked_add(right.ideal[j])
-                .ok_or(NumericError::InvalidInput {
-                    node: node_index,
-                    reason: "ideal fixed-point addition overflow",
-                })?;
-            let pre_round = left.actual[i]
-                .checked_add(right.actual[j])
-                .ok_or(NumericError::InvalidInput {
-                    node: node_index,
-                    reason: "rounded fixed-point addition overflow",
-                })?;
-            let (rounded, _bits, shift) =
-                round_ticks_to_binary32(pre_round, self.fraction_bits).map_err(|reason| {
-                    NumericError::InvalidInput {
+            let ideal_value =
+                left.ideal[i]
+                    .checked_add(right.ideal[j])
+                    .ok_or(NumericError::InvalidInput {
                         node: node_index,
-                        reason,
-                    }
-                })?;
-            let step = 1i64
-                .checked_shl(shift)
-                .ok_or(NumericError::InvalidInput {
+                        reason: "ideal fixed-point addition overflow",
+                    })?;
+            let pre_round =
+                left.actual[i]
+                    .checked_add(right.actual[j])
+                    .ok_or(NumericError::InvalidInput {
+                        node: node_index,
+                        reason: "rounded fixed-point addition overflow",
+                    })?;
+            let (rounded, _bits, shift) = round_ticks_to_binary32(pre_round, self.fraction_bits)
+                .map_err(|reason| NumericError::InvalidInput {
                     node: node_index,
-                    reason: "binary32 ulp step overflow",
+                    reason,
                 })?;
+            let step = 1i64.checked_shl(shift).ok_or(NumericError::InvalidInput {
+                node: node_index,
+                reason: "binary32 ulp step overflow",
+            })?;
             let budget = left.epsilon[i]
                 .checked_add(right.epsilon[j])
                 .and_then(|v| v.checked_add(step))
@@ -935,9 +930,7 @@ impl RneFp32Plan {
                              rne_node_{left_index}_elem_{element}_error\n      \
                              rne_node_{right_index}_elem_{right_element}_error\n      \
                              (VeriNeural.binary32_rne_within_step {round_name}))\n\n",
-                            trace.epsilon[element],
-                            trace.ideal[element],
-                            trace.actual[element]
+                            trace.epsilon[element], trace.ideal[element], trace.actual[element]
                         ));
                     }
                     Operation::Relu => {
@@ -947,9 +940,7 @@ impl RneFp32Plan {
                              VeriNeural.ApproxWithin {} {} {} := by\n  \
                              simpa using\n    \
                              (VeriNeural.approx_relu rne_node_{parent}_elem_{element}_error)\n\n",
-                            trace.epsilon[element],
-                            trace.ideal[element],
-                            trace.actual[element]
+                            trace.epsilon[element], trace.ideal[element], trace.actual[element]
                         ));
                     }
                     Operation::Reshape(_) => {
@@ -958,9 +949,7 @@ impl RneFp32Plan {
                             "theorem {error_name} :\n  \
                              VeriNeural.ApproxWithin {} {} {} := by\n  \
                              simpa using rne_node_{parent}_elem_{element}_error\n\n",
-                            trace.epsilon[element],
-                            trace.ideal[element],
-                            trace.actual[element]
+                            trace.epsilon[element], trace.ideal[element], trace.actual[element]
                         ));
                     }
                     _ => unreachable!("rejected during RNE plan compilation"),
@@ -1025,12 +1014,8 @@ impl RneFp32Trace {
                 reason: "GPU output shape differs from dyadic RNE reference",
             });
         }
-        for (index, (&target, &actual)) in self
-            .expected
-            .values()
-            .iter()
-            .zip(gpu.values())
-            .enumerate()
+        for (index, (&target, &actual)) in
+            self.expected.values().iter().zip(gpu.values()).enumerate()
         {
             if target.to_bits() != actual.to_bits() {
                 return Err(NumericError::OutputBits {
@@ -1126,10 +1111,7 @@ fn round_ticks_to_binary32(
     Ok((rounded, bits, shift))
 }
 
-fn encode_representable_ticks(
-    value: i64,
-    fraction_bits: u32,
-) -> Result<u32, &'static str> {
+fn encode_representable_ticks(value: i64, fraction_bits: u32) -> Result<u32, &'static str> {
     if value == 0 {
         return Ok(0);
     }

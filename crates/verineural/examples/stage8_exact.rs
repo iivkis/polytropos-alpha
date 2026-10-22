@@ -214,10 +214,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rne_shape = Shape::new(vec![1, 1])?;
     let rne_x = Tensor::new(rne_shape.clone(), vec![f32::from_bits(0x4100_0001)])?;
     let rne_y = Tensor::new(rne_shape.clone(), vec![f32::from_bits(0x4100_0000)])?;
-    let rne_bias = Tensor::new(
-        Shape::new(vec![1])?,
-        vec![f32::from_bits(0x3580_0000)],
-    )?;
+    let rne_bias = Tensor::new(Shape::new(vec![1])?, vec![f32::from_bits(0x3580_0000)])?;
     let rne_xid = rne_graph.input(rne_shape.clone(), Domain::Finite);
     let rne_yid = rne_graph.input(rne_shape, Domain::Finite);
     let rne_bid = rne_graph.input(rne_bias.shape().clone(), Domain::Finite);
@@ -234,7 +231,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     for (label, engine) in [("baseline_rne", &baseline), ("fused_rne", &fused)] {
         let gpu_plan = engine.compile(&rne_graph, rne_output)?;
         if label == "fused_rne" && gpu_plan.removed_kernel_count() != 2 {
-            return Err(io::Error::other("expected fractional Add/BiasAdd/Relu chain fusion").into());
+            return Err(
+                io::Error::other("expected fractional Add/BiasAdd/Relu chain fusion").into(),
+            );
         }
         let actual = engine.execute(&gpu_plan, &rne_inputs, &root.join(label))?;
         rne_trace.compare_gpu(&actual)?;
