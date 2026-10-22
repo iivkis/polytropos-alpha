@@ -288,7 +288,7 @@ mod tests {
                 .unwrap();
         assert!(snapshot
             .dot
-            .contains("vn_global_property=\\\"architecture_global_nonnegative\\\""));
+            .contains("vn_global_property=\"architecture_global_nonnegative\""));
         let mut invalid_meta = lab.metadata.clone();
         invalid_meta.global_property = "xor_output_nonnegative".into();
         assert!(verineural::snapshot_architecture(
