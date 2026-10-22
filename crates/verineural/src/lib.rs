@@ -8,7 +8,9 @@
 //! Stage 6 adds MatMul, row-wise bias and composable Dense/Residual FFN blocks.
 //! Stage 7 begins controllable CUDA launches and experimental local Relu fusion,
 //! with ideal-Int Lean rewrite lemmas, not certified FP32/PTX equivalence.
-//! Neither IEEE-754 behavior nor the generated GPU binary is formally certified.
+//! Stage 8 adds exact-integer range proofs plus a concrete dyadic binary32
+//! RNE trace with Lean-composed nonzero error bounds for additive graphs.
+//! The LLVM/PTX/GPU link is still trusted rather than formally certified.
 
 mod certificate;
 mod cuda;
@@ -32,7 +34,7 @@ pub use ir::{
     RoundingMode, SubnormalMode,
 };
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
-pub use numeric::{ExactFp32Plan, NumericError};
+pub use numeric::{ExactFp32Plan, NumericError, RneFp32Plan, RneFp32Trace};
 pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
 pub use tensor::{Shape, Tensor, TensorShape};
 
