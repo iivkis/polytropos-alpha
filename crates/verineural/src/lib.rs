@@ -34,8 +34,8 @@ mod ir;
 mod modules;
 mod numeric;
 mod proof;
-mod tensor;
 mod subnormal;
+mod tensor;
 
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
@@ -54,8 +54,8 @@ pub use numeric::{
     RneModuleErrorContract, RneRangePlan, RneThresholdEvidence, RneThresholdSide,
 };
 pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
-pub use tensor::{Shape, Tensor, TensorShape};
 pub use subnormal::{subnormal_add_exact_bits, subnormal_mul_rne_bits, subnormal_relu_bits};
+pub use tensor::{Shape, Tensor, TensorShape};
 
 #[cfg(test)]
 mod tests;

@@ -12,8 +12,8 @@ use std::process::Command;
 use verineural::{
     Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, MathContract, NeuralGraph,
     NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd, ResidualFfn, RneFp32Plan,
-    RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx,
-    subnormal_add_exact_bits, subnormal_mul_rne_bits, subnormal_relu_bits,
+    RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx, subnormal_add_exact_bits,
+    subnormal_mul_rne_bits, subnormal_relu_bits,
 };
 
 const FILES: [&str; 63] = [
@@ -814,13 +814,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         0x007f_ffff, // largest subnormal plus bias -> min normal
     ];
     let rhs_bits: [u32; 8] = [
-        0x3f00_0000, 0x3380_0000, 0x3f00_0000, 0x3f00_0000,
-        0x3f80_0000, 0x3f00_0000, 0x3f80_0000, 0x3f80_0000,
+        0x3f00_0000,
+        0x3380_0000,
+        0x3f00_0000,
+        0x3f00_0000,
+        0x3f80_0000,
+        0x3f00_0000,
+        0x3f80_0000,
+        0x3f80_0000,
     ];
     let bias_bits: [u32; 8] = [0, 0, 0, 0, 1, 0, 0, 1];
-    let expected_fixed: [u32; 8] = [
-        0x0040_0000, 0, 0, 2, 2, 0x0040_0000, 0, 0x0080_0000,
-    ];
+    let expected_fixed: [u32; 8] = [0x0040_0000, 0, 0, 2, 2, 0x0040_0000, 0, 0x0080_0000];
     let mut expected_subnormal = Vec::with_capacity(lhs_bits.len());
     let mut subnormal_evidence = String::from(
         "model=integer-significand-exact-product-and-subnormal-RNE-lattice\n\
@@ -1560,7 +1564,9 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 FP32 PTX audit: explicit separate RNE mul/add, no emitted FMA/FTZ (LLVM/PTX static check only)"
     );
-    println!("Stage 8 gradual underflow: 8 signed/subnormal lanes in both baseline/fused kernels; integer bit oracle plus Lean half-tick model");
+    println!(
+        "Stage 8 gradual underflow: 8 signed/subnormal lanes in both baseline/fused kernels; integer bit oracle plus Lean half-tick model"
+    );
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?

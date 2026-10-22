@@ -110,7 +110,10 @@ mod tests {
         assert_eq!(subnormal_mul_rne_bits(1, half), Some(0));
         assert_eq!(subnormal_mul_rne_bits(3, half), Some(2));
         assert_eq!(subnormal_mul_rne_bits(0x0080_0001, half), Some(0x0040_0000));
-        assert_eq!(subnormal_mul_rne_bits(0x8000_0001, 0x3f80_0000), Some(0x8000_0001));
+        assert_eq!(
+            subnormal_mul_rne_bits(0x8000_0001, 0x3f80_0000),
+            Some(0x8000_0001)
+        );
         assert_eq!(subnormal_add_exact_bits(0x007f_ffff, 1), Some(0x0080_0000));
         assert_eq!(subnormal_add_exact_bits(1, 1), Some(2));
         assert_eq!(subnormal_add_exact_bits(0x8000_0001, 1), Some(0));
@@ -120,8 +123,14 @@ mod tests {
 
     #[test]
     fn boundary_oracle_rejects_values_and_additions_outside_domain() {
-        assert_eq!(subnormal_mul_rne_bits(f32::INFINITY.to_bits(), 0x3f00_0000), None);
-        assert_eq!(subnormal_mul_rne_bits(f32::NAN.to_bits(), 0x3f00_0000), None);
+        assert_eq!(
+            subnormal_mul_rne_bits(f32::INFINITY.to_bits(), 0x3f00_0000),
+            None
+        );
+        assert_eq!(
+            subnormal_mul_rne_bits(f32::NAN.to_bits(), 0x3f00_0000),
+            None
+        );
         assert_eq!(subnormal_mul_rne_bits(0x3f80_0000, 0x3f80_0000), None);
         assert_eq!(subnormal_add_exact_bits(0x0080_0000, 1), None);
         assert_eq!(subnormal_add_exact_bits(0x8000_0000, 0), None);
