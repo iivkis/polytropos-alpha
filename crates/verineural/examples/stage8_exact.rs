@@ -1,7 +1,7 @@
-//! Stage 8: conditional exact binary32-integer slice. A custom graph is
-//! checked from Rust input-domain guards -> ideal-Int Lean range lemmas ->
-//! baseline/fused CUDA Graph -> independent i64 oracle + SHA-256 artifacts.
-//! Neither this example nor the Lean checker proves actual IEEE/LLVM/PTX.
+//! Stage 8: exact-integer ranges plus a concrete fractional dyadic RNE/epsilon
+//! trace. Rust input guards -> Lean range/error lemmas -> baseline/fused CUDA
+//! Graph -> independent integer oracles -> SHA-256 evidence.
+//! The LLVM/PTX/JIT/GPU link remains trusted rather than formally proved.
 
 use std::error::Error;
 use std::fs;
