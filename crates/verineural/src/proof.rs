@@ -372,21 +372,27 @@ impl LeanProofEngine {
                 // ReLU nonnegativity is unconditional. Keep every positional
                 // parameter so existing proof applications remain unchanged, but
                 // mark only genuinely unused binders with Lean's underscore prefix.
-                let node_proof_params = if matches!(node.operation, Operation::Input | Operation::Relu) {
-                    let hypothesis_binders = assumptions
-                        .iter()
-                        .map(|assumption| {
-                            let source = assumption.input_node;
-                            let used = matches!(node.operation, Operation::Input) && source == index;
-                            let binder = if used { format!("h_{source}") } else { format!("_h_{source}") };
-                            format!("({binder} : VeriNeural.Nonnegative x_{source})")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    format!("{params} {hypothesis_binders}")
-                } else {
-                    proof_params.clone()
-                };
+                let node_proof_params =
+                    if matches!(node.operation, Operation::Input | Operation::Relu) {
+                        let hypothesis_binders = assumptions
+                            .iter()
+                            .map(|assumption| {
+                                let source = assumption.input_node;
+                                let used =
+                                    matches!(node.operation, Operation::Input) && source == index;
+                                let binder = if used {
+                                    format!("h_{source}")
+                                } else {
+                                    format!("_h_{source}")
+                                };
+                                format!("({binder} : VeriNeural.Nonnegative x_{source})")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        format!("{params} {hypothesis_binders}")
+                    } else {
+                        proof_params.clone()
+                    };
                 source.push_str(&format!(
                     "theorem {name} {node_proof_params} :\n  VeriNeural.Nonnegative {} := by\n  exact {proof}\n\n",
                     call(index)

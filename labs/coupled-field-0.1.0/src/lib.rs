@@ -327,10 +327,17 @@ mod tests {
                 } else {
                     format!("(_h_{hypothesis} :")
                 };
-                assert!(declaration.contains(&binder), "node {source} binder {hypothesis}");
+                assert!(
+                    declaration.contains(&binder),
+                    "node {source} binder {hypothesis}"
+                );
             }
         }
-        assert!(!proof.source().contains("set_option linter.unusedVariables false"));
+        assert!(
+            !proof
+                .source()
+                .contains("set_option linter.unusedVariables false")
+        );
         let gpu = GpuEngine::default()
             .compile(&lab.graph, lab.output)
             .unwrap();
