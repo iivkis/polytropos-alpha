@@ -309,6 +309,28 @@ mod tests {
                 .source()
                 .contains("theorem architecture_global_nonnegative")
         );
+        // Each of the five input lemmas must expose exactly one used
+        // hypothesis, with the remaining positional binders explicitly unused.
+        for source in 0..5 {
+            let marker = format!("theorem node_{source}_nonnegative ");
+            let declaration = proof
+                .source()
+                .split(&marker)
+                .nth(1)
+                .expect("source nonnegativity theorem")
+                .split(" := by")
+                .next()
+                .expect("theorem declaration");
+            for hypothesis in 0..5 {
+                let binder = if source == hypothesis {
+                    format!("(h_{hypothesis} :")
+                } else {
+                    format!("(_h_{hypothesis} :")
+                };
+                assert!(declaration.contains(&binder), "node {source} binder {hypothesis}");
+            }
+        }
+        assert!(!proof.source().contains("set_option linter.unusedVariables false"));
         let gpu = GpuEngine::default()
             .compile(&lab.graph, lab.output)
             .unwrap();

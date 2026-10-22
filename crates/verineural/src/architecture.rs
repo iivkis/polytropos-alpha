@@ -12,7 +12,7 @@ use std::io::{self, Write as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::{GpuProgram, NeuralGraph, NodeId, Operation, TranslationPlan};
+use crate::{GpuProgram, NeuralGraph, NodeId, Operation};
 
 /// Stable provenance and presentation metadata for one architecture.
 /// An input role may be "input" or "parameter"; IR has no state/control nodes.
@@ -324,20 +324,37 @@ pub fn snapshot_architecture(
         writeln!(dot, "  {key}={};", quoted(&value)).expect("writing to string");
     }
 
+    // One immutable rendering context for all recursive module scopes.
+    // The recursion varies only in parent, depth and the output DOT buffer.
+    struct RenderContext<'a> {
+        graph: &'a NeuralGraph,
+        owners: &'a [Option<usize>],
+        parents: &'a [Option<usize>],
+        paths: &'a [String],
+        reachable: &'a BTreeSet<usize>,
+        roles: &'a BTreeMap<usize, String>,
+        kernel_map: &'a BTreeMap<usize, &'a crate::TranslationKernel>,
+        fused: &'a BTreeSet<usize>,
+        output: NodeId,
+    }
+
     fn render_scope(
         parent: Option<usize>,
-        graph: &NeuralGraph,
-        owners: &[Option<usize>],
-        parents: &[Option<usize>],
-        paths: &[String],
-        reachable: &BTreeSet<usize>,
-        roles: &BTreeMap<usize, String>,
-        kernel_map: &BTreeMap<usize, &crate::TranslationKernel>,
-        fused: &BTreeSet<usize>,
-        output: NodeId,
+        context: &RenderContext<'_>,
         depth: usize,
         dot: &mut String,
     ) {
+        let RenderContext {
+            graph,
+            owners,
+            parents,
+            paths,
+            reachable,
+            roles,
+            kernel_map,
+            fused,
+            output,
+        } = context;
         let indent = "  ".repeat(depth + 1);
         for (index, node) in graph
             .nodes()
@@ -451,37 +468,22 @@ pub fn snapshot_architecture(
             ] {
                 writeln!(dot, "{inner}{key}={};", quoted(&value)).expect("writing to string");
             }
-            render_scope(
-                Some(i),
-                graph,
-                owners,
-                parents,
-                paths,
-                reachable,
-                roles,
-                kernel_map,
-                fused,
-                output,
-                depth + 1,
-                dot,
-            );
+            render_scope(Some(i), context, depth + 1, dot);
             writeln!(dot, "{indent}}}").expect("writing to string");
         }
     }
-    render_scope(
-        None,
+    let context = RenderContext {
         graph,
-        &owners,
-        &parents,
-        &paths,
-        &reachable,
-        &metadata.input_roles,
-        &kernel_map,
-        &fused,
+        owners: &owners,
+        parents: &parents,
+        paths: &paths,
+        reachable: &reachable,
+        roles: &metadata.input_roles,
+        kernel_map: &kernel_map,
+        fused: &fused,
         output,
-        0,
-        &mut dot,
-    );
+    };
+    render_scope(None, &context, 0, &mut dot);
     // Edges are drawn globally to expose captures, module ports and sharing.
     for (i, node) in graph.nodes().iter().enumerate() {
         for (port, source) in node.inputs.iter().enumerate() {
