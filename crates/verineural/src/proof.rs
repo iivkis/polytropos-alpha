@@ -855,7 +855,7 @@ fn prove_module_node_nonnegative(
     let node = &graph.nodes()[index];
     let call = |node_index: usize| format!("(node_{node_index} {arguments})");
     let proof = match node.operation {
-        Operation::Add | Operation::Mul => {
+        Operation::Add | Operation::Mul | Operation::MatMul | Operation::BiasAdd => {
             let left = node.inputs[0].index();
             let right = node.inputs[1].index();
             let left_proof = prove_module_node_nonnegative(
@@ -876,10 +876,25 @@ fn prove_module_node_nonnegative(
                 traversal,
                 module_proofs,
             )?;
-            let theorem = if matches!(node.operation, Operation::Add) {
-                "VeriNeural.add_nonnegative"
-            } else {
-                "VeriNeural.mul_nonnegative"
+            let theorem = match node.operation {
+                Operation::Add => "VeriNeural.add_nonnegative".to_owned(),
+                Operation::Mul => "VeriNeural.mul_nonnegative".to_owned(),
+                Operation::MatMul => {
+                    let shape_a = graph.nodes()[left].shape.dims();
+                    let shape_b = graph.nodes()[right].shape.dims();
+                    format!(
+                        "VeriNeural.matmul_nonnegative (m := {}) (k := {}) (n := {})",
+                        shape_a[0], shape_a[1], shape_b[1]
+                    )
+                }
+                Operation::BiasAdd => {
+                    let shape = node.shape.dims();
+                    format!(
+                        "VeriNeural.biasAdd_nonnegative (m := {}) (n := {})",
+                        shape[0], shape[1]
+                    )
+                }
+                _ => unreachable!("handled two-input operations"),
             };
             format!(
                 "{theorem} {} {} ({left_proof}) ({right_proof})",

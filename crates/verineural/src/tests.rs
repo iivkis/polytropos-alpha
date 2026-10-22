@@ -120,6 +120,64 @@ impl NeuralModule for MulModule {
     }
 }
 
+struct NonnegativeMatMulModule {
+    contract: MathContract,
+}
+
+impl NonnegativeMatMulModule {
+    fn new() -> Self {
+        Self {
+            contract: MathContract::new(
+                vec![port(&[2, 3], Domain::Any), port(&[3, 2], Domain::Any)],
+                port(&[2, 2], Domain::Any),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for NonnegativeMatMulModule {
+    fn name(&self) -> &'static str {
+        "nonnegative_matmul"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.matmul(inputs[0], inputs[1])
+    }
+}
+
+struct NonnegativeBiasAddModule {
+    contract: MathContract,
+}
+
+impl NonnegativeBiasAddModule {
+    fn new() -> Self {
+        Self {
+            contract: MathContract::new(
+                vec![port(&[2, 2], Domain::Any), port(&[2], Domain::Any)],
+                port(&[2, 2], Domain::Any),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for NonnegativeBiasAddModule {
+    fn name(&self) -> &'static str {
+        "nonnegative_bias_add"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.bias_add(inputs[0], inputs[1])
+    }
+}
+
 struct PropertyInnerModule {
     contract: MathContract,
 }
@@ -488,6 +546,52 @@ fn proof_generator_composes_explicit_global_nonnegative_property_over_module_dag
             },
         ]
     );
+}
+
+#[test]
+fn proof_generator_global_nonnegative_handles_matmul_reduction_and_bias_broadcast() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2, 3]), Domain::Finite);
+    let weight = graph.input(shape(&[3, 2]), Domain::Finite);
+    let bias = graph.input(shape(&[2]), Domain::Finite);
+    let product = graph
+        .apply_module(&NonnegativeMatMulModule::new(), &[x, weight])
+        .unwrap();
+    let output = graph
+        .apply_module(&NonnegativeBiasAddModule::new(), &[product, bias])
+        .unwrap();
+
+    let program = LeanProofEngine::default()
+        .generate_global_nonnegative(&graph, output, &[x, weight, bias])
+        .unwrap();
+    let lean = program.source();
+    assert!(lean.contains("VeriNeural.matmul_nonnegative (m := 2) (k := 3) (n := 2)"));
+    assert!(lean.contains("VeriNeural.biasAdd_nonnegative (m := 2) (n := 2)"));
+    assert!(lean.contains("theorem module_0_global_nonnegative"));
+    assert!(lean.contains("theorem module_1_global_nonnegative"));
+    assert!(lean.contains("have arch_module_0 := module_0_global_nonnegative"));
+    assert!(lean.contains("have arch_module_1 := module_1_global_nonnegative"));
+    assert!(lean.contains("exact arch_module_1"));
+    assert!(!lean.contains("sorry"));
+    assert!(!lean.contains("admit"));
+}
+
+#[test]
+fn proof_generator_matmul_bias_nonnegative_rejects_missing_bias_assumption() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2, 3]), Domain::Finite);
+    let weight = graph.input(shape(&[3, 2]), Domain::Finite);
+    let bias = graph.input(shape(&[2]), Domain::Finite);
+    let product = graph
+        .apply_module(&NonnegativeMatMulModule::new(), &[x, weight])
+        .unwrap();
+    let output = graph
+        .apply_module(&NonnegativeBiasAddModule::new(), &[product, bias])
+        .unwrap();
+    assert!(matches!(
+        LeanProofEngine::default().generate_global_nonnegative(&graph, output, &[x, weight]),
+        Err(ProofError::UnsupportedGuarantee { node }) if node == bias.index()
+    ));
 }
 
 #[test]

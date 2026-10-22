@@ -310,6 +310,8 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
     assert!(after_rne.contains("generate_global_nonnegative"));
     assert!(after_rne.contains("architecture_property_nested.lean"));
     assert!(after_rne.contains("nested_property_program.source()"));
+    assert!(after_rne.contains("architecture_property_matmul_bias.lean"));
+    assert!(after_rne.contains("property_matmul_program.source()"));
 }
 
 #[test]

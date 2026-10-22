@@ -75,6 +75,46 @@ theorem mul_nonnegative {n : Nat} (a b : Tensor n)
   intro i
   exact Int.mul_nonneg (ha i) (hb i)
 
+/-- Out-of-range flat reads yield zero, which preserves nonnegativity. -/
+theorem flatGet_nonnegative {n : Nat} (a : Tensor n)
+    (ha : Nonnegative a) (index : Nat) : 0 ≤ flatGet a index := by
+  unfold flatGet
+  split
+  · rename_i h
+    exact ha ⟨index, h⟩
+  · exact le_refl 0
+
+/-- Every left-to-right partial sum of row-major MatMul is nonnegative. -/
+theorem matmul_nonnegative {m k n : Nat} (a : Tensor (m * k))
+    (b : Tensor (k * n)) (ha : Nonnegative a) (hb : Nonnegative b) :
+    Nonnegative (matmul a b) := by
+  intro i
+  have fold_nonnegative :
+      ∀ (xs : List Nat) (acc : Int), 0 ≤ acc →
+        0 ≤ xs.foldl (fun sum j =>
+          sum + flatGet a ((i.val / n) * k + j) *
+                flatGet b (j * n + i.val % n)) acc := by
+    intro xs
+    induction xs with
+    | nil =>
+        intro acc hacc
+        exact hacc
+    | cons j js ih =>
+        intro acc hacc
+        apply ih
+        exact Int.add_nonneg hacc
+          (Int.mul_nonneg
+            (flatGet_nonnegative a ha _)
+            (flatGet_nonnegative b hb _))
+  exact fold_nonnegative (List.range k) 0 (le_refl 0)
+
+/-- BiasAdd uses the same row-major broadcast as the semantic IR. -/
+theorem biasAdd_nonnegative {m n : Nat} (a : Tensor (m * n))
+    (b : Tensor n) (ha : Nonnegative a) (hb : Nonnegative b) :
+    Nonnegative (biasAdd a b) := by
+  intro i
+  exact Int.add_nonneg (ha i) (flatGet_nonnegative b hb (i.val % n))
+
 theorem relu_nonnegative {n : Nat} (a : Tensor n) :
     Nonnegative (relu a) := by
   intro i

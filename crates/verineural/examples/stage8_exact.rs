@@ -15,7 +15,7 @@ use verineural::{
     RneRangePlan, Shape, Tensor,
 };
 
-const FILES: [&str; 44] = [
+const FILES: [&str; 46] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -60,6 +60,8 @@ const FILES: [&str; 44] = [
     "architecture_property_contract.txt",
     "architecture_property_nested.lean",
     "architecture_property_nested_contract.txt",
+    "architecture_property_matmul_bias.lean",
+    "architecture_property_matmul_bias_contract.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -104,6 +106,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_nested_deep.lean"))?;
     LeanProofEngine::default().check_file(&root.join("architecture_property.lean"))?;
     LeanProofEngine::default().check_file(&root.join("architecture_property_nested.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("architecture_property_matmul_bias.lean"))?;
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
         "Scope: ideal integer ranges, concrete dyadic RNE traces, and reusable bounded RNE/module contracts; not machine FP32 certification"
@@ -178,6 +181,78 @@ impl NeuralModule for GlobalMulModule {
         inputs: &[NodeId],
     ) -> Result<NodeId, verineural::NeuralError> {
         graph.mul(inputs[0], inputs[1])
+    }
+}
+
+struct GlobalNonnegativeMatMul {
+    contract: MathContract,
+}
+
+impl GlobalNonnegativeMatMul {
+    fn new() -> Result<Self, verineural::NeuralError> {
+        Ok(Self {
+            contract: MathContract::new(
+                vec![
+                    PortContract::new(Shape::new(vec![2, 3])?, Domain::Any),
+                    PortContract::new(Shape::new(vec![3, 2])?, Domain::Any),
+                ],
+                PortContract::new(Shape::new(vec![2, 2])?, Domain::Any),
+            ),
+        })
+    }
+}
+
+impl NeuralModule for GlobalNonnegativeMatMul {
+    fn name(&self) -> &'static str {
+        "global_nonnegative_matmul"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        graph.matmul(inputs[0], inputs[1])
+    }
+}
+
+struct GlobalNonnegativeBiasAdd {
+    contract: MathContract,
+}
+
+impl GlobalNonnegativeBiasAdd {
+    fn new() -> Result<Self, verineural::NeuralError> {
+        Ok(Self {
+            contract: MathContract::new(
+                vec![
+                    PortContract::new(Shape::new(vec![2, 2])?, Domain::Any),
+                    PortContract::new(Shape::new(vec![2])?, Domain::Any),
+                ],
+                PortContract::new(Shape::new(vec![2, 2])?, Domain::Any),
+            ),
+        })
+    }
+}
+
+impl NeuralModule for GlobalNonnegativeBiasAdd {
+    fn name(&self) -> &'static str {
+        "global_nonnegative_bias_add"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        graph.bias_add(inputs[0], inputs[1])
     }
 }
 
@@ -995,6 +1070,56 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Nonnegative ideal-Int MatMul reduction followed by row-major BiasAdd
+    // broadcast, with explicit input, matrix-weight and bias assumptions.
+    let mut property_matmul_graph = NeuralGraph::default();
+    let property_matmul_x =
+        property_matmul_graph.input(Shape::new(vec![2, 3])?, Domain::Finite);
+    let property_matmul_w =
+        property_matmul_graph.input(Shape::new(vec![3, 2])?, Domain::Finite);
+    let property_matmul_b =
+        property_matmul_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let property_matmul_product = property_matmul_graph.apply_module(
+        &GlobalNonnegativeMatMul::new()?,
+        &[property_matmul_x, property_matmul_w],
+    )?;
+    let property_matmul_output = property_matmul_graph.apply_module(
+        &GlobalNonnegativeBiasAdd::new()?,
+        &[property_matmul_product, property_matmul_b],
+    )?;
+    let property_matmul_program = LeanProofEngine::default().generate_global_nonnegative(
+        &property_matmul_graph,
+        property_matmul_output,
+        &[property_matmul_x, property_matmul_w, property_matmul_b],
+    )?;
+    let property_matmul_source = property_matmul_program.source();
+    if !property_matmul_source
+        .contains("VeriNeural.matmul_nonnegative (m := 2) (k := 3) (n := 2)")
+        || !property_matmul_source
+            .contains("VeriNeural.biasAdd_nonnegative (m := 2) (n := 2)")
+        || !property_matmul_source.contains("have arch_module_0 := module_0_global_nonnegative")
+        || !property_matmul_source.contains("have arch_module_1 := module_1_global_nonnegative")
+    {
+        return Err(io::Error::other("missing MatMul/BiasAdd global nonnegative theorem").into());
+    }
+    write_checked_lean(
+        &root.join("architecture_property_matmul_bias.lean"),
+        property_matmul_source,
+    )?;
+    fs::write(
+        root.join("architecture_property_matmul_bias_contract.txt"),
+        format!(
+            "property=output_nonnegative\nmodel=ideal-int\nmodules=2\n\
+             operations=matmul,bias_add\nmatmul=m:2,k:3,n:2\n\
+             bias_broadcast=rows:2,channels:2\n\
+             assumptions=node:{},node:{},node:{}\n\
+             theorem=architecture_global_nonnegative\nfp32_gpu_claim=false\n",
+            property_matmul_x.index(),
+            property_matmul_w.index(),
+            property_matmul_b.index(),
+        ),
+    )?;
+
     let input_snapshot = inputs
         .iter()
         .map(|(id, tensor)| {
@@ -1098,11 +1223,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Stage 8 nested global property: architecture_global_nonnegative with recursive_depth=3 and child theorem reuse (ideal-Int only)"
     );
     println!(
+        "Stage 8 MatMul/BiasAdd global property: nonnegative 2x3 * 3x2 with row-wise bias broadcast (ideal-Int only)"
+    );
+    println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and recursive global ideal-Int nonnegativity properties; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }
