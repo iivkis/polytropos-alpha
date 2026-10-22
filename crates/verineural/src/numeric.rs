@@ -2421,7 +2421,6 @@ impl RneRangePlan {
         Ok(source)
     }
 
-
     fn lean_conjunction_pattern(items: &[String]) -> String {
         match items {
             [] => "_".to_owned(),
@@ -2460,10 +2459,8 @@ impl RneRangePlan {
                 right_shift,
                 ..
             } => {
-                let left_factor =
-                    binary32_step_i64(*left_shift).expect("validated range scale");
-                let right_factor =
-                    binary32_step_i64(*right_shift).expect("validated range scale");
+                let left_factor = binary32_step_i64(*left_shift).expect("validated range scale");
+                let right_factor = binary32_step_i64(*right_shift).expect("validated range scale");
                 let bias_columns = node.shape.dims().get(1).copied();
                 for element in 0..node.shape.element_count() {
                     let left = Self::global_element(elements, node.inputs[0], element)?;
@@ -2527,13 +2524,9 @@ impl RneRangePlan {
                     let column = element % columns;
                     let mut ideal_sum = String::new();
                     for j in 0..inner {
-                        let left =
-                            Self::global_element(elements, node.inputs[0], row * inner + j)?;
-                        let right = Self::global_element(
-                            elements,
-                            node.inputs[1],
-                            j * columns + column,
-                        )?;
+                        let left = Self::global_element(elements, node.inputs[0], row * inner + j)?;
+                        let right =
+                            Self::global_element(elements, node.inputs[1], j * columns + column)?;
                         let product = format!("product_{index}_{element}_{j}");
                         let sum = format!("sum_{index}_{element}_{j}");
                         let product_shift = format!("productShift_{index}_{element}_{j}");
@@ -2599,11 +2592,11 @@ impl RneRangePlan {
     fn architecture_witness_args(&self, index: usize) -> Vec<String> {
         let node = &self.graph.nodes()[index];
         match &self.rules[&index] {
-            RneRangeRule::Add { .. }
-            | RneRangeRule::BiasAdd { .. }
-            | RneRangeRule::Mul { .. } => (0..node.shape.element_count())
-                .map(|element| format!("hrne_{index}_{element}"))
-                .collect(),
+            RneRangeRule::Add { .. } | RneRangeRule::BiasAdd { .. } | RneRangeRule::Mul { .. } => {
+                (0..node.shape.element_count())
+                    .map(|element| format!("hrne_{index}_{element}"))
+                    .collect()
+            }
             RneRangeRule::MatMul { .. } => {
                 let inner = self.graph.nodes()[node.inputs[0].index()].shape.dims()[1];
                 let mut args = Vec::new();
@@ -2627,7 +2620,8 @@ impl RneRangePlan {
             .enumerate()
             .filter(|(_, module)| self.module_in_slice(module))
             .collect::<Vec<_>>();
-        if modules.len() < 2 || modules.last().map(|(_, module)| module.output) != Some(self.output) {
+        if modules.len() < 2 || modules.last().map(|(_, module)| module.output) != Some(self.output)
+        {
             return Ok(None);
         }
 
@@ -2693,12 +2687,12 @@ impl RneRangePlan {
                 .map(|element| format!("arch_h_{}_{}", module.output.index(), element))
                 .collect::<Vec<_>>();
             for (element, proof) in output_proofs.iter().enumerate() {
-                let output = elements
-                    .get_mut(&(module.output.index(), element))
-                    .ok_or(NumericError::InvalidInput {
+                let output = elements.get_mut(&(module.output.index(), element)).ok_or(
+                    NumericError::InvalidInput {
                         node: module.output.index(),
                         reason: "architecture range proof is missing a module output",
-                    })?;
+                    },
+                )?;
                 output.proof = proof.clone();
             }
             steps.push(RneArchitectureStep {
