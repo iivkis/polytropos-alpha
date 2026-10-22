@@ -322,12 +322,20 @@ The LLVM/PTX/GPU implementation remains outside this proof boundary.
 theorem within_natAbs_le {bound value : Int} (h : Within bound value) :
     Int.ofNat value.natAbs ≤ bound := by
   rcases h with ⟨hlower, hupper⟩
-  rcases Int.natAbs_eq value with hs | hs <;> omega
+  by_cases hnonneg : 0 ≤ value
+  · have habs : (value.natAbs : Int) = value :=
+      Int.natAbs_of_nonneg hnonneg
+    rw [habs]
+    exact hupper
+  · have hnonpos : value ≤ 0 := by omega
+    have habs : (value.natAbs : Int) = -value :=
+      Int.ofNat_natAbs_of_nonpos hnonpos
+    rw [habs]
+    omega
 
 theorem binary32Step_pos (shift : Nat) : 0 < binary32Step shift := by
   unfold binary32Step
-  rw [← Int.ofNat_zero, Int.ofNat_lt]
-  exact Nat.pow_pos Nat.zero_lt_two
+  exact Int.ofNat_lt.mpr (Nat.pow_pos Nat.zero_lt_two)
 
 theorem binary32Step_mono {a b : Nat} (h : a ≤ b) :
     binary32Step a ≤ binary32Step b := by
@@ -347,12 +355,20 @@ theorem binary32_rne_shift_le_of_bound
   rcases hbin with hzero | hnormal
   · omega
   · rcases hnormal with ⟨_hpositive, hlower, _hupper⟩
-    by_contra hnot
-    have hsucc : maxShift + 1 ≤ shift := by omega
-    have hstep :
-        binary32Step (maxShift + 1) ≤ binary32Step shift :=
-      binary32Step_mono hsucc
-    omega
+    by_cases hle : shift ≤ maxShift
+    · exact hle
+    · have hsucc : maxShift + 1 ≤ shift := by omega
+      have hstep :
+          binary32Step (maxShift + 1) ≤ binary32Step shift :=
+        binary32Step_mono hsucc
+      have hscaled :
+          8388608 * binary32Step (maxShift + 1) ≤
+            8388608 * binary32Step shift :=
+        Int.mul_le_mul_of_nonneg_left hstep (by decide)
+      have hcontradiction :
+          bound < Int.ofNat exact.natAbs :=
+        lt_of_lt_of_le hlimit (le_trans hscaled hlower)
+      exact False.elim ((not_lt_of_ge hmag) hcontradiction)
 
 theorem binary32_rne_within_maxStep
     {exact rounded bound : Int} {shift maxShift : Nat}
@@ -384,7 +400,8 @@ theorem approx_contract_actual
     (h : ApproxContract idealBound epsilon ideal actual) :
     Within (idealBound + epsilon) actual := by
   rcases h with ⟨_hbound, _hepsilon, hideal, herr⟩
-  unfold ApproxWithin Within at herr hideal ⊢
+  unfold ApproxWithin at herr
+  unfold Within at herr hideal ⊢
   constructor <;> omega
 
 theorem approx_contract_scale
