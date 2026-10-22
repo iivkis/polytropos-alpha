@@ -32,10 +32,7 @@ mod platform {
             // libcuda.so.1. NixOS exposes its kernel-matched driver under
             // /run/opengl-driver/lib, which may be absent from the dynamic
             // loader search path inside nix develop.
-            for name in [
-                c"libcuda.so.1",
-                c"/run/opengl-driver/lib/libcuda.so.1",
-            ] {
+            for name in [c"libcuda.so.1", c"/run/opengl-driver/lib/libcuda.so.1"] {
                 // SAFETY: each candidate is a NUL-terminated static string.
                 let handle = unsafe { dlopen(name.as_ptr(), RTLD_NOW) };
                 if !handle.is_null() {
