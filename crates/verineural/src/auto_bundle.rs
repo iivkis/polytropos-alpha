@@ -113,6 +113,11 @@ pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
             }
         }
     }
+    if plan.shared_gpu.is_some() {
+        for name in ["graph.ll", "graph.ptx", "translation.plan", "translation.report"] {
+            files.push(format!("gpu_shared/{name}"));
+        }
+    }
     files.sort();
     files
 }
@@ -258,6 +263,27 @@ mod tests {
             Err(AutoBuildError::Integrity(_))
         ));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_output_bundle_names_are_required_when_two_outputs_are_gpu_supported() {
+        let mut graph = NeuralGraph::default();
+        let shape = Shape::new(vec![2]).unwrap();
+        let a = graph.input(shape.clone(), Domain::Finite);
+        let b = graph.input(shape, Domain::Finite);
+        let common = graph.add(a, b).unwrap();
+        let output = graph.relu(common).unwrap();
+        let plan = ArchitectureAutoCompiler::default().plan(
+            &graph, &[common, output], &[], GpuRequirement::AllOutputs
+        ).unwrap();
+        let files = artifact_files(&plan);
+        assert!(plan.shared_gpu.is_some());
+        assert!(files.contains(&"gpu_shared/graph.ll".to_owned()));
+        assert!(files.contains(&"gpu_shared/graph.ptx".to_owned()));
+        assert!(files.contains(&"gpu_shared/translation.plan".to_owned()));
+        assert!(files.contains(&"gpu_shared/translation.report".to_owned()));
+        assert!(files.contains(&"gpu_0/graph.ptx".to_owned()));
+        assert!(files.contains(&"gpu_1/graph.ptx".to_owned()));
     }
 
     #[test]

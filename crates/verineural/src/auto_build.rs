@@ -336,6 +336,9 @@ pub struct AutoBuildPlan {
     pub architecture: LeanProgram,
     pub goals: Vec<(String, LeanProgram)>,
     pub gpu: Vec<PlannedGpu>,
+    /// An additional union-of-outputs GPU program. Single-output legacy
+    /// artifacts remain available for compatible consumer workflows.
+    pub shared_gpu: Option<Box<GpuProgram>>,
 }
 
 #[derive(Clone, Debug)]
@@ -350,6 +353,8 @@ pub struct AutoBuildReport {
     pub directory: PathBuf,
     pub connectivity: ConnectivityEvidence,
     pub output_evidence: Vec<OutputBuildEvidence>,
+    /// Shared single-module NVPTX evidence for multiple supported outputs.
+    pub shared_gpu_ptx: Option<PathBuf>,
     pub architecture_theorems: usize,
     pub goal_theorems: Vec<(String, usize)>,
     pub source_hypotheses: Vec<crate::ProofAssumption>,
@@ -432,12 +437,21 @@ impl ArchitectureAutoCompiler {
                 Err(error) => return Err(AutoBuildError::Gpu(error)),
             }
         }
+        let shared_gpu = if outputs.len() > 1
+            && gpu.iter().all(|part| matches!(part, PlannedGpu::Supported { .. }))
+        {
+            let program = self.gpu.compile_outputs(graph, outputs)?;
+            (program.kernel_count()? > 0).then_some(Box::new(program))
+        } else {
+            None
+        };
         Ok(AutoBuildPlan {
             connectivity,
             outputs: outputs.to_vec(),
             architecture,
             goals,
             gpu,
+            shared_gpu,
         })
     }
 
@@ -524,10 +538,16 @@ impl ArchitectureAutoCompiler {
             &directory.join("architecture.dot"),
             &directory.join("architecture.png"),
         )?;
+        let shared_gpu_ptx = if let Some(program) = &plan.shared_gpu {
+            Some(self.gpu.lower(program, &directory.join("gpu_shared"))?)
+        } else {
+            None
+        };
         let mut report = AutoBuildReport {
             directory: directory.clone(),
             connectivity: plan.connectivity,
             output_evidence,
+            shared_gpu_ptx,
             architecture_theorems: checked.theorem_names.len(),
             goal_theorems,
             source_hypotheses: checked.assumptions,
@@ -587,6 +607,13 @@ fn report_text(graph: &NeuralGraph, report: &AutoBuildReport) -> String {
     }
     for (theorem, axioms) in &report.axiom_dependencies {
         text.push_str(&format!("axioms={theorem};dependencies={axioms:?}\n"));
+    }
+    if let Some(ptx) = &report.shared_gpu_ptx {
+        text.push_str(&format!(
+            "gpu_shared=status=structurally-translated;outputs={:?};ptx={}\n",
+            report.output_evidence.iter().map(|item| item.node).collect::<Vec<_>>(),
+            ptx.display()
+        ));
     }
     for item in &report.output_evidence {
         if let Some(ptx) = &item.ptx {
@@ -694,34 +721,8 @@ impl ArchitectureAutoCompiler {
             let gpu_dir = directory.join(format!("gpu_{index}"));
             match item {
                 PlannedGpu::Supported { output, program } => {
-                    if fs::read_to_string(gpu_dir.join("graph.ll"))? != program.llvm_ir() {
-                        return Err(AutoBuildError::Integrity(format!(
-                            "GPU output {index} LLVM differs from current IR"
-                        )));
-                    }
-                    let translation = program.translation_plan()?;
-                    if fs::read_to_string(gpu_dir.join("translation.plan"))?
-                        != translation.to_text()
-                    {
-                        return Err(AutoBuildError::Integrity(format!(
-                            "GPU output {index} translation plan mismatch"
-                        )));
-                    }
+                    verify_gpu_translation(program, &gpu_dir, &format!("gpu_{index}"))?;
                     let ptx_file = gpu_dir.join("graph.ptx");
-                    let ptx = fs::read_to_string(&ptx_file)?;
-                    let checked = translation
-                        .validate(program.llvm_ir(), &ptx)
-                        .map_err(|err| {
-                            AutoBuildError::Integrity(format!(
-                                "GPU output {index} LLVM/PTX translation rejected: {err}"
-                            ))
-                        })?;
-                    if fs::read_to_string(gpu_dir.join("translation.report"))? != checked.to_text()
-                    {
-                        return Err(AutoBuildError::Integrity(format!(
-                            "GPU output {index} translation report mismatch"
-                        )));
-                    }
                     output_evidence.push(OutputBuildEvidence {
                         node: output.index(),
                         ptx: Some(ptx_file),
@@ -742,10 +743,23 @@ impl ArchitectureAutoCompiler {
                 }
             }
         }
+        let shared_gpu_ptx = if let Some(program) = &plan.shared_gpu {
+            let shared_dir = directory.join("gpu_shared");
+            verify_gpu_translation(program, &shared_dir, "gpu_shared")?;
+            Some(shared_dir.join("graph.ptx"))
+        } else {
+            if directory.join("gpu_shared").exists() {
+                return Err(AutoBuildError::Integrity(
+                    "unexpected shared GPU artifact for unsupported output selection".into(),
+                ));
+            }
+            None
+        };
         let report = AutoBuildReport {
             directory: directory.clone(),
             connectivity: plan.connectivity,
             output_evidence,
+            shared_gpu_ptx,
             architecture_theorems,
             goal_theorems,
             source_hypotheses: plan.architecture.assumptions().to_vec(),
@@ -761,6 +775,34 @@ impl ArchitectureAutoCompiler {
         }
         Ok(report)
     }
+}
+
+fn verify_gpu_translation(
+    program: &GpuProgram,
+    directory: &Path,
+    label: &str,
+) -> Result<(), AutoBuildError> {
+    if fs::read_to_string(directory.join("graph.ll"))? != program.llvm_ir() {
+        return Err(AutoBuildError::Integrity(format!(
+            "{label} LLVM differs from current Semantic IR"
+        )));
+    }
+    let translation = program.translation_plan()?;
+    if fs::read_to_string(directory.join("translation.plan"))? != translation.to_text() {
+        return Err(AutoBuildError::Integrity(format!(
+            "{label} translation plan mismatch"
+        )));
+    }
+    let ptx = fs::read_to_string(directory.join("graph.ptx"))?;
+    let checked = translation.validate(program.llvm_ir(), &ptx).map_err(|err| {
+        AutoBuildError::Integrity(format!("{label} LLVM/PTX translation rejected: {err}"))
+    })?;
+    if fs::read_to_string(directory.join("translation.report"))? != checked.to_text() {
+        return Err(AutoBuildError::Integrity(format!(
+            "{label} translation report mismatch"
+        )));
+    }
+    Ok(())
 }
 
 fn verify_source(

@@ -286,6 +286,7 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
 pub struct GpuProgram {
     graph: NeuralGraph,
     output: NodeId,
+    outputs: Vec<NodeId>,
     live_nodes: Vec<usize>,
     source_inputs: Vec<NodeId>,
     llvm_ir: String,
@@ -307,6 +308,17 @@ impl GpuProgram {
 
     pub fn output(&self) -> NodeId {
         self.output
+    }
+
+    /// Ordered, distinct architecture outputs served by the same kernel DAG.
+    pub fn outputs(&self) -> &[NodeId] {
+        &self.outputs
+    }
+
+    /// Exactly one kernel per live Semantic IR producer, even when multiple
+    /// selected outputs depend on it. Zero-copy Reshape retains its alias.
+    pub fn kernel_count(&self) -> Result<usize, GpuError> {
+        Ok(self.memory_contracts()?.len())
     }
 
     pub const fn launch_config(&self) -> GpuLaunchConfig {
@@ -637,6 +649,7 @@ pub struct GpuExecution {
     input_addresses: BTreeMap<usize, u64>,
     output_shape: Shape,
     output_address: u64,
+    output_addresses: Vec<(NodeId, Shape, u64)>,
     has_graph: bool,
 }
 
@@ -668,6 +681,18 @@ impl GpuExecution {
         self.session
             .copy_to_host(&mut values, self.output_address)?;
         Ok(Tensor::new(self.output_shape.clone(), values)?)
+    }
+
+    /// Read each selected output in declaration order. One CUDA Graph replay
+    /// computes all results, with common intermediate tensors evaluated once.
+    pub fn read_outputs(&mut self) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
+        let mut result = Vec::with_capacity(self.output_addresses.len());
+        for (node, shape, pointer) in &self.output_addresses {
+            let mut values = vec![0.0f32; shape.element_count()];
+            self.session.copy_to_host(&mut values, *pointer)?;
+            result.push((*node, Tensor::new(shape.clone(), values)?));
+        }
+        Ok(result)
     }
 
     pub fn benchmark(
@@ -726,12 +751,39 @@ impl GpuEngine {
         self
     }
 
-    /// Generate one kernel per arithmetic node in the reachable DAG.
-    /// Reshape is zero-copy, with no additional GPU operation.
+    /// Backward-compatible single-output entrypoint, using the same shared
+    /// compilation path as multi-output graphs.
     pub fn compile(&self, graph: &NeuralGraph, output: NodeId) -> Result<GpuProgram, GpuError> {
-        graph.node(output)?;
+        self.compile_outputs(graph, &[output])
+    }
+
+    /// Compile the union of all requested outputs into one LLVM/PTX module.
+    /// No duplicated producer kernels, no disconnected output slices, and
+    /// no fusion that discards an explicitly selected observable output.
+    pub fn compile_outputs(
+        &self,
+        graph: &NeuralGraph,
+        outputs: &[NodeId],
+    ) -> Result<GpuProgram, GpuError> {
+        if outputs.is_empty() {
+            return Err(GpuError::InvalidInput {
+                node: 0,
+                reason: "multi-output GPU program requires at least one output",
+            });
+        }
+        let mut seen_outputs = BTreeSet::new();
+        for &id in outputs {
+            graph.node(id)?;
+            if !seen_outputs.insert(id.index()) {
+                return Err(GpuError::InvalidInput {
+                    node: id.index(),
+                    reason: "multi-output GPU program has duplicate output",
+                });
+            }
+        }
+        let output = outputs[0];
         let mut reachable = BTreeSet::new();
-        let mut pending = vec![output];
+        let mut pending = outputs.to_vec();
         while let Some(id) = pending.pop() {
             let node = graph.node(id)?;
             if !reachable.insert(id.index()) {
@@ -774,6 +826,11 @@ impl GpuEngine {
             for id in &graph.nodes()[index].inputs {
                 uses[id.index()] += 1;
             }
+        }
+        // Selected roots are observable even when an in-graph consumer also
+        // reads them. Never fold one into a different output's kernel.
+        for &selected in outputs {
+            uses[selected.index()] += 1;
         }
         let mut fused_relus = BTreeMap::new();
         let mut fused_pointwise_chains = BTreeMap::new();
@@ -860,6 +917,7 @@ impl GpuEngine {
         let program = GpuProgram {
             graph: graph.clone(),
             output,
+            outputs: outputs.to_vec(),
             live_nodes,
             source_inputs,
             llvm_ir,
@@ -1043,14 +1101,37 @@ impl GpuEngine {
         }
 
         let last = program.graph.node(program.output)?;
+        let output_addresses = program.outputs.iter().map(|&id| {
+            let node = program.graph.node(id)?;
+            let address = *buffers.get(&id.index()).ok_or(GpuError::InvalidInput {
+                node: id.index(),
+                reason: "selected output does not own a live CUDA buffer",
+            })?;
+            Ok((id, node.shape.clone(), address))
+        }).collect::<Result<Vec<_>, GpuError>>()?;
         Ok(GpuExecution {
             session,
             program: program.clone(),
             input_addresses,
             output_shape: last.shape.clone(),
             output_address: buffers[&program.output.index()],
+            output_addresses,
             has_graph,
         })
+    }
+
+    /// Evaluate all outputs with one shared CUDA Graph capture and replay.
+    /// Results follow program.outputs(), and inputs must cover the union of
+    /// all selected output dependencies.
+    pub fn execute_outputs(
+        &self,
+        program: &GpuProgram,
+        inputs: &[(NodeId, Tensor<f32>)],
+        output_dir: &Path,
+    ) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
+        let mut execution = self.prepare(program, inputs, output_dir)?;
+        execution.replay()?;
+        execution.read_outputs()
     }
 
     pub fn execute(
