@@ -238,11 +238,10 @@ def Binary32RneTick (exact rounded : Int) (shift : Nat) : Prop :=
 theorem binary32_rne_within_step {exact rounded : Int} {shift : Nat}
     (h : Binary32RneTick exact rounded shift) :
     ApproxWithin (binary32Step shift) exact rounded := by
-  unfold Binary32RneTick at h
+  simp only [Binary32RneTick] at h
   rcases h with ⟨_hstep, _hbin, _halign, hnearest⟩
-  let distance : Int := Int.ofNat (rounded - exact).natAbs
-  have hdistance : distance ≤ binary32Step shift := by
-    dsimp [distance]
+  have hdistance :
+      Int.ofNat (rounded - exact).natAbs ≤ binary32Step shift := by
     rcases hnearest with hlt | heq
     · omega
     · omega
