@@ -2020,10 +2020,7 @@ impl RneRangePlan {
                 .all(|input| self.contracts.contains_key(&input.index()))
     }
 
-    fn module_internal_nodes(
-        &self,
-        module: &ModuleInvocation,
-    ) -> Result<Vec<usize>, NumericError> {
+    fn module_internal_nodes(&self, module: &ModuleInvocation) -> Result<Vec<usize>, NumericError> {
         let boundary = module
             .inputs
             .iter()
@@ -2108,8 +2105,7 @@ impl RneRangePlan {
              -- is derived from declared module-input contracts and explicit RNE witnesses.\n\
              -- Dependencies before body_start={} are rejected unless declared as inputs.\n\
              theorem module_{module_index}_global_contract\n",
-            module.name,
-            module.body_start
+            module.name, module.body_start
         );
         let mut elements = BTreeMap::<(usize, usize), RneGlobalElement>::new();
         let mut seen_inputs = BTreeSet::new();
@@ -2165,15 +2161,13 @@ impl RneRangePlan {
                         binary32_step_i64(*right_shift).expect("validated range scale");
                     let bias_columns = node.shape.dims().get(1).copied();
                     for element in 0..node.shape.element_count() {
-                        let left =
-                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let left = Self::global_element(&elements, node.inputs[0], element)?;
                         let right_index = if matches!(node.operation, Operation::BiasAdd) {
                             element % bias_columns.expect("validated BiasAdd rank")
                         } else {
                             element
                         };
-                        let right =
-                            Self::global_element(&elements, node.inputs[1], right_index)?;
+                        let right = Self::global_element(&elements, node.inputs[1], right_index)?;
                         let actual = format!("actual_{index}_{element}");
                         let shift = format!("shift_{index}_{element}");
                         let proof = format!("h_{index}_{element}");
@@ -2199,10 +2193,8 @@ impl RneRangePlan {
                 }
                 RneRangeRule::Mul { .. } => {
                     for element in 0..node.shape.element_count() {
-                        let left =
-                            Self::global_element(&elements, node.inputs[0], element)?;
-                        let right =
-                            Self::global_element(&elements, node.inputs[1], element)?;
+                        let left = Self::global_element(&elements, node.inputs[0], element)?;
+                        let right = Self::global_element(&elements, node.inputs[1], element)?;
                         let actual = format!("actual_{index}_{element}");
                         let shift = format!("shift_{index}_{element}");
                         let proof = format!("h_{index}_{element}");
@@ -2234,8 +2226,7 @@ impl RneRangePlan {
                         for j in 0..inner {
                             let left_index = row * inner + j;
                             let right_index = j * columns + column;
-                            let left =
-                                Self::global_element(&elements, node.inputs[0], left_index)?;
+                            let left = Self::global_element(&elements, node.inputs[0], left_index)?;
                             let right =
                                 Self::global_element(&elements, node.inputs[1], right_index)?;
                             let product = format!("product_{index}_{element}_{j}");
@@ -2277,8 +2268,7 @@ impl RneRangePlan {
                 }
                 RneRangeRule::Relu | RneRangeRule::Reshape => {
                     for element in 0..node.shape.element_count() {
-                        let parent =
-                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let parent = Self::global_element(&elements, node.inputs[0], element)?;
                         let (ideal, actual) = if matches!(node.operation, Operation::Relu) {
                             (
                                 format!("(max ({}) 0)", parent.ideal),
@@ -2315,10 +2305,7 @@ impl RneRangePlan {
             ));
             output_proofs.push(output.proof);
         }
-        source.push_str(&format!(
-            "    : {} := by\n",
-            Self::lean_conjunction(&goals)
-        ));
+        source.push_str(&format!("    : {} := by\n", Self::lean_conjunction(&goals)));
 
         for &index in &internal {
             let node = &self.graph.nodes()[index];
@@ -2328,15 +2315,13 @@ impl RneRangePlan {
                 RneRangeRule::Add { .. } | RneRangeRule::BiasAdd { .. } => {
                     let bias_columns = node.shape.dims().get(1).copied();
                     for element in 0..node.shape.element_count() {
-                        let left =
-                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let left = Self::global_element(&elements, node.inputs[0], element)?;
                         let right_index = if matches!(node.operation, Operation::BiasAdd) {
                             element % bias_columns.expect("validated BiasAdd rank")
                         } else {
                             element
                         };
-                        let right =
-                            Self::global_element(&elements, node.inputs[1], right_index)?;
+                        let right = Self::global_element(&elements, node.inputs[1], right_index)?;
                         let output = Self::global_element(&elements, node.id, element)?;
                         source.push_str(&format!(
                             "  have {} : VeriNeural.ApproxContract {} {} ({}) ({}) := by\n    \
@@ -2353,10 +2338,8 @@ impl RneRangePlan {
                 }
                 RneRangeRule::Mul { .. } => {
                     for element in 0..node.shape.element_count() {
-                        let left =
-                            Self::global_element(&elements, node.inputs[0], element)?;
-                        let right =
-                            Self::global_element(&elements, node.inputs[1], element)?;
+                        let left = Self::global_element(&elements, node.inputs[0], element)?;
+                        let right = Self::global_element(&elements, node.inputs[1], element)?;
                         let output = Self::global_element(&elements, node.id, element)?;
                         source.push_str(&format!(
                             "  have {} : VeriNeural.ApproxContract {} {} ({}) ({}) := by\n    \
@@ -2407,8 +2390,7 @@ impl RneRangePlan {
                 }
                 RneRangeRule::Relu | RneRangeRule::Reshape => {
                     for element in 0..node.shape.element_count() {
-                        let parent =
-                            Self::global_element(&elements, node.inputs[0], element)?;
+                        let parent = Self::global_element(&elements, node.inputs[0], element)?;
                         let output = Self::global_element(&elements, node.id, element)?;
                         source.push_str(&format!(
                             "  have {} : VeriNeural.ApproxContract {} {} ({}) ({}) := by\n    \

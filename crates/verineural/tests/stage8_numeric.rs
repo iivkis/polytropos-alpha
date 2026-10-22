@@ -560,15 +560,9 @@ fn stage8_rne_range_contract_crosses_residual_ffn_module_boundary() {
     assert!(source.contains("ApproxContract 256 2\n      (idealA_0 * idealB_0) sum_0"));
     assert!(source.contains("module_0_contract_well_formed"));
     assert!(source.contains("theorem module_0_global_contract"));
-    assert!(source.contains(
-        "(h_0_0 : VeriNeural.ApproxContract 16 0 ideal_0_0 actual_0_0)"
-    ));
-    assert!(source.contains(
-        "have h_10_0 : VeriNeural.ApproxContract 34095104 170"
-    ));
-    assert!(source.contains(
-        "have h_10_1 : VeriNeural.ApproxContract 34095104 170"
-    ));
+    assert!(source.contains("(h_0_0 : VeriNeural.ApproxContract 16 0 ideal_0_0 actual_0_0)"));
+    assert!(source.contains("have h_10_0 : VeriNeural.ApproxContract 34095104 170"));
+    assert!(source.contains("have h_10_1 : VeriNeural.ApproxContract 34095104 170"));
     assert!(source.contains("exports q=30, ideal bound 34095104, epsilon 170 ticks"));
     assert!(source.contains("approx_contract_mul_rne"));
     assert!(source.contains("approx_contract_add_rne"));
@@ -590,7 +584,11 @@ impl NeuralModule for CapturedDependencyModule {
         &self.contract
     }
 
-    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, verineural::NeuralError> {
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
         graph.add(inputs[0], self.captured)
     }
 }
