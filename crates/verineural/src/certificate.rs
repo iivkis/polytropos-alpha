@@ -480,7 +480,7 @@ fn escape_json(value: &str) -> String {
     out
 }
 
-fn hash_file(path: &Path) -> Result<String, CertificateError> {
+pub(crate) fn hash_file(path: &Path) -> Result<String, CertificateError> {
     let output = Command::new("sha256sum").arg(path).output()?;
     if !output.status.success() {
         return Err(CertificateError::HashTool(

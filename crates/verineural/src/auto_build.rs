@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    FixedScan, GpuEngine, GpuError, GpuProgram, LeanProgram, LeanProofEngine, NeuralError,
+    auto_bundle, FixedScan, GpuEngine, GpuError, GpuProgram, LeanProgram, LeanProofEngine, NeuralError,
     NeuralGraph, NodeId, Operation, ProofError, ProofGoal,
 };
 
@@ -52,6 +52,7 @@ pub enum AutoBuildError {
     Io(io::Error),
     InvalidConnection(String),
     DuplicateTask(String),
+    Integrity(String),
 }
 
 impl fmt::Display for AutoBuildError {
@@ -63,6 +64,7 @@ impl fmt::Display for AutoBuildError {
             Self::Io(e) => write!(f, "artifact I/O failed: {e}"),
             Self::InvalidConnection(e) => write!(f, "invalid architecture connectivity: {e}"),
             Self::DuplicateTask(e) => write!(f, "duplicate proof task name: {e}"),
+            Self::Integrity(e) => write!(f, "auto-build artifact integrity failure: {e}"),
         }
     }
 }
@@ -355,6 +357,8 @@ pub struct AutoBuildReport {
     /// Axiom audit per theorem, namespaced by the generated Lean file.
     pub axiom_dependencies: BTreeMap<String, Vec<String>>,
     pub lean_version: String,
+    /// Hash of SHA256SUMS. Authenticity requires external pinning.
+    pub manifest_sha256: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -454,6 +458,10 @@ impl ArchitectureAutoCompiler {
         }
         fs::create_dir_all(&directory)?;
         let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
+        fs::write(
+            directory.join("semantic.ir"),
+            auto_bundle::canonical_ir(graph, outputs, tasks, gpu_requirement),
+        )?;
         let lean_dir = directory.join("lean");
         fs::create_dir_all(&lean_dir)?;
         let (checked, audit) = self
@@ -503,7 +511,11 @@ impl ArchitectureAutoCompiler {
                 }
             }
         }
-        let report = AutoBuildReport {
+        fs::write(
+            lean_dir.join("audit.txt"),
+            audit_text(&audit.lean_version, &axiom_dependencies),
+        )?;
+        let mut report = AutoBuildReport {
             directory: directory.clone(),
             connectivity: plan.connectivity,
             output_evidence,
@@ -513,8 +525,31 @@ impl ArchitectureAutoCompiler {
             goal_hypotheses,
             axiom_dependencies,
             lean_version: audit.lean_version,
+            manifest_sha256: String::new(),
         };
-        let mut text = format!(
+        fs::write(directory.join("report.txt"), report_text(graph, &report))?;
+        report.manifest_sha256 = match auto_bundle::write_manifest(&directory, &plan) {
+            Ok(digest) => digest,
+            Err(error) => {
+                let _ = fs::remove_file(directory.join("report.txt"));
+                let _ = fs::remove_file(directory.join("SHA256SUMS"));
+                return Err(error);
+            }
+        };
+        Ok(report)
+    }
+}
+
+fn audit_text(lean_version: &str, axiom_dependencies: &BTreeMap<String, Vec<String>>) -> String {
+    let mut text = format!("lean_checker_version={lean_version}\n");
+    for (theorem, axioms) in axiom_dependencies {
+        text.push_str(&format!("axioms={theorem};dependencies={axioms:?}\n"));
+    }
+    text
+}
+
+fn report_text(graph: &NeuralGraph, report: &AutoBuildReport) -> String {
+    let mut text = format!(
             "architecture_assurance=ideal-Int-Lean-kernel-checked\n\
              connectivity_assurance=Rust-structural-validation\n\
              fp32_machine_equivalence=not-proven\n\
@@ -559,7 +594,151 @@ impl ArchitectureAutoCompiler {
                 ));
             }
         }
-        fs::write(directory.join("report.txt"), text)?;
+    text
+}
+
+
+impl ArchitectureAutoCompiler {
+    /// Offline recheck of a previously emitted bundle against this precise
+    /// graph, output selection, goal list and GPU policy. First verify the
+    /// complete manifest and immutable IR, then rerun Lean and inspect the
+    /// saved LLVM/PTX pairs. No CUDA driver or GPU execution is required.
+    ///
+    /// A caller needing authenticity must separately pin the SHA256SUMS hash:
+    /// the bundle's own manifest cannot authenticate itself.
+    pub fn verify_bundle(
+        &self,
+        graph: &NeuralGraph,
+        outputs: &[NodeId],
+        tasks: &[ArchitectureProofTask],
+        gpu_requirement: GpuRequirement,
+        root: &Path,
+        pinned_sha256: Option<&str>,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
+        let directory = root.join("auto-build");
+        let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
+        let digest = auto_bundle::verify_manifest(&directory, &plan, pinned_sha256)?;
+        auto_bundle::verify_current_ir(
+            &directory,
+            &auto_bundle::canonical_ir(graph, outputs, tasks, gpu_requirement),
+        )?;
+        let lean_dir = directory.join("lean");
+        let mut axiom_dependencies = BTreeMap::new();
+        let (lean_version, architecture_theorems) = {
+            let file = lean_dir.join("architecture.lean");
+            verify_source(&self.proof, &file, &plan.architecture)?;
+            let audit = self.proof.audit_file(&file, plan.architecture.theorem_names())?;
+            for (theorem, axioms) in audit.axiom_dependencies {
+                axiom_dependencies.insert(format!("architecture.{theorem}"), axioms);
+            }
+            (audit.lean_version, plan.architecture.theorem_names().len())
+        };
+        let mut goal_theorems = Vec::new();
+        let mut goal_hypotheses = Vec::new();
+        for (index, (name, program)) in plan.goals.iter().enumerate() {
+            let file = lean_dir.join(format!("goal_{index}_{name}.lean"));
+            verify_source(&self.proof, &file, program)?;
+            let audit = self.proof.audit_file(&file, program.theorem_names())?;
+            if audit.lean_version != lean_version {
+                return Err(AutoBuildError::Integrity(
+                    "Lean checker version changed while replaying proofs".into(),
+                ));
+            }
+            for (theorem, axioms) in audit.axiom_dependencies {
+                axiom_dependencies.insert(format!("goal_{index}_{name}.{theorem}"), axioms);
+            }
+            goal_theorems.push((name.clone(), program.theorem_names().len()));
+            goal_hypotheses.push((name.clone(), program.assumptions().to_vec()));
+        }
+        if fs::read_to_string(lean_dir.join("audit.txt"))?
+            != audit_text(&lean_version, &axiom_dependencies)
+        {
+            return Err(AutoBuildError::Integrity(
+                "saved Lean axiom dependencies or checker version no longer match".into(),
+            ));
+        }
+
+        let mut output_evidence = Vec::new();
+        for (index, item) in plan.gpu.iter().enumerate() {
+            let gpu_dir = directory.join(format!("gpu_{index}"));
+            match item {
+                PlannedGpu::Supported { output, program } => {
+                    if fs::read_to_string(gpu_dir.join("graph.ll"))? != program.llvm_ir() {
+                        return Err(AutoBuildError::Integrity(format!(
+                            "GPU output {index} LLVM differs from current IR"
+                        )));
+                    }
+                    let translation = program.translation_plan()?;
+                    if fs::read_to_string(gpu_dir.join("translation.plan"))?
+                        != translation.to_text()
+                    {
+                        return Err(AutoBuildError::Integrity(format!(
+                            "GPU output {index} translation plan mismatch"
+                        )));
+                    }
+                    let ptx_file = gpu_dir.join("graph.ptx");
+                    let ptx = fs::read_to_string(&ptx_file)?;
+                    let checked = translation.validate(program.llvm_ir(), &ptx)
+                        .map_err(|err| AutoBuildError::Integrity(format!(
+                            "GPU output {index} LLVM/PTX translation rejected: {err}"
+                        )))?;
+                    if fs::read_to_string(gpu_dir.join("translation.report"))?
+                        != checked.to_text()
+                    {
+                        return Err(AutoBuildError::Integrity(format!(
+                            "GPU output {index} translation report mismatch"
+                        )));
+                    }
+                    output_evidence.push(OutputBuildEvidence {
+                        node: output.index(), ptx: Some(ptx_file), reason: None,
+                    });
+                }
+                PlannedGpu::Unsupported { output, reason } => {
+                    if gpu_dir.exists() {
+                        return Err(AutoBuildError::Integrity(format!(
+                            "unsupported GPU output {index} has unexpected compiled artifacts"
+                        )));
+                    }
+                    output_evidence.push(OutputBuildEvidence {
+                        node: output.index(), ptx: None, reason: Some(reason.clone()),
+                    });
+                }
+            }
+        }
+        let report = AutoBuildReport {
+            directory: directory.clone(),
+            connectivity: plan.connectivity,
+            output_evidence,
+            architecture_theorems,
+            goal_theorems,
+            source_hypotheses: plan.architecture.assumptions().to_vec(),
+            goal_hypotheses,
+            axiom_dependencies,
+            lean_version,
+            manifest_sha256: digest,
+        };
+        if fs::read_to_string(directory.join("report.txt"))?
+            != report_text(graph, &report)
+        {
+            return Err(AutoBuildError::Integrity(
+                "auto-build report does not describe the freshly rechecked evidence".into()
+            ));
+        }
         Ok(report)
     }
+}
+
+fn verify_source(
+    proof: &LeanProofEngine,
+    path: &Path,
+    expected: &LeanProgram,
+) -> Result<(), AutoBuildError> {
+    if fs::read_to_string(path)? != expected.source() {
+        return Err(AutoBuildError::Integrity(format!(
+            "saved Lean source differs from the generated current proof: {}",
+            path.display()
+        )));
+    }
+    proof.check_file(path)?;
+    Ok(())
 }

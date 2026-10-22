@@ -91,6 +91,11 @@ tasks:
     cmds:
       - cargo run -p verineural --example auto_architecture
 
+  verify-auto-architecture:
+    desc: Offline replay of current auto-build Semantic IR, SHA-256 manifest, Lean kernel/axioms and LLVM/PTX translation
+    cmds:
+      - cargo run -p verineural --example auto_architecture -- --verify
+
   proof-gated-select:
     desc: Check generic positive mask and conditional select with bounded Lean state invariant (GPU fail-closed)
     cmds:

@@ -30,6 +30,7 @@
 
 mod architecture;
 mod auto_build;
+mod auto_bundle;
 mod certificate;
 mod cuda;
 mod error;
