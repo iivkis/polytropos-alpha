@@ -83,6 +83,45 @@ fn attrs(pairs: &[(&str, String)]) -> String {
         .join(", ")
 }
 
+/// A presentation-only theme. Canonical vn_* attributes remain independent of
+/// color, DPI, font, and the Graphviz layout algorithm.
+fn node_theme(kind: &str, op: &Operation) -> (&'static str, &'static str) {
+    match kind {
+        "input" => ("#EAF2FF", "#3972BD"),
+        "parameter" => ("#FFF1DB", "#B9772A"),
+        "architecture_output" => ("#DDF8E9", "#26805A"),
+        _ => match op {
+            Operation::Add => ("#F1F5F9", "#64748B"),
+            Operation::Mul => ("#EEF2FF", "#6477B5"),
+            Operation::BiasAdd => ("#FDEEF3", "#B76A91"),
+            Operation::Relu => ("#F0EDFF", "#8160BF"),
+            Operation::MatMul => ("#E8F5FE", "#4C90B5"),
+            _ => ("#FFFFFF", "#64748B"),
+        },
+    }
+}
+
+fn operation_title(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::Input => "Input",
+        Operation::Add => "Add",
+        Operation::Mul => "Multiply",
+        Operation::BiasAdd => "Bias add",
+        Operation::Relu => "ReLU",
+        Operation::MatMul => "MatMul",
+        Operation::Sqrt => "Sqrt",
+        Operation::Reshape(_) => "Reshape",
+    }
+}
+
+fn cluster_theme(depth: usize) -> (&'static str, &'static str) {
+    match depth % 3 {
+        0 => ("#F5F8FF", "#93A9D4"),
+        1 => ("#F1F5FD", "#A4B4CB"),
+        _ => ("#F8FAFD", "#BCC8D7"),
+    }
+}
+
 impl ArchitectureSnapshot {
     /// Re-render the pinned DOT with Graphviz into architecture.png.
     /// Only the configured artifact root receives writes.
@@ -299,9 +338,30 @@ pub fn snapshot_architecture(
                 .flat_map(|x| x.iter().copied()),
         )
         .collect();
+    // Stable, spacious presentation: source nodes on one left-hand column,
+    // actual data dependencies only, and rounded colored module boundaries.
+    // DPI belongs in DOT so rerendering via plain "dot -Tpng" is consistent.
     let mut dot = String::from(
-        "digraph verineural {\n  graph [rankdir=LR, compound=true];\n  node [shape=box, fontsize=10];\n",
+        r##"digraph verineural {
+  graph [rankdir=LR, compound=true, newrank=true, splines=ortho, outputorder=edgesfirst,
+         nodesep=0.65, ranksep=1.05, pad=0.50, margin=0.18, dpi=180,
+         bgcolor="#FFFFFF", fontname="DejaVu Sans", fontcolor="#24324B",
+         labelloc=t, labeljust=l];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans",
+        fontsize=12, fontcolor="#24324B", penwidth=1.5, margin="0.17,0.13"];
+  edge [color="#8796AA", penwidth=1.2, arrowsize=0.65];
+"##,
     );
+    writeln!(
+        dot,
+        "  label={};",
+        quoted(&format!(
+            "{}  ·  architecture v{}\nSemantic IR · FP32 · module composition",
+            metadata.id.replace('-', " "),
+            metadata.version
+        ))
+    )
+    .expect("writing to string");
     for (key, value) in [
         ("vn_export_version", "1".to_owned()),
         ("vn_architecture_id", metadata.id.clone()),
@@ -384,11 +444,21 @@ pub fn snapshot_architecture(
                 |_| "kernel",
             );
             let policy = format!("{:?}", node.semantics.fp32);
+            let (fill, outline) = node_theme(kind, &node.operation);
+            // Actual newline, not a literal backslash-n. quoted() escapes it
+            // once, allowing Graphviz to render a true two-line label.
+            let title = match kind {
+                "input" => "INPUT".to_owned(),
+                "parameter" => "PARAMETER".to_owned(),
+                "architecture_output" => format!("OUTPUT · {}", operation_title(&node.operation)),
+                _ => operation_title(&node.operation).to_owned(),
+            };
+            let label = format!("{title}  ·  n{index}\n{dims}");
             let properties = [
-                (
-                    "label",
-                    format!("n{index} {}\\n{dims}", node.operation.name()),
-                ),
+                ("label", label),
+                ("fillcolor", fill.into()),
+                ("color", outline.into()),
+                ("tooltip", format!("node {index}: {}", node.operation.name())),
                 ("vn_id", format!("n{index}")),
                 ("vn_kind", kind.into()),
                 ("vn_op", node.operation.name().into()),
@@ -442,10 +512,25 @@ pub fn snapshot_architecture(
         {
             writeln!(dot, "{indent}subgraph cluster_m{i} {{").expect("writing to string");
             let inner = format!("{indent}  ");
+            let (background, outline) = cluster_theme(depth);
+            for (key, value) in [
+                ("style", "rounded,filled".to_owned()),
+                ("fillcolor", background.to_owned()),
+                ("color", outline.to_owned()),
+                ("fontname", "DejaVu Sans".to_owned()),
+                ("fontcolor", "#344664".to_owned()),
+                ("fontsize", "15".to_owned()),
+                ("penwidth", "1.7".to_owned()),
+                ("margin", "22".to_owned()),
+                ("labelloc", "t".to_owned()),
+                ("labeljust", "l".to_owned()),
+            ] {
+                writeln!(dot, "{inner}{key}={};", quoted(&value)).expect("writing to string");
+            }
             writeln!(
                 dot,
                 "{inner}label={};",
-                quoted(&format!("{} (m{i})", module.name))
+                quoted(&format!("{}  ·  m{i}", module.name.replace('_', " ").to_uppercase()))
             )
             .expect("writing to string");
             for (key, value) in [
@@ -468,6 +553,17 @@ pub fn snapshot_architecture(
             ] {
                 writeln!(dot, "{inner}{key}={};", quoted(&value)).expect("writing to string");
             }
+            // Interface edges would duplicate real data dependencies and
+            // route dozens of dashed lines across the PNG. Preserve every
+            // positional port as machine-readable cluster metadata instead.
+            for (port, source) in module.inputs.iter().enumerate() {
+                writeln!(
+                    dot,
+                    "{inner}vn_input_port_{port}={};",
+                    quoted(&format!("n{}", source.index()))
+                )
+                .expect("writing to string");
+            }
             render_scope(Some(i), context, depth + 1, dot);
             writeln!(dot, "{indent}}}").expect("writing to string");
         }
@@ -484,7 +580,16 @@ pub fn snapshot_architecture(
         output,
     };
     render_scope(None, &context, 0, &mut dot);
-    // Edges are drawn globally to expose captures, module ports and sharing.
+    // Keep all source inputs and parameters aligned to the left, regardless
+    // of the number of downstream consumers or nested module boundaries.
+    let sources = graph.nodes().iter().enumerate()
+        .filter_map(|(i, node)| matches!(node.operation, Operation::Input).then_some(i))
+        .collect::<Vec<_>>();
+    if !sources.is_empty() {
+        let positions = sources.iter().map(|i| format!("n{i};")).collect::<Vec<_>>().join(" ");
+        writeln!(dot, "  {{ rank=same; {positions} }}").expect("writing to string");
+    }
+    // Only real IR edges are drawn. Module ports are carried by vn_* attributes.
     for (i, node) in graph.nodes().iter().enumerate() {
         for (port, source) in node.inputs.iter().enumerate() {
             let from = graph.node(*source).map_err(|e| bad(e.to_string()))?;
@@ -501,6 +606,8 @@ pub fn snapshot_architecture(
                 .filter(|r| *r == "parameter")
                 .unwrap_or("data");
             let data = [
+                ("color", if role == "parameter" { "#C69B5D" } else { "#8A98AD" }.into()),
+                ("penwidth", if role == "parameter" { "1.35" } else { "1.15" }.into()),
                 ("vn_src_port", "output".into()),
                 ("vn_dst_port", format!("input_{port}")),
                 ("vn_role", role.into()),
@@ -512,26 +619,6 @@ pub fn snapshot_architecture(
             ];
             writeln!(dot, "  n{} -> n{i} [{}];", source.index(), attrs(&data))
                 .expect("writing to string");
-        }
-    }
-    for (i, module) in mods.iter().enumerate() {
-        for (port, source) in module.inputs.iter().enumerate() {
-            let properties = [
-                ("style", "dashed".into()),
-                ("constraint", "false".into()),
-                ("vn_role", "module-input-port".into()),
-                ("vn_dst_port", format!("m{i}:input_{port}")),
-                ("vn_instance_path", paths[i].clone()),
-            ];
-            // Edge to module output is annotation only, not an IR dependency.
-            writeln!(
-                dot,
-                "  n{} -> n{} [{}];",
-                source.index(),
-                module.output.index(),
-                attrs(&properties)
-            )
-            .expect("writing to string");
         }
     }
     dot.push_str("}\n");
@@ -573,6 +660,21 @@ mod tests {
         assert!(a.dot.contains("vn_reachable_from_output=\"false\""));
         assert!(a.dot.contains("vn_ir_sha256="));
         assert_eq!(a.dot.matches("vn_id=").count(), g1.nodes().len());
+        // Visual edges must correspond one-to-one with real typed IR inputs,
+        // not synthetic module-port annotations that obscure the graph.
+        let real_edges: usize = g1.nodes().iter().map(|n| n.inputs.len()).sum();
+        assert_eq!(a.dot.matches(" -> ").count(), real_edges);
+        assert!(!a.dot.contains("module-input-port"));
+        assert!(!a.dot.contains(r#"style="dashed""#));
+        assert!(!a.dot.contains("vn_input_port_")); // no modules in this graph
+        assert!(a.dot.contains("rank=same; n0; n1;"));
+        assert!(a.dot.contains("splines=ortho"));
+        assert!(a.dot.contains("nodesep=0.65"));
+        assert!(a.dot.contains("dpi=180"));
+        assert!(a.dot.contains(r#"fillcolor="#FFF1DB""#));
+        // Labels must be multi-line, not a literal printed backslash-n.
+        assert!(a.dot.contains(r#"n0 [label="INPUT  ·  n0\n[2]""#));
+        assert!(!a.dot.contains(r#"INPUT  ·  n0\\n[2]"#));
         let mut changed = meta.clone();
         changed.version = "0.2.0".into();
         assert_ne!(

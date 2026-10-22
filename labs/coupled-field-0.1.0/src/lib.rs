@@ -347,6 +347,16 @@ mod tests {
         assert_eq!(snapshot.dot.matches("subgraph cluster_m").count(), 7);
         assert!(snapshot.dot.contains(r#"vn_role="parameter""#));
         assert!(snapshot.dot.contains("vn_module_inputs="));
+        // 7 composed instances retain their input-port provenance without
+        // the 35+ redundant dashed arrows that overwhelmed the old diagram.
+        let real_edges: usize = lab.graph.nodes().iter().map(|node| node.inputs.len()).sum();
+        assert_eq!(snapshot.dot.matches(" -> ").count(), real_edges);
+        assert!(!snapshot.dot.contains("module-input-port"));
+        assert!(snapshot.dot.contains(r#"vn_input_port_0="n0""#));
+        assert!(snapshot.dot.contains("rank=same; n0; n1; n2; n3; n4;"));
+        assert!(snapshot.dot.contains(r#"fillcolor="#FFF1DB""#));
+        assert!(snapshot.dot.contains(r#"style="rounded,filled""#));
+        assert!(snapshot.dot.contains("dpi=180"));
         assert!(snapshot.dot.contains("vn_ir_sha256="));
     }
 
