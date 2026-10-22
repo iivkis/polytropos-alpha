@@ -165,3 +165,18 @@ tasks:
     desc: Offline reconstruct Stage 9 Semantic IR/DOT and check Lean, LLVM/PTX and SHA-256
     cmds:
       - cargo run -p coupled-field-lab --example stage9_architecture -- --verify
+
+  lab-xor:
+    desc: Check XOR MLP truth table via VeriNeural, Lean, NVPTX and CUDA Graph; write lab evidence
+    cmds:
+      - cargo run -p xor-lab --example xor_lab
+
+  verify-lab-xor:
+    desc: Recheck XOR lab artifacts, Lean, translation and hashes without GPU
+    cmds:
+      - cargo run -p xor-lab --example xor_lab -- --verify
+
+  test-lab-xor:
+    desc: Run CPU-only XOR consumer tests including proof and GPU compilation planning
+    cmds:
+      - cargo test -p xor-lab
