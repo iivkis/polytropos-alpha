@@ -284,6 +284,41 @@ impl PortContract {
 pub enum ContractClaim {
     Nonnegative,
     EqualsInput(usize),
+    /// A user-declared, independently proved ideal-Int predicate.
+    Predicate(Predicate),
+}
+
+/// A reference in a proof predicate. Module contracts use Input/Output,
+/// architecture goals use Node; mixing these contexts is rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ValueRef {
+    Input(usize),
+    Output,
+    Node(NodeId),
+}
+
+/// Typed, data-only proof obligations. No injected Lean text or trusted callback.
+/// The supported prover currently handles tensor equality, nonnegativity and
+/// pointwise ordering. Unsupported claims fail closed at proof generation/check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Predicate {
+    Nonnegative(ValueRef),
+    Equal(ValueRef, ValueRef),
+    PointwiseLe(ValueRef, ValueRef),
+}
+
+impl Predicate {
+    pub fn nonnegative(value: ValueRef) -> Self {
+        Self::Nonnegative(value)
+    }
+
+    pub fn equal(left: ValueRef, right: ValueRef) -> Self {
+        Self::Equal(left, right)
+    }
+
+    pub fn pointwise_le(lower: ValueRef, upper: ValueRef) -> Self {
+        Self::PointwiseLe(lower, upper)
+    }
 }
 
 /// A machine-checkable *structural* contract. It is NOT a Lean proof.
@@ -318,6 +353,11 @@ impl MathContract {
 
     pub fn equals_input(self, port: usize) -> Self {
         self.with_claim(ContractClaim::EqualsInput(port))
+    }
+
+    /// Declare an independent ideal-Int relational contract.
+    pub fn predicate(self, predicate: Predicate) -> Self {
+        self.with_claim(ContractClaim::Predicate(predicate))
     }
 }
 
@@ -469,6 +509,11 @@ impl NamedPortContract {
 
     pub fn equals_input(self, port: usize) -> Self {
         self.with_claim(ContractClaim::EqualsInput(port))
+    }
+
+    /// Declare an independent ideal-Int relational contract.
+    pub fn predicate(self, predicate: Predicate) -> Self {
+        self.with_claim(ContractClaim::Predicate(predicate))
     }
 }
 

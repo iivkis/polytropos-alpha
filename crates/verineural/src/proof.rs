@@ -10,7 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{ContractClaim, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation, Shape};
+use crate::{
+    ContractClaim, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation,
+    Predicate, Shape, ValueRef,
+};
 
 const LEAN_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Basic.lean");
 
@@ -114,6 +117,8 @@ struct ModuleNonnegativeProof {
 pub enum ProofGoalKind {
     Nonnegative { assumptions: Vec<NodeId> },
     EqualTo { other: NodeId },
+    /// A single independent, explicitly typed mathematical relation.
+    Predicate(Predicate),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -640,6 +645,13 @@ impl LeanProofEngine {
                         ));
                         theorems.push(name);
                     }
+                    ContractClaim::Predicate(predicate) => {
+                        emit_module_predicate(
+                            graph, &mut source, &mut theorems, name,
+                            predicate, &module.inputs, module.output,
+                            &claim_context,
+                        )?;
+                    }
                 }
             }
         }
@@ -751,6 +763,13 @@ impl LeanProofEngine {
                                 call(input.index())
                             ));
                             theorems.push(name);
+                        }
+                        ContractClaim::Predicate(predicate) => {
+                            emit_module_predicate(
+                                graph, &mut source, &mut theorems, name,
+                                predicate, &module.inputs, output,
+                                &claim_context,
+                            )?;
                         }
                     }
                 }
@@ -1024,47 +1043,103 @@ impl LeanProofEngine {
                 }
                 Ok(program)
             }
-            ProofGoalKind::EqualTo { other } => {
-                let used = collect_used_nodes(graph, goal.output)?;
-                if !used.contains(&other.index())
-                    || graph.node(goal.output)?.shape != graph.node(*other)?.shape
-                {
-                    return Err(ProofError::UnsupportedGuarantee {
-                        node: other.index(),
-                    });
+            // Legacy public constructors are adapters to the same predicate
+            // proof path, rather than maintaining another theorem generator.
+            ProofGoalKind::EqualTo { other } => self.generate_goal(graph, &ProofGoal {
+                name: goal.name.clone(),
+                output: goal.output,
+                kind: ProofGoalKind::Predicate(Predicate::equal(
+                    ValueRef::Output,
+                    ValueRef::Node(*other),
+                )),
+            }),
+            ProofGoalKind::Predicate(predicate) => {
+                let resolve = |value: &ValueRef| -> Result<NodeId, ProofError> {
+                    let id = match value {
+                        ValueRef::Node(id) => *id,
+                        ValueRef::Output => goal.output,
+                        ValueRef::Input(_) => {
+                            return Err(ProofError::UnsupportedGuarantee {
+                                node: goal.output.index(),
+                            });
+                        }
+                    };
+                    graph.node(id)?;
+                    Ok(id)
+                };
+                match predicate {
+                    Predicate::Nonnegative(value) => {
+                        if resolve(value)? != goal.output {
+                            return Err(ProofError::UnsupportedGuarantee {
+                                node: goal.output.index(),
+                            });
+                        }
+                        self.generate_goal(graph, &ProofGoal {
+                            name: goal.name.clone(),
+                            output: goal.output,
+                            kind: ProofGoalKind::Nonnegative { assumptions: vec![] },
+                        })
+                    }
+                    Predicate::Equal(a, b) | Predicate::PointwiseLe(a, b) => {
+                        let left = resolve(a)?;
+                        let right = resolve(b)?;
+                        let used = collect_used_nodes(graph, goal.output)?;
+                        if !used.contains(&left.index())
+                            || !used.contains(&right.index())
+                            || graph.node(left)?.shape != graph.node(right)?.shape
+                        {
+                            return Err(ProofError::UnsupportedGuarantee {
+                                node: goal.output.index(),
+                            });
+                        }
+                        let mut program = self.generate(graph, goal.output)?;
+                        let sources = used
+                            .iter()
+                            .filter(|&&index| {
+                                matches!(graph.nodes()[index].operation, Operation::Input)
+                            })
+                            .copied()
+                            .collect::<Vec<_>>();
+                        let params = sources
+                            .iter()
+                            .map(|&i| {
+                                format!(
+                                    "(x_{i} : VeriNeural.Tensor {})",
+                                    graph.nodes()[i].shape.element_count()
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let args = sources
+                            .iter()
+                            .map(|&i| format!("x_{i}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let terminator = "end VeriNeural.Generated\n";
+                        program.source.truncate(program.source.len() - terminator.len());
+                        let name = format!("architecture_property_{}", goal.name);
+                        let term = |id: NodeId| format!("(node_{} {args})", id.index());
+                        let (proposition, proof) = match predicate {
+                            Predicate::Equal(_, _) => (
+                                format!("{} = {}", term(left), term(right)),
+                                "  rfl".to_owned(),
+                            ),
+                            Predicate::PointwiseLe(_, _) => (
+                                format!(
+                                    "VeriNeural.PointwiseLe {} {}",
+                                    term(left), term(right)
+                                ),
+                                format!("  exact VeriNeural.pointwise_le_relu {}", term(left)),
+                            ),
+                            Predicate::Nonnegative(_) => unreachable!(),
+                        };
+                        program.source.push_str(&format!(
+                            "theorem {name} {params} : {proposition} := by\n{proof}\n\n{terminator}"
+                        ));
+                        program.theorems.push(name);
+                        Ok(program)
+                    }
                 }
-                let mut program = self.generate(graph, goal.output)?;
-                let source_nodes = used
-                    .iter()
-                    .filter(|&&index| matches!(graph.nodes()[index].operation, Operation::Input))
-                    .copied()
-                    .collect::<Vec<_>>();
-                let params = source_nodes
-                    .iter()
-                    .map(|&i| {
-                        format!(
-                            "(x_{i} : VeriNeural.Tensor {})",
-                            graph.nodes()[i].shape.element_count()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let args = source_nodes
-                    .iter()
-                    .map(|&i| format!("x_{i}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let terminator = "end VeriNeural.Generated\n";
-                program
-                    .source
-                    .truncate(program.source.len() - terminator.len());
-                let name = format!("architecture_property_{}", goal.name);
-                program.source.push_str(&format!(
-                    "-- User-owned equality goal, independently checked by Lean.\n                     theorem {name} {params} : node_{} {args} = node_{} {args} := by\n  rfl\n\n{terminator}",
-                    goal.output.index(), other.index()
-                ));
-                program.theorems.push(name);
-                Ok(program)
             }
         }
     }
@@ -1626,6 +1701,67 @@ struct IdealNonnegativeClaimContext<'a> {
     arguments: &'a str,
     assumptions: &'a [ProofAssumption],
     source_hypotheses: &'a BTreeSet<usize>,
+}
+
+/// Resolve module-local references to concrete graph handles, without
+/// accepting globally captured nodes in an ostensibly closed contract.
+fn resolve_module_value(
+    graph: &NeuralGraph,
+    value: &ValueRef,
+    inputs: &[NodeId],
+    output: NodeId,
+) -> Result<NodeId, ProofError> {
+    let id = match value {
+        ValueRef::Input(index) => inputs.get(*index).copied(),
+        ValueRef::Output => Some(output),
+        ValueRef::Node(_) => None,
+    }
+    .ok_or(ProofError::UnsupportedGuarantee { node: output.index() })?;
+    graph.node(id)?;
+    Ok(id)
+}
+
+fn emit_module_predicate(
+    graph: &NeuralGraph,
+    source: &mut String,
+    theorems: &mut Vec<String>,
+    name: String,
+    predicate: &Predicate,
+    inputs: &[NodeId],
+    output: NodeId,
+    context: &IdealNonnegativeClaimContext<'_>,
+) -> Result<(), ProofError> {
+    match predicate {
+        Predicate::Nonnegative(value) => {
+            let target = resolve_module_value(graph, value, inputs, output)?;
+            emit_ideal_nonnegative_claim(graph, source, theorems, name, target, context)
+        }
+        Predicate::Equal(a, b) | Predicate::PointwiseLe(a, b) => {
+            let left = resolve_module_value(graph, a, inputs, output)?;
+            let right = resolve_module_value(graph, b, inputs, output)?;
+            if graph.node(left)?.shape != graph.node(right)?.shape {
+                return Err(ProofError::UnsupportedGuarantee { node: output.index() });
+            }
+            let call = |id: NodeId| format!("(node_{} {})", id.index(), context.arguments);
+            let (proposition, proof) = match predicate {
+                Predicate::Equal(_, _) => (
+                    format!("{} = {}", call(left), call(right)),
+                    "  rfl\n".to_owned(),
+                ),
+                Predicate::PointwiseLe(_, _) => (
+                    format!("VeriNeural.PointwiseLe {} {}", call(left), call(right)),
+                    format!("  exact VeriNeural.pointwise_le_relu {}\n", call(left)),
+                ),
+                Predicate::Nonnegative(_) => unreachable!(),
+            };
+            source.push_str(&format!(
+                "theorem {name} {} : {proposition} := by\n{proof}\n",
+                context.params
+            ));
+            theorems.push(name);
+            Ok(())
+        }
+    }
 }
 
 fn emit_ideal_nonnegative_claim(

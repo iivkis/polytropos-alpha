@@ -60,6 +60,8 @@ fn build() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Пользовательские отношения для сертифицируемых свойств объявляются типизированно, без вставки произвольного Lean-кода: `Predicate::pointwise_le(ValueRef::Input(0), ValueRef::Output)` можно передать в `.predicate(...)` у контракта, а `ProofGoalKind::Predicate(Predicate::pointwise_le(ValueRef::Node(x), ValueRef::Node(y)))` формулирует самостоятельную архитектурную теорему. Для идеальной `Int`-семантики сейчас доступно узкое доказательное правило `x ≤ ReLU(x)`. Ложная обратная теорема не принимается kernel'ом; воспроизводимая проверка: `task verify-relational-predicates`. Не путать это с IEEE-754 или CUDA proof.
+
 `NeuralGraph::canonical_ir()` — единая versioned-сериализация семантики графа. Snapshot, auto-build и certificate layer используют её вместо собственных `Debug`-форматов; выбор output, proof goals и GPU policy остаётся метаданными конкретной сборки и связывается её артефактами/манифестом.
 Текущий формат — `verineural-semantic-ir-v2`. Сохранённые evidence bundles, созданные старым форматом, необходимо пересобрать штатной командой соответствующей лаборатории; старый fingerprint намеренно не считается совместимым.
 

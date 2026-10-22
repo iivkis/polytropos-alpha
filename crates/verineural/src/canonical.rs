@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use crate::{
     ContractClaim, FmaMode, GpuSemantics, ModuleInstanceRef, NeuralGraph, Operation, PortContract,
-    ReductionOrder, RoundingMode, Shape, SubnormalMode,
+    Predicate, ReductionOrder, RoundingMode, Shape, SubnormalMode, ValueRef,
 };
 
 const FORMAT_VERSION: &str = "verineural-semantic-ir-v2";
@@ -80,12 +80,29 @@ fn port(port: &PortContract) -> String {
     format!("{}@{}", shape(&port.shape), port.domain.name())
 }
 
+fn value_ref(value: &ValueRef) -> String {
+    match value {
+        ValueRef::Input(index) => format!("input:{index}"),
+        ValueRef::Output => "output".to_owned(),
+        ValueRef::Node(id) => format!("node:{}", id.index()),
+    }
+}
+
+fn predicate(predicate: &Predicate) -> String {
+    match predicate {
+        Predicate::Nonnegative(value) => format!("nonnegative({})", value_ref(value)),
+        Predicate::Equal(a, b) => format!("equal({},{})", value_ref(a), value_ref(b)),
+        Predicate::PointwiseLe(a, b) => format!("pointwise_le({},{})", value_ref(a), value_ref(b)),
+    }
+}
+
 fn claims(claims: &[ContractClaim]) -> String {
     let text = claims
         .iter()
         .map(|claim| match claim {
             ContractClaim::Nonnegative => "nonnegative".to_owned(),
             ContractClaim::EqualsInput(index) => format!("equals_input:{index}"),
+            ContractClaim::Predicate(value) => predicate(value),
         })
         .collect::<Vec<_>>()
         .join("+");

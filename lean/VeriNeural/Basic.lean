@@ -56,6 +56,17 @@ def biasAdd {m n : Nat} (a : Tensor (m * n))
 def Nonnegative {n : Nat} (a : Tensor n) : Prop :=
   ∀ i : Fin n, 0 ≤ a i
 
+/-- Independent relational specification; not the definition of a kernel. -/
+def PointwiseLe {n : Nat} (lower upper : Tensor n) : Prop :=
+  ∀ i : Fin n, lower i ≤ upper i
+
+/-- ReLU never decreases an ideal integer value. -/
+theorem pointwise_le_relu {n : Nat} (a : Tensor n) :
+    PointwiseLe a (relu a) := by
+  intro i
+  change a i ≤ max (a i) 0
+  exact le_max_left _ _
+
 theorem add_pointwise {n : Nat} (a b : Tensor n) (i : Fin n) :
     add a b i = a i + b i := by
   rfl

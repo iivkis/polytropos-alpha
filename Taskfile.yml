@@ -180,3 +180,8 @@ tasks:
     desc: Run CPU-only XOR consumer tests including one global proof and GPU compilation planning
     cmds:
       - cargo test -p xor-lab --all-targets
+
+  verify-relational-predicates:
+    desc: Lean kernel and axiom audit acceptance for true and deliberately false consumer relational claims
+    cmds:
+      - cargo test -p verineural --test relational_predicates -- --ignored

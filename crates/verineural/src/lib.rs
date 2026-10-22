@@ -63,7 +63,7 @@ pub use ir::{
     ContractClaim, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics, MathContract,
     ModuleInstanceRef, ModuleInvocation, MultiModuleInvocation, MultiOutputContract, MultiOutputModule,
     NamedPortContract, NeuralGraph, NeuralModule, Node, NodeId, Operation, OperationSemantics,
-    PortContract, ReductionOrder, RoundingMode, SubnormalMode,
+    PortContract, Predicate, ReductionOrder, RoundingMode, SubnormalMode, ValueRef,
 };
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
 pub use numeric::{
