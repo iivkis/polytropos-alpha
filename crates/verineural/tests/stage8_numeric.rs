@@ -262,3 +262,25 @@ fn stage8_multiplication_reduction_fail_closed_when_not_exactly_bounded() {
         16_777_216
     );
 }
+
+/// Regression: the first Stage 8 graph must not attempt to check the second
+/// graph's Lean file before that file has been generated. The example has
+/// deliberately separate generation and saved-artifact verification paths.
+#[test]
+fn stage8_example_checks_each_lean_artifact_only_after_generation() {
+    let source = include_str!("../examples/stage8_exact.rs");
+    let main = source
+        .split_once("fn main() ->")
+        .expect("Stage 8 example main")
+        .1;
+    let (first_graph, second_graph) = main
+        .split_once("let mat_plan =")
+        .expect("Stage 8 second graph");
+    assert!(!first_graph.contains("numeric_matmul.lean"));
+    assert!(second_graph.contains(
+        "write_checked_lean(&root.join(\"numeric_matmul.lean\"), &mat_plan.lean_source()?)?"
+    ));
+    assert!(first_graph.contains(
+        "write_checked_lean(&root.join(\"numeric.lean\"), &plan.lean_source()?)?"
+    ));
+}

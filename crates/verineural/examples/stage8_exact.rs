@@ -69,6 +69,14 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Generate and check one Lean artifact as a single ordered operation.
+/// Saved-artifact verification is handled separately by verify().
+fn write_checked_lean(path: &Path, source: &str) -> Result<(), Box<dyn Error>> {
+    fs::write(path, source)?;
+    LeanProofEngine::default().check_file(path)?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let root = Path::new("target/verineural/stage8-exact");
     if std::env::args().any(|arg| arg == "--verify") {
@@ -105,9 +113,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let plan = ExactFp32Plan::compile(&graph, output)?;
     let expected = plan.integer_reference(&inputs)?;
-    fs::write(root.join("numeric.lean"), plan.lean_source()?)?;
-    LeanProofEngine::default().check_file(&root.join("numeric.lean"))?;
-    LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
+    write_checked_lean(&root.join("numeric.lean"), &plan.lean_source()?)?;
 
     let baseline =
         GpuEngine::default().with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Disabled)?);
@@ -150,8 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mat_inputs = [(aid, lhs), (bid, rhs), (mid, mask), (biasid, mbias)];
     let mat_plan = ExactFp32Plan::compile_with_input_bound(&mat_graph, mat_output, 8)?;
     let mat_expected = mat_plan.integer_reference(&mat_inputs)?;
-    fs::write(root.join("numeric_matmul.lean"), mat_plan.lean_source()?)?;
-    LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
+    write_checked_lean(&root.join("numeric_matmul.lean"), &mat_plan.lean_source()?)?;
     for (label, engine) in [("baseline_matmul", &baseline), ("fused_matmul", &fused)] {
         let plan = engine.compile(&mat_graph, mat_output)?;
         if label == "fused_matmul" && plan.removed_kernel_count() != 2 {
