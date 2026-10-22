@@ -11,10 +11,10 @@ use std::process::Command;
 
 use verineural::{
     Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, NeuralGraph, ReluFusion,
-    RneFp32Plan, Shape, Tensor,
+    ResidualFfn, RneFp32Plan, RneRangePlan, Shape, Tensor,
 };
 
-const FILES: [&str; 30] = [
+const FILES: [&str; 32] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -45,6 +45,8 @@ const FILES: [&str; 30] = [
     "rne_matmul_inputs.bits",
     "rne_matmul_output.bits",
     "rne_matmul_error.txt",
+    "numeric_range.lean",
+    "range_contract.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -82,9 +84,10 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_rne.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_rne_matmul.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_range.lean"))?;
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
-        "Scope: ideal integer ranges plus concrete dyadic RNE/epsilon traces, including separate Mul/MatMul reduction steps; not machine FP32 certification"
+        "Scope: ideal integer ranges, concrete dyadic RNE traces, and reusable bounded RNE/module contracts; not machine FP32 certification"
     );
     Ok(())
 }
@@ -375,6 +378,54 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Reusable range contract over a composed module. Unlike the concrete RNE
+    // traces above, the values are arbitrary within the source tick interval.
+    // Lean proves the scalar transfer rules under Binary32RneTick hypotheses;
+    // Rust exports the resulting module boundary bound/epsilon summary.
+    let mut range_graph = NeuralGraph::default();
+    let range_x = range_graph.input(Shape::new(vec![1, 2])?, Domain::Finite);
+    let range_w1 = range_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let range_b1 = range_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let range_w2 = range_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let range_b2 = range_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let range_module = ResidualFfn::new(1, 2, 2)?;
+    let range_output = range_graph.apply_module(
+        &range_module,
+        &[range_x, range_w1, range_b1, range_w2, range_b2],
+    )?;
+    let range_plan = RneRangePlan::compile(&range_graph, range_output, 10, 16)?;
+    let range_contract = range_plan.output_contract();
+    if range_contract.fraction_bits() != 30
+        || range_contract.ideal_bound_ticks() != 34_095_104
+        || range_contract.epsilon_ticks() != 170
+    {
+        return Err(io::Error::other("unexpected Stage 8 reusable RNE range contract").into());
+    }
+    let range_modules = range_plan.module_contracts();
+    if range_modules.len() != 1 || range_modules[0].name() != "residual_ffn" {
+        return Err(io::Error::other("missing Stage 8 ResidualFfn range contract").into());
+    }
+    write_checked_lean(
+        &root.join("numeric_range.lean"),
+        &range_plan.lean_source()?,
+    )?;
+    fs::write(
+        root.join("range_contract.txt"),
+        format!(
+            "module={}\nsource_fraction_bits={}\nsource_bound_ticks={}\n\
+             output_fraction_bits={}\nideal_bound_ticks={}\nepsilon_ticks={}\n\
+             actual_bound_ticks={}\nepsilon={:.12e}\n",
+            range_modules[0].name(),
+            range_plan.source_fraction_bits(),
+            range_plan.source_bound_ticks(),
+            range_contract.fraction_bits(),
+            range_contract.ideal_bound_ticks(),
+            range_contract.epsilon_ticks(),
+            range_contract.actual_bound_ticks(),
+            range_contract.epsilon(),
+        ),
+    )?;
+
     let input_snapshot = inputs
         .iter()
         .map(|(id, tensor)| {
@@ -440,11 +491,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         rne_mat_trace.epsilon_ticks()
     );
     println!(
+        "Stage 8 reusable ResidualFfn range contract: q_in={}, |input ticks|<={}, q_out={}, ideal_bound={}, epsilon={} ticks",
+        range_plan.source_fraction_bits(),
+        range_plan.source_bound_ticks(),
+        range_contract.fraction_bits(),
+        range_contract.ideal_bound_ticks(),
+        range_contract.epsilon_ticks()
+    );
+    println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds plus concrete dyadic Add/Mul/MatMul RNE error composition; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, and reusable bounded scalar transfer rules; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }

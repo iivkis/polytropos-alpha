@@ -308,4 +308,187 @@ theorem binary32_rne_within_step {exact rounded : Int} {shift : Nat}
   unfold ApproxWithin Within
   constructor <;> omega
 
+/-!
+Reusable range/error contracts for the dyadic RNE slice.
+
+These theorems are independent of one concrete value trace. They state how an
+input ideal-value bound and an absolute error budget propagate through one
+scalar operation, assuming the actual arithmetic result satisfies the same
+Binary32RneTick target relation used by the concrete oracle. Rust instantiates
+the numeric bounds and maximum admissible RNE shift for graph/module contracts.
+The LLVM/PTX/GPU implementation remains outside this proof boundary.
+-/
+
+theorem within_natAbs_le {bound value : Int} (h : Within bound value) :
+    Int.ofNat value.natAbs ≤ bound := by
+  rcases h with ⟨hlower, hupper⟩
+  rcases Int.natAbs_eq value with hs | hs <;> omega
+
+theorem binary32Step_pos (shift : Nat) : 0 < binary32Step shift := by
+  unfold binary32Step
+  rw [← Int.ofNat_zero, Int.ofNat_lt]
+  exact Nat.pow_pos Nat.zero_lt_two
+
+theorem binary32Step_mono {a b : Nat} (h : a ≤ b) :
+    binary32Step a ≤ binary32Step b := by
+  unfold binary32Step
+  exact Int.ofNat_le.mpr (Nat.pow_le_pow_right Nat.zero_lt_two h)
+
+theorem binary32_rne_shift_le_of_bound
+    {exact rounded bound : Int} {shift maxShift : Nat}
+    (hbound : Within bound exact)
+    (hlimit : bound < 8388608 * binary32Step (maxShift + 1))
+    (hrne : Binary32RneTick exact rounded shift) :
+    shift ≤ maxShift := by
+  have hmag : Int.ofNat exact.natAbs ≤ bound :=
+    within_natAbs_le hbound
+  simp only [Binary32RneTick] at hrne
+  rcases hrne with ⟨_hstep, hbin, _halign, _hnearest⟩
+  rcases hbin with hzero | hnormal
+  · omega
+  · rcases hnormal with ⟨_hpositive, hlower, _hupper⟩
+    by_contra hnot
+    have hsucc : maxShift + 1 ≤ shift := by omega
+    have hstep :
+        binary32Step (maxShift + 1) ≤ binary32Step shift :=
+      binary32Step_mono hsucc
+    omega
+
+theorem binary32_rne_within_maxStep
+    {exact rounded bound : Int} {shift maxShift : Nat}
+    (hbound : Within bound exact)
+    (hlimit : bound < 8388608 * binary32Step (maxShift + 1))
+    (hrne : Binary32RneTick exact rounded shift) :
+    ApproxWithin (binary32Step maxShift) exact rounded := by
+  have hshift :=
+    binary32_rne_shift_le_of_bound hbound hlimit hrne
+  exact approx_weaken (binary32Step_mono hshift)
+    (binary32_rne_within_step hrne)
+
+/-- A reusable scalar numerical contract on one dyadic tick lattice. -/
+def ApproxContract
+    (idealBound epsilon ideal actual : Int) : Prop :=
+  0 ≤ idealBound ∧
+    0 ≤ epsilon ∧
+    Within idealBound ideal ∧
+    ApproxWithin epsilon ideal actual
+
+theorem approx_contract_exact {bound value : Int}
+    (hbound : 0 ≤ bound)
+    (hvalue : Within bound value) :
+    ApproxContract bound 0 value value := by
+  exact ⟨hbound, by omega, hvalue, approx_refl value⟩
+
+theorem approx_contract_actual
+    {idealBound epsilon ideal actual : Int}
+    (h : ApproxContract idealBound epsilon ideal actual) :
+    Within (idealBound + epsilon) actual := by
+  rcases h with ⟨_hbound, _hepsilon, hideal, herr⟩
+  unfold ApproxWithin Within at herr hideal ⊢
+  constructor <;> omega
+
+theorem approx_contract_scale
+    {idealBound epsilon ideal actual scale : Int}
+    (hscale : 0 ≤ scale)
+    (h : ApproxContract idealBound epsilon ideal actual) :
+    ApproxContract (idealBound * scale) (epsilon * scale)
+      (ideal * scale) (actual * scale) := by
+  rcases h with ⟨hbound, hepsilon, hideal, herr⟩
+  have hscaleWithin : Within scale scale := by
+    unfold Within
+    constructor <;> omega
+  refine ⟨Int.mul_nonneg hbound hscale, Int.mul_nonneg hepsilon hscale, ?_, ?_⟩
+  · exact within_mul hideal hscaleWithin
+  · exact approx_scale hscale herr
+
+theorem approx_contract_add_rne
+    {idealBoundA epsilonA idealA actualA
+      idealBoundB epsilonB idealB actualB rounded : Int}
+    {shift maxShift : Nat}
+    (ha : ApproxContract idealBoundA epsilonA idealA actualA)
+    (hb : ApproxContract idealBoundB epsilonB idealB actualB)
+    (hlimit :
+      (idealBoundA + epsilonA) + (idealBoundB + epsilonB) <
+        8388608 * binary32Step (maxShift + 1))
+    (hrne : Binary32RneTick (actualA + actualB) rounded shift) :
+    ApproxContract
+      (idealBoundA + idealBoundB)
+      (epsilonA + epsilonB + binary32Step maxShift)
+      (idealA + idealB) rounded := by
+  rcases ha with ⟨hboundA, hepsilonA, hidealA, herrA⟩
+  rcases hb with ⟨hboundB, hepsilonB, hidealB, herrB⟩
+  have hactualA :
+      Within (idealBoundA + epsilonA) actualA :=
+    approx_contract_actual ⟨hboundA, hepsilonA, hidealA, herrA⟩
+  have hactualB :
+      Within (idealBoundB + epsilonB) actualB :=
+    approx_contract_actual ⟨hboundB, hepsilonB, hidealB, herrB⟩
+  have hpre :
+      Within ((idealBoundA + epsilonA) + (idealBoundB + epsilonB))
+        (actualA + actualB) :=
+    within_add hactualA hactualB
+  have hround :
+      ApproxWithin (binary32Step maxShift) (actualA + actualB) rounded :=
+    binary32_rne_within_maxStep hpre hlimit hrne
+  have hstep : 0 ≤ binary32Step maxShift :=
+    Int.le_of_lt (binary32Step_pos maxShift)
+  refine ⟨?_, ?_, within_add hidealA hidealB, ?_⟩
+  · omega
+  · omega
+  · exact approx_add_round herrA herrB hround
+
+theorem approx_contract_mul_rne
+    {idealBoundA epsilonA idealA actualA
+      idealBoundB epsilonB idealB actualB rounded : Int}
+    {shift maxShift : Nat}
+    (ha : ApproxContract idealBoundA epsilonA idealA actualA)
+    (hb : ApproxContract idealBoundB epsilonB idealB actualB)
+    (hlimit :
+      (idealBoundA + epsilonA) * (idealBoundB + epsilonB) <
+        8388608 * binary32Step (maxShift + 1))
+    (hrne : Binary32RneTick (actualA * actualB) rounded shift) :
+    ApproxContract
+      (idealBoundA * idealBoundB)
+      (epsilonA * (idealBoundB + epsilonB) +
+        idealBoundA * epsilonB + binary32Step maxShift)
+      (idealA * idealB) rounded := by
+  rcases ha with ⟨hboundA, hepsilonA, hidealA, herrA⟩
+  rcases hb with ⟨hboundB, hepsilonB, hidealB, herrB⟩
+  have hactualA :
+      Within (idealBoundA + epsilonA) actualA :=
+    approx_contract_actual ⟨hboundA, hepsilonA, hidealA, herrA⟩
+  have hactualB :
+      Within (idealBoundB + epsilonB) actualB :=
+    approx_contract_actual ⟨hboundB, hepsilonB, hidealB, herrB⟩
+  have hpre :
+      Within ((idealBoundA + epsilonA) * (idealBoundB + epsilonB))
+        (actualA * actualB) :=
+    within_mul hactualA hactualB
+  have hround :
+      ApproxWithin (binary32Step maxShift) (actualA * actualB) rounded :=
+    binary32_rne_within_maxStep hpre hlimit hrne
+  have hboundOut :
+      0 ≤ idealBoundA * idealBoundB :=
+    Int.mul_nonneg hboundA hboundB
+  have hactualBoundB : 0 ≤ idealBoundB + epsilonB := by omega
+  have htermA :
+      0 ≤ epsilonA * (idealBoundB + epsilonB) :=
+    Int.mul_nonneg hepsilonA hactualBoundB
+  have htermB :
+      0 ≤ idealBoundA * epsilonB :=
+    Int.mul_nonneg hboundA hepsilonB
+  have hstep : 0 ≤ binary32Step maxShift :=
+    Int.le_of_lt (binary32Step_pos maxShift)
+  refine ⟨hboundOut, ?_, within_mul hidealA hidealB, ?_⟩
+  · omega
+  · exact approx_mul_round herrA herrB hidealA hactualB hround
+
+theorem approx_contract_relu
+    {idealBound epsilon ideal actual : Int}
+    (h : ApproxContract idealBound epsilon ideal actual) :
+    ApproxContract idealBound epsilon (max ideal 0) (max actual 0) := by
+  rcases h with ⟨hbound, hepsilon, hideal, herr⟩
+  exact ⟨hbound, hepsilon, within_relu hbound hideal, approx_relu herr⟩
+
+
 end VeriNeural

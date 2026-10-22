@@ -1,4 +1,7 @@
-use verineural::{Domain, ExactFp32Plan, NeuralGraph, NumericError, RneFp32Plan, Shape, Tensor};
+use verineural::{
+    Domain, ExactFp32Plan, NeuralGraph, NumericError, ResidualFfn, RneFp32Plan, RneRangePlan, Shape,
+    Tensor,
+};
 
 fn plan() -> (NeuralGraph, verineural::NodeId, [verineural::NodeId; 3]) {
     let mut graph = NeuralGraph::default();
@@ -293,6 +296,8 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
     ));
     assert!(after_rne.contains("numeric_rne_matmul.lean"));
     assert!(after_rne.contains("rne_mat_trace.lean_source()"));
+    assert!(after_rne.contains("numeric_range.lean"));
+    assert!(after_rne.contains("range_plan.lean_source()?"));
 }
 
 #[test]
@@ -494,6 +499,68 @@ fn stage8_fractional_matmul_models_separate_mul_add_reduction() {
     assert!(source.contains("sum_1_error"));
     assert!(source.contains("VeriNeural.approx_mul_round"));
     assert!(source.contains("VeriNeural.approx_add_round"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+#[test]
+fn stage8_rne_range_contract_is_reusable_over_an_input_interval() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![1]).unwrap();
+    let x = graph.input(shape.clone(), Domain::Finite);
+    let y = graph.input(shape, Domain::Finite);
+    let output = graph.add(x, y).unwrap();
+
+    // Any exact source ticks in [-2^23, 2^23] at q=20. The worst possible
+    // pre-round magnitude is 2^24 ticks, so the reusable RNE budget is 2 ticks.
+    let plan = RneRangePlan::compile(&graph, output, 20, 8_388_608).unwrap();
+    let contract = plan.output_contract();
+    assert_eq!(contract.fraction_bits(), 20);
+    assert_eq!(contract.ideal_bound_ticks(), 16_777_216);
+    assert_eq!(contract.epsilon_ticks(), 2);
+    assert_eq!(contract.actual_bound_ticks(), 16_777_218);
+
+    let source = plan.lean_source().unwrap();
+    assert!(source.contains("theorem node_2_range_rule"));
+    assert!(source.contains("ApproxContract 16777216 2"));
+    assert!(source.contains("approx_contract_add_rne (maxShift := 1)"));
+    assert!(source.contains("binary32_rne_shift_le_of_bound"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+#[test]
+fn stage8_rne_range_contract_crosses_residual_ffn_module_boundary() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![1, 2]).unwrap(), Domain::Finite);
+    let w1 = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1 = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2 = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2 = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let module = ResidualFfn::new(1, 2, 2).unwrap();
+    let output = graph.apply_module(&module, &[x, w1, b1, w2, b2]).unwrap();
+
+    // q=10 sources with |ticks| <= 16. Products refine the lattice through
+    // q=20 and q=30; the final residual add aligns X to q=30.
+    let plan = RneRangePlan::compile(&graph, output, 10, 16).unwrap();
+    let contract = plan.output_contract();
+    assert_eq!(contract.fraction_bits(), 30);
+    assert_eq!(contract.ideal_bound_ticks(), 34_095_104);
+    assert_eq!(contract.epsilon_ticks(), 170);
+    assert_eq!(contract.actual_bound_ticks(), 34_095_274);
+
+    let modules = plan.module_contracts();
+    assert_eq!(modules.len(), 1);
+    assert_eq!(modules[0].name(), "residual_ffn");
+    assert_eq!(modules[0].inputs().len(), 5);
+    assert_eq!(modules[0].output(), output);
+    assert_eq!(modules[0].contract(), contract);
+
+    let source = plan.lean_source().unwrap();
+    assert!(source.contains("module_0_contract_well_formed"));
+    assert!(source.contains("exports q=30, ideal bound 34095104, epsilon 170 ticks"));
+    assert!(source.contains("approx_contract_mul_rne"));
+    assert!(source.contains("approx_contract_add_rne"));
     assert!(!source.contains("sorry"));
     assert!(!source.contains("admit"));
 }

@@ -10,7 +10,9 @@
 //! with ideal-Int Lean rewrite lemmas, not certified FP32/PTX equivalence.
 //! Stage 8 adds exact-integer range proofs plus concrete dyadic binary32
 //! RNE traces with Lean-composed error bounds for Add/Mul/MatMul/BiasAdd/Relu/
-//! Reshape, including explicit separate multiply/add MatMul reductions.
+//! Reshape, including explicit separate multiply/add MatMul reductions. Reusable
+//! range/error contracts now summarize arbitrary bounded dyadic inputs and module
+//! boundaries under the same formal RNE target relation.
 //! The LLVM/PTX/GPU link is still trusted rather than formally certified.
 
 mod certificate;
@@ -35,7 +37,10 @@ pub use ir::{
     RoundingMode, SubnormalMode,
 };
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
-pub use numeric::{ExactFp32Plan, NumericError, RneFp32Plan, RneFp32Trace};
+pub use numeric::{
+    ExactFp32Plan, NumericError, RneErrorContract, RneFp32Plan, RneFp32Trace,
+    RneModuleErrorContract, RneRangePlan,
+};
 pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
 pub use tensor::{Shape, Tensor, TensorShape};
 

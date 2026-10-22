@@ -11,7 +11,9 @@
 //! A second slice models concrete fractional dyadic traces under round-to-nearest,
 //! ties-to-even and composes absolute error through Add/Mul/MatMul/BiasAdd/Relu/
 //! Reshape. Products use finer per-node dyadic lattices; MatMul explicitly models
-//! separate rounded multiply/add steps. The LLVM/PTX/GPU execution link remains TCB.
+//! separate rounded multiply/add steps. A reusable range slice additionally
+//! propagates ideal bounds and worst-case epsilon across arbitrary bounded inputs
+//! and exports module-boundary summaries. The LLVM/PTX/GPU execution link remains TCB.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -1509,6 +1511,786 @@ impl RneFp32Trace {
             }
         }
         Ok(())
+    }
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RneErrorContract {
+    ideal_bound_ticks: i64,
+    epsilon_ticks: i64,
+    actual_bound_ticks: i64,
+    fraction_bits: u32,
+}
+
+impl RneErrorContract {
+    pub fn ideal_bound_ticks(self) -> i64 {
+        self.ideal_bound_ticks
+    }
+
+    pub fn epsilon_ticks(self) -> i64 {
+        self.epsilon_ticks
+    }
+
+    pub fn actual_bound_ticks(self) -> i64 {
+        self.actual_bound_ticks
+    }
+
+    pub fn fraction_bits(self) -> u32 {
+        self.fraction_bits
+    }
+
+    pub fn epsilon(self) -> f64 {
+        self.epsilon_ticks as f64 / (1u64 << self.fraction_bits) as f64
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RneModuleErrorContract {
+    name: &'static str,
+    inputs: Vec<(NodeId, RneErrorContract)>,
+    output: NodeId,
+    contract: RneErrorContract,
+}
+
+impl RneModuleErrorContract {
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn inputs(&self) -> &[(NodeId, RneErrorContract)] {
+        &self.inputs
+    }
+
+    pub fn output(&self) -> NodeId {
+        self.output
+    }
+
+    pub fn contract(&self) -> RneErrorContract {
+        self.contract
+    }
+}
+
+#[derive(Clone, Debug)]
+enum RneRangeRule {
+    Input,
+    Add {
+        left_shift: u32,
+        right_shift: u32,
+        max_shift: u32,
+    },
+    Mul {
+        max_shift: u32,
+    },
+    MatMul {
+        product: RneErrorContract,
+        product_max_shift: u32,
+        sums: Vec<(RneErrorContract, u32)>,
+    },
+    BiasAdd {
+        left_shift: u32,
+        right_shift: u32,
+        max_shift: u32,
+    },
+    Relu,
+    Reshape,
+}
+
+#[derive(Clone, Debug)]
+pub struct RneRangePlan {
+    graph: NeuralGraph,
+    output: NodeId,
+    reachable: Vec<usize>,
+    inputs: Vec<NodeId>,
+    source_fraction_bits: u32,
+    source_bound_ticks: i64,
+    contracts: BTreeMap<usize, RneErrorContract>,
+    rules: BTreeMap<usize, RneRangeRule>,
+}
+
+impl RneRangePlan {
+    /// Build a reusable worst-case dyadic RNE contract for all values satisfying
+    /// the source tick bound. The theorem is conditional on the same
+    /// Binary32RneTick relation as concrete traces; LLVM/PTX/GPU conformance
+    /// remains outside the formal boundary.
+    pub fn compile(
+        graph: &NeuralGraph,
+        output: NodeId,
+        source_fraction_bits: u32,
+        source_bound_ticks: i64,
+    ) -> Result<Self, NumericError> {
+        if source_bound_ticks < 0 {
+            return Err(NumericError::InvalidInput {
+                node: output.index(),
+                reason: "RNE range source bound must be nonnegative",
+            });
+        }
+        let base = RneFp32Plan::compile(graph, output, source_fraction_bits)?;
+        let mut contracts = BTreeMap::<usize, RneErrorContract>::new();
+        let mut rules = BTreeMap::<usize, RneRangeRule>::new();
+
+        for &index in &base.reachable {
+            let node = &graph.nodes()[index];
+            let source_contract = || -> Result<RneErrorContract, NumericError> {
+                Self::contract(
+                    index,
+                    source_bound_ticks,
+                    0,
+                    base.scales[&index],
+                    "RNE source contract overflow",
+                )
+            };
+            let trace = match node.operation {
+                Operation::Input => {
+                    rules.insert(index, RneRangeRule::Input);
+                    source_contract()?
+                }
+                Operation::Add | Operation::BiasAdd => {
+                    let left = contracts[&node.inputs[0].index()];
+                    let right = contracts[&node.inputs[1].index()];
+                    let (contract, left_shift, right_shift, max_shift) =
+                        Self::add_contract(index, left, right)?;
+                    let rule = if matches!(node.operation, Operation::BiasAdd) {
+                        RneRangeRule::BiasAdd {
+                            left_shift,
+                            right_shift,
+                            max_shift,
+                        }
+                    } else {
+                        RneRangeRule::Add {
+                            left_shift,
+                            right_shift,
+                            max_shift,
+                        }
+                    };
+                    rules.insert(index, rule);
+                    contract
+                }
+                Operation::Mul => {
+                    let left = contracts[&node.inputs[0].index()];
+                    let right = contracts[&node.inputs[1].index()];
+                    let (contract, max_shift) = Self::mul_contract(index, left, right)?;
+                    rules.insert(index, RneRangeRule::Mul { max_shift });
+                    contract
+                }
+                Operation::MatMul => {
+                    let left = contracts[&node.inputs[0].index()];
+                    let right = contracts[&node.inputs[1].index()];
+                    let (product, product_max_shift) =
+                        Self::mul_contract(index, left, right)?;
+                    let inner = graph.nodes()[node.inputs[0].index()].shape.dims()[1];
+                    let mut accumulator =
+                        Self::contract(index, 0, 0, product.fraction_bits, "RNE MatMul zero contract")?;
+                    let mut sums = Vec::with_capacity(inner);
+                    for _ in 0..inner {
+                        let (next, left_shift, right_shift, max_shift) =
+                            Self::add_contract(index, accumulator, product)?;
+                        debug_assert_eq!(left_shift, 0);
+                        debug_assert_eq!(right_shift, 0);
+                        sums.push((next, max_shift));
+                        accumulator = next;
+                    }
+                    rules.insert(
+                        index,
+                        RneRangeRule::MatMul {
+                            product,
+                            product_max_shift,
+                            sums,
+                        },
+                    );
+                    accumulator
+                }
+                Operation::Relu => {
+                    let contract = contracts[&node.inputs[0].index()];
+                    rules.insert(index, RneRangeRule::Relu);
+                    contract
+                }
+                Operation::Reshape(_) => {
+                    let contract = contracts[&node.inputs[0].index()];
+                    rules.insert(index, RneRangeRule::Reshape);
+                    contract
+                }
+                _ => unreachable!("RneFp32Plan rejected unsupported range operation"),
+            };
+            if trace.fraction_bits != base.scales[&index] {
+                return Err(NumericError::InvalidInput {
+                    node: index,
+                    reason: "RNE range contract scale disagrees with trace plan",
+                });
+            }
+            contracts.insert(index, trace);
+        }
+
+        Ok(Self {
+            graph: graph.clone(),
+            output,
+            reachable: base.reachable,
+            inputs: base.inputs,
+            source_fraction_bits,
+            source_bound_ticks,
+            contracts,
+            rules,
+        })
+    }
+
+    fn contract(
+        node: usize,
+        ideal_bound_ticks: i64,
+        epsilon_ticks: i64,
+        fraction_bits: u32,
+        reason: &'static str,
+    ) -> Result<RneErrorContract, NumericError> {
+        if ideal_bound_ticks < 0 || epsilon_ticks < 0 {
+            return Err(NumericError::InvalidInput { node, reason });
+        }
+        let actual_bound_ticks =
+            ideal_bound_ticks
+                .checked_add(epsilon_ticks)
+                .ok_or(NumericError::InvalidInput { node, reason })?;
+        Ok(RneErrorContract {
+            ideal_bound_ticks,
+            epsilon_ticks,
+            actual_bound_ticks,
+            fraction_bits,
+        })
+    }
+
+    fn scale_contract(
+        node: usize,
+        contract: RneErrorContract,
+        target_fraction_bits: u32,
+    ) -> Result<(RneErrorContract, u32), NumericError> {
+        let shift = target_fraction_bits
+            .checked_sub(contract.fraction_bits)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range contract cannot scale to a coarser lattice",
+            })?;
+        let factor = binary32_step_i64(shift).ok_or(NumericError::InvalidInput {
+            node,
+            reason: "RNE range scale factor overflow",
+        })?;
+        let ideal_bound_ticks = contract
+            .ideal_bound_ticks
+            .checked_mul(factor)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range ideal-bound rescale overflow",
+            })?;
+        let epsilon_ticks =
+            contract
+                .epsilon_ticks
+                .checked_mul(factor)
+                .ok_or(NumericError::InvalidInput {
+                    node,
+                    reason: "RNE range epsilon rescale overflow",
+                })?;
+        Ok((
+            Self::contract(
+                node,
+                ideal_bound_ticks,
+                epsilon_ticks,
+                target_fraction_bits,
+                "RNE range scaled contract overflow",
+            )?,
+            shift,
+        ))
+    }
+
+    fn round_budget(
+        node: usize,
+        pre_round_bound: i64,
+    ) -> Result<(u32, i64), NumericError> {
+        if pre_round_bound < 0 {
+            return Err(NumericError::InvalidInput {
+                node,
+                reason: "RNE range pre-round bound must be nonnegative",
+            });
+        }
+        let magnitude = pre_round_bound as u64;
+        let bit_len = if magnitude == 0 {
+            0
+        } else {
+            64 - magnitude.leading_zeros()
+        };
+        let max_shift = bit_len.saturating_sub(24);
+        let step = binary32_step_i64(max_shift).ok_or(NumericError::InvalidInput {
+            node,
+            reason: "RNE range ULP budget overflow",
+        })?;
+        let limit = 8_388_608i128
+            .checked_mul(
+                1i128
+                    .checked_shl(max_shift + 1)
+                    .ok_or(NumericError::InvalidInput {
+                        node,
+                        reason: "RNE range shift limit overflow",
+                    })?,
+            )
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range shift limit overflow",
+            })?;
+        if i128::from(pre_round_bound) >= limit {
+            return Err(NumericError::InvalidInput {
+                node,
+                reason: "RNE range shift bound is inconsistent",
+            });
+        }
+        Ok((max_shift, step))
+    }
+
+    fn add_contract(
+        node: usize,
+        left: RneErrorContract,
+        right: RneErrorContract,
+    ) -> Result<(RneErrorContract, u32, u32, u32), NumericError> {
+        let fraction_bits = left.fraction_bits.max(right.fraction_bits);
+        let (left, left_shift) = Self::scale_contract(node, left, fraction_bits)?;
+        let (right, right_shift) = Self::scale_contract(node, right, fraction_bits)?;
+        let ideal_bound_ticks = left
+            .ideal_bound_ticks
+            .checked_add(right.ideal_bound_ticks)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range addition ideal bound overflow",
+            })?;
+        let pre_round_bound = left
+            .actual_bound_ticks
+            .checked_add(right.actual_bound_ticks)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range addition actual bound overflow",
+            })?;
+        let (max_shift, round_budget) = Self::round_budget(node, pre_round_bound)?;
+        let epsilon_ticks = left
+            .epsilon_ticks
+            .checked_add(right.epsilon_ticks)
+            .and_then(|value| value.checked_add(round_budget))
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range addition epsilon overflow",
+            })?;
+        Ok((
+            Self::contract(
+                node,
+                ideal_bound_ticks,
+                epsilon_ticks,
+                fraction_bits,
+                "RNE range addition contract overflow",
+            )?,
+            left_shift,
+            right_shift,
+            max_shift,
+        ))
+    }
+
+    fn mul_contract(
+        node: usize,
+        left: RneErrorContract,
+        right: RneErrorContract,
+    ) -> Result<(RneErrorContract, u32), NumericError> {
+        let fraction_bits = left
+            .fraction_bits
+            .checked_add(right.fraction_bits)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range product fractional-width overflow",
+            })?;
+        if fraction_bits > 60 {
+            return Err(NumericError::InvalidInput {
+                node,
+                reason: "RNE range product lattice exceeds 60 fractional bits",
+            });
+        }
+        let ideal_bound_ticks = left
+            .ideal_bound_ticks
+            .checked_mul(right.ideal_bound_ticks)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range product ideal bound overflow",
+            })?;
+        let pre_round_bound = left
+            .actual_bound_ticks
+            .checked_mul(right.actual_bound_ticks)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range product actual bound overflow",
+            })?;
+        let (max_shift, round_budget) = Self::round_budget(node, pre_round_bound)?;
+        let propagated_left = left
+            .epsilon_ticks
+            .checked_mul(right.actual_bound_ticks)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range product propagated error overflow",
+            })?;
+        let propagated_right = left
+            .ideal_bound_ticks
+            .checked_mul(right.epsilon_ticks)
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range product propagated error overflow",
+            })?;
+        let epsilon_ticks = propagated_left
+            .checked_add(propagated_right)
+            .and_then(|value| value.checked_add(round_budget))
+            .ok_or(NumericError::InvalidInput {
+                node,
+                reason: "RNE range product epsilon overflow",
+            })?;
+        Ok((
+            Self::contract(
+                node,
+                ideal_bound_ticks,
+                epsilon_ticks,
+                fraction_bits,
+                "RNE range product contract overflow",
+            )?,
+            max_shift,
+        ))
+    }
+
+    pub fn source_fraction_bits(&self) -> u32 {
+        self.source_fraction_bits
+    }
+
+    pub fn source_bound_ticks(&self) -> i64 {
+        self.source_bound_ticks
+    }
+
+    pub fn source_inputs(&self) -> &[NodeId] {
+        &self.inputs
+    }
+
+    pub fn output_contract(&self) -> RneErrorContract {
+        self.contracts[&self.output.index()]
+    }
+
+    pub fn node_contract(&self, node: NodeId) -> Result<RneErrorContract, NumericError> {
+        self.graph.node(node)?;
+        self.contracts
+            .get(&node.index())
+            .copied()
+            .ok_or(NumericError::InvalidInput {
+                node: node.index(),
+                reason: "node is outside this RNE range output slice",
+            })
+    }
+
+    pub fn module_contracts(&self) -> Vec<RneModuleErrorContract> {
+        self.graph
+            .modules()
+            .iter()
+            .filter_map(|module| {
+                let contract = self.contracts.get(&module.output.index()).copied()?;
+                let inputs = module
+                    .inputs
+                    .iter()
+                    .filter_map(|&node| {
+                        self.contracts
+                            .get(&node.index())
+                            .copied()
+                            .map(|contract| (node, contract))
+                    })
+                    .collect::<Vec<_>>();
+                (inputs.len() == module.inputs.len()).then_some(RneModuleErrorContract {
+                    name: module.name,
+                    inputs,
+                    output: module.output,
+                    contract,
+                })
+            })
+            .collect()
+    }
+
+    fn add_rule_source(
+        &self,
+        index: usize,
+        left_shift: u32,
+        right_shift: u32,
+        max_shift: u32,
+    ) -> String {
+        let node = &self.graph.nodes()[index];
+        let left = self.contracts[&node.inputs[0].index()];
+        let right = self.contracts[&node.inputs[1].index()];
+        let output = self.contracts[&index];
+        let left_factor = binary32_step_i64(left_shift).expect("validated range scale");
+        let right_factor = binary32_step_i64(right_shift).expect("validated range scale");
+        let left_scaled =
+            Self::scale_contract(index, left, output.fraction_bits).expect("validated range scale").0;
+        let right_scaled =
+            Self::scale_contract(index, right, output.fraction_bits).expect("validated range scale").0;
+        format!(
+            "theorem node_{index}_range_rule\n    \
+             {{idealA actualA idealB actualB rounded : Int}} {{shift : Nat}}\n    \
+             (ha : VeriNeural.ApproxContract {} {} idealA actualA)\n    \
+             (hb : VeriNeural.ApproxContract {} {} idealB actualB)\n    \
+             (hrne : VeriNeural.Binary32RneTick\n      \
+               (actualA * {left_factor} + actualB * {right_factor}) rounded shift) :\n    \
+             VeriNeural.ApproxContract {} {}\n      \
+               (idealA * {left_factor} + idealB * {right_factor}) rounded := by\n  \
+             have haScaled : VeriNeural.ApproxContract {} {}\n      \
+                 (idealA * {left_factor}) (actualA * {left_factor}) := by\n    \
+               simpa using (VeriNeural.approx_contract_scale (scale := {left_factor})\n      \
+                 (by decide) ha)\n  \
+             have hbScaled : VeriNeural.ApproxContract {} {}\n      \
+                 (idealB * {right_factor}) (actualB * {right_factor}) := by\n    \
+               simpa using (VeriNeural.approx_contract_scale (scale := {right_factor})\n      \
+                 (by decide) hb)\n  \
+             simpa [VeriNeural.binary32Step] using\n    \
+               (VeriNeural.approx_contract_add_rne (maxShift := {max_shift})\n      \
+                 haScaled hbScaled (by decide) hrne)\n\n",
+            left.ideal_bound_ticks,
+            left.epsilon_ticks,
+            right.ideal_bound_ticks,
+            right.epsilon_ticks,
+            output.ideal_bound_ticks,
+            output.epsilon_ticks,
+            left_scaled.ideal_bound_ticks,
+            left_scaled.epsilon_ticks,
+            right_scaled.ideal_bound_ticks,
+            right_scaled.epsilon_ticks,
+        )
+    }
+
+    fn mul_rule_source(&self, index: usize, max_shift: u32) -> String {
+        let node = &self.graph.nodes()[index];
+        let left = self.contracts[&node.inputs[0].index()];
+        let right = self.contracts[&node.inputs[1].index()];
+        let output = self.contracts[&index];
+        format!(
+            "theorem node_{index}_range_rule\n    \
+             {{idealA actualA idealB actualB rounded : Int}} {{shift : Nat}}\n    \
+             (ha : VeriNeural.ApproxContract {} {} idealA actualA)\n    \
+             (hb : VeriNeural.ApproxContract {} {} idealB actualB)\n    \
+             (hrne : VeriNeural.Binary32RneTick (actualA * actualB) rounded shift) :\n    \
+             VeriNeural.ApproxContract {} {} (idealA * idealB) rounded := by\n  \
+             simpa [VeriNeural.binary32Step] using\n    \
+               (VeriNeural.approx_contract_mul_rne (maxShift := {max_shift})\n      \
+                 ha hb (by decide) hrne)\n\n",
+            left.ideal_bound_ticks,
+            left.epsilon_ticks,
+            right.ideal_bound_ticks,
+            right.epsilon_ticks,
+            output.ideal_bound_ticks,
+            output.epsilon_ticks,
+        )
+    }
+
+    fn matmul_rule_source(
+        &self,
+        index: usize,
+        product: RneErrorContract,
+        product_max_shift: u32,
+        sums: &[(RneErrorContract, u32)],
+    ) -> String {
+        let node = &self.graph.nodes()[index];
+        let left = self.contracts[&node.inputs[0].index()];
+        let right = self.contracts[&node.inputs[1].index()];
+        let output = self.contracts[&index];
+        let inner = sums.len();
+        let mut source = format!("theorem node_{index}_range_rule\n");
+        for j in 0..inner {
+            source.push_str(&format!(
+                "    {{idealA_{j} actualA_{j} idealB_{j} actualB_{j} product_{j} sum_{j} : Int}}\n    \
+                 {{productShift_{j} sumShift_{j} : Nat}}\n"
+            ));
+        }
+        for j in 0..inner {
+            source.push_str(&format!(
+                "    (ha_{j} : VeriNeural.ApproxContract {} {} idealA_{j} actualA_{j})\n    \
+                 (hb_{j} : VeriNeural.ApproxContract {} {} idealB_{j} actualB_{j})\n    \
+                 (hproduct_{j} : VeriNeural.Binary32RneTick\n      \
+                   (actualA_{j} * actualB_{j}) product_{j} productShift_{j})\n",
+                left.ideal_bound_ticks,
+                left.epsilon_ticks,
+                right.ideal_bound_ticks,
+                right.epsilon_ticks,
+            ));
+            let previous = if j == 0 {
+                "0".to_owned()
+            } else {
+                format!("sum_{}", j - 1)
+            };
+            source.push_str(&format!(
+                "    (hsum_{j} : VeriNeural.Binary32RneTick\n      \
+                   ({previous} + product_{j}) sum_{j} sumShift_{j})\n"
+            ));
+        }
+        let mut ideal_expression = String::new();
+        for j in 0..inner {
+            let term = format!("idealA_{j} * idealB_{j}");
+            ideal_expression = if ideal_expression.is_empty() {
+                term
+            } else {
+                format!("({ideal_expression} + {term})")
+            };
+        }
+        source.push_str(&format!(
+            "    : VeriNeural.ApproxContract {} {}\n      \
+             {ideal_expression} sum_{} := by\n  \
+             have hacc_0 : VeriNeural.ApproxContract 0 0 0 0 := by\n    \
+               exact VeriNeural.approx_contract_exact (by decide) (by decide)\n",
+            output.ideal_bound_ticks,
+            output.epsilon_ticks,
+            inner - 1,
+        ));
+        let mut previous_contract_name = "hacc_0".to_owned();
+        for (j, (sum_contract, sum_max_shift)) in sums.iter().enumerate() {
+            source.push_str(&format!(
+                "  have hproductContract_{j} : VeriNeural.ApproxContract {} {}\n      \
+                   (idealA_{j} * idealB_{j}) product_{j} := by\n    \
+                 simpa [VeriNeural.binary32Step] using\n      \
+                   (VeriNeural.approx_contract_mul_rne (maxShift := {product_max_shift})\n        \
+                     ha_{j} hb_{j} (by decide) hproduct_{j})\n",
+                product.ideal_bound_ticks, product.epsilon_ticks
+            ));
+            let ideal_sum = {
+                let mut expr = String::new();
+                for k in 0..=j {
+                    let term = format!("idealA_{k} * idealB_{k}");
+                    expr = if expr.is_empty() {
+                        term
+                    } else {
+                        format!("({expr} + {term})")
+                    };
+                }
+                expr
+            };
+            source.push_str(&format!(
+                "  have hsumContract_{j} : VeriNeural.ApproxContract {} {}\n      \
+                   {ideal_sum} sum_{j} := by\n    \
+                 simpa [VeriNeural.binary32Step] using\n      \
+                   (VeriNeural.approx_contract_add_rne (maxShift := {sum_max_shift})\n        \
+                     {previous_contract_name} hproductContract_{j} (by decide) hsum_{j})\n",
+                sum_contract.ideal_bound_ticks, sum_contract.epsilon_ticks
+            ));
+            previous_contract_name = format!("hsumContract_{j}");
+        }
+        source.push_str(&format!("  exact {previous_contract_name}\n\n"));
+        source
+    }
+
+    /// Emit range-transfer theorems with arbitrary scalar values. The numeric
+    /// bounds are fixed by this plan, but the values themselves are variables,
+    /// so the proof is reusable for every input satisfying the source contract.
+    pub fn lean_source(&self) -> Result<String, NumericError> {
+        let base = LeanProofEngine::default().generate(&self.graph, self.output)?;
+        let mut source = base.source().to_owned();
+        source.push_str("\n\n");
+        source.push_str(MEMORY_LIBRARY);
+        source.push_str("\n\n");
+        source.push_str(NUMERIC_LIBRARY);
+        source.push_str("\nnamespace VeriNeural.Generated.RneRange\n\n");
+        source.push_str(&format!(
+            "-- Reusable dyadic range contract: source q={}, |ticks| <= {}.\n\
+             -- Values are arbitrary; local arithmetic is conditional on Binary32RneTick.\n\
+             -- LLVM/PTX/JIT/GPU conformance is not proved here.\n\n",
+            self.source_fraction_bits, self.source_bound_ticks
+        ));
+
+        for &index in &self.reachable {
+            let node = &self.graph.nodes()[index];
+            let contract = self.contracts[&index];
+            match &self.rules[&index] {
+                RneRangeRule::Input => {
+                    source.push_str(&format!(
+                        "theorem node_{index}_range_rule\n    \
+                         {{ideal actual : Int}}\n    \
+                         (h : VeriNeural.ApproxContract {} {} ideal actual) :\n    \
+                         VeriNeural.ApproxContract {} {} ideal actual := by\n  \
+                         exact h\n\n",
+                        contract.ideal_bound_ticks,
+                        contract.epsilon_ticks,
+                        contract.ideal_bound_ticks,
+                        contract.epsilon_ticks,
+                    ));
+                }
+                RneRangeRule::Add {
+                    left_shift,
+                    right_shift,
+                    max_shift,
+                }
+                | RneRangeRule::BiasAdd {
+                    left_shift,
+                    right_shift,
+                    max_shift,
+                } => source.push_str(&self.add_rule_source(
+                    index,
+                    *left_shift,
+                    *right_shift,
+                    *max_shift,
+                )),
+                RneRangeRule::Mul { max_shift } => {
+                    source.push_str(&self.mul_rule_source(index, *max_shift))
+                }
+                RneRangeRule::MatMul {
+                    product,
+                    product_max_shift,
+                    sums,
+                } => source.push_str(&self.matmul_rule_source(
+                    index,
+                    *product,
+                    *product_max_shift,
+                    sums,
+                )),
+                RneRangeRule::Relu => {
+                    let parent = self.contracts[&node.inputs[0].index()];
+                    source.push_str(&format!(
+                        "theorem node_{index}_range_rule\n    \
+                         {{ideal actual : Int}}\n    \
+                         (h : VeriNeural.ApproxContract {} {} ideal actual) :\n    \
+                         VeriNeural.ApproxContract {} {} (max ideal 0) (max actual 0) := by\n  \
+                         simpa using (VeriNeural.approx_contract_relu h)\n\n",
+                        parent.ideal_bound_ticks,
+                        parent.epsilon_ticks,
+                        contract.ideal_bound_ticks,
+                        contract.epsilon_ticks,
+                    ));
+                }
+                RneRangeRule::Reshape => {
+                    let parent = self.contracts[&node.inputs[0].index()];
+                    source.push_str(&format!(
+                        "theorem node_{index}_range_rule\n    \
+                         {{ideal actual : Int}}\n    \
+                         (h : VeriNeural.ApproxContract {} {} ideal actual) :\n    \
+                         VeriNeural.ApproxContract {} {} ideal actual := by\n  \
+                         exact h\n\n",
+                        parent.ideal_bound_ticks,
+                        parent.epsilon_ticks,
+                        contract.ideal_bound_ticks,
+                        contract.epsilon_ticks,
+                    ));
+                }
+            }
+        }
+
+        let output = self.output_contract();
+        source.push_str(&format!(
+            "theorem output_contract_well_formed :\n  \
+             (0 : Int) <= {} /\\ (0 : Int) <= {} := by\n  \
+             decide\n\n",
+            output.ideal_bound_ticks, output.epsilon_ticks
+        ));
+        for (module_index, module) in self.module_contracts().iter().enumerate() {
+            let contract = module.contract();
+            source.push_str(&format!(
+                "-- Module {} (output node {}) exports q={}, ideal bound {}, epsilon {} ticks.\n\
+                 theorem module_{module_index}_contract_well_formed :\n  \
+                   (0 : Int) <= {} /\\ (0 : Int) <= {} := by\n  \
+                   decide\n\n",
+                module.name(),
+                module.output().index(),
+                contract.fraction_bits,
+                contract.ideal_bound_ticks,
+                contract.epsilon_ticks,
+                contract.ideal_bound_ticks,
+                contract.epsilon_ticks,
+            ));
+        }
+        source.push_str("end VeriNeural.Generated.RneRange\n");
+        Ok(source)
     }
 }
 

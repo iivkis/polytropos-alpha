@@ -232,24 +232,26 @@ let expected = plan.integer_reference(&inputs)?;
 let model = plan.lean_source()?;
 ```
 
-### Дробный dyadic RNE и ненулевая ε
+### Дробный dyadic RNE и диапазонные численные контракты
 
-Первый дробный срез локально подтверждён пользователем на коммите `2930a4f`: `task numeric-stage8` и `task verify-numeric-stage8` прошли, baseline/fused additive RNE-граф совпал с независимым integer-oracle, а manifest получил SHA-256 `2d0d2a5c9aad349ec265b8d1a7cb7dfe0d77a572c0e3bbe4dc6be809178e9dd7`. Для контрольной цепочки `Add → BiasAdd → Relu` при `q=20` идеальный итог равен 16 777 218 тикам, RNE-итог 16 777 216, наблюдаемая ошибка 2 тика и доказуемый консервативный `ε=4` тика.
+Дробный `Mul/MatMul` срез локально подтверждён пользователем после formatting-коммита `6806fe2`: `cargo check`, 54 Rust-теста, Clippy, `task numeric-stage8` и `task verify-numeric-stage8` прошли. Baseline/fused fractional MatMul побитово совпал с независимым integer RNE oracle, Lean проверил отдельные multiply/add witnesses, а новый SHA-256 manifest равен `87f3d550c94aee99e5733626eb888f8c449a319af7f762a1ac84c8d450396746`. Контрольный MatMul сохраняет `q_in=20 → q_out=40`, ideal 140 737 521 909 762 ticks, rounded 140 737 521 909 760 ticks, observed error 2 ticks и conservative `ε=41 943 040` ticks.
 
-`RneFp32Plan::compile(&graph, output, fraction_bits)` принимает конечные normal binary32-входы и `+0`, точно лежащие на исходной сетке `2^-q`, где `1 ≤ q ≤ 30`. Вход декодируется непосредственно из битов; `-0`, subnormal, NaN, Infinity, значения вне выбранной сетки и переполнение integer-oracle отклоняются. В новом срезе поддерживаются `Input/Add/Mul/MatMul/BiasAdd/Relu/Reshape`. У каждого узла есть собственная dyadic-сетка: `Add/BiasAdd` поднимают операнды к более тонкой из входных сеток, `Mul/MatMul` складывают числа дробных битов; внутренний proof-lattice сейчас ограничен 60 fractional bits и дополнительно fail-closed проверяется на `i64` overflow.
+`RneFp32Plan` остаётся concrete-trace механизмом для `Input/Add/Mul/MatMul/BiasAdd/Relu/Reshape`: входы декодируются из binary32-битов, операции моделируются integer RNE oracle, а MatMul явно использует separate rounded `fmul → fadd` в left-to-right порядке. Машинная связь с LLVM/PTX/JIT/GPU по-прежнему не доказана и проверяется лишь побитовым сравнением конкретных запусков.
 
-В Lean к `Binary32RneTick` и `ApproxWithin` добавлены `approx_scale`, `approx_mul` и `approx_mul_round`. Ошибка произведения выводится из ошибок операндов и конкретных bounds, после чего добавляется локальный RNE-budget. Для `MatMul` Rust генерирует отдельный witness для каждого rounded `fmul`, затем для каждого rounded `fadd` в строго left-to-right редукции; итоговая теорема строится композицией этих шагов, а не одной постфактум проверкой результата.
+Новый `RneRangePlan::compile(&graph, output, source_fraction_bits, source_bound_ticks)` поднимает ту же модель от одного concrete trace к **переиспользуемому диапазонному контракту**. Для каждого reachable node выводятся четыре величины: dyadic scale, bound идеального значения, абсолютный `ε` и bound фактического значения `ideal_bound + ε`. Worst-case ULP определяется из максимального pre-round magnitude диапазона, а overflow, слишком тонкая product lattice и неподдержанные операции fail-closed.
 
-Новый контрольный fractional MatMul использует `q_in=20` и получает `q_out=40`: для `[8+2^-20, 8+2^-20] · [8+2^-20, 8+2^-20]` идеальный результат равен 140 737 521 909 762 тикам, RNE-результат 140 737 521 909 760, наблюдаемая ошибка 2 тика; консервативный budget равен 41 943 040 тикам, поскольку текущая композиция сознательно начисляет до одного ULP на каждый multiply/add rounding site.
+В Lean введён `ApproxContract` и доказаны reusable transfer rules: `binary32_rne_shift_le_of_bound` ограничивает допустимый RNE shift по входному диапазону; `approx_contract_scale`, `approx_contract_add_rne`, `approx_contract_mul_rne`, `approx_contract_relu` переносят bound/ε через операции. Генерируемый `numeric_range.lean` использует **произвольные Int-значения**, а не зафиксированные примеры, и инстанцирует эти теоремы конкретными bounds Semantic Neural IR.
 
-`task numeric-stage8` теперь формирует и проверяет четыре Lean-артефакта: `numeric.lean`, `numeric_matmul.lean`, `numeric_rne.lean`, `numeric_rne_matmul.lean`; выполняет baseline/fused CUDA для целочисленного additive, целочисленного MatMul, дробного additive и дробного MatMul профилей; сохраняет LLVM/PTX, входные/выходные биты и RNE error reports; затем включает все 30 evidence-файлов в SHA-256 manifest. `task verify-numeric-stage8` повторно проверяет сохранённые Lean-файлы и manifest без GPU.
+Первый module-boundary пример использует `ResidualFfn(1, 2, 2)` при source `q=10`, `|ticks| ≤ 16`. Две MatMul, bias, ReLU и residual add выводят `q_out=30`, ideal bound `34 095 104` ticks, `ε=170` ticks и actual bound `34 095 274` ticks. `RneRangePlan::module_contracts()` экспортирует эту сводку на границе вызова `residual_ffn`; `range_contract.txt` и `numeric_range.lean` включены в Stage 8 evidence bundle.
+
+`task numeric-stage8` теперь проверяет пять Lean-артефактов: `numeric.lean`, `numeric_matmul.lean`, `numeric_rne.lean`, `numeric_rne_matmul.lean`, `numeric_range.lean`. Manifest расширен до 32 evidence-файлов. `task verify-numeric-stage8` повторно проверяет Lean и SHA-256 без GPU.
 
 ```sh
 task numeric-stage8
 task verify-numeric-stage8
 ```
 
-**Граница гарантии:** Lean доказывает конкретные dyadic RNE-отношения и композиционные bounds для сгенерированных трасс, включая произведения и порядок MatMul-редукции. Это не доказывает, что LLVM/PTX/JIT/GPU реализовали ту же семантику; машинная связь остаётся TCB и на конкретном прогоне проверяется побитово. FMA/contract behavior, FTZ/subnormal, NaN/Infinity, signed zero, overflow за пределами текущего fail-closed профиля, общие диапазонные FP32-теоремы, модульные/глобальные численные контракты и translation validation ещё не закрыты. Новый Mul/MatMul-срез пока не подтверждён локальным прогоном; Stage 8 не завершён.
+**Граница гарантии:** новый range slice доказывает корректность локальных bound/ε transfer rules и их конкретные инстанциации для каждого node; Rust связывает эти node-contracts с topology и экспортирует module summary. Единой Lean-теоремы, которая уже сворачивает весь произвольный nested module в один tensor-level implication, пока нет. Также не закрыты FMA/contract behavior, FTZ/subnormal, NaN/Infinity, signed zero, overflow за текущим fail-closed профилем, условные ветви и translation validation. Новый range/module slice ожидает локальной проверки; Stage 8 не завершён.
 
 ## Git-процесс
 
