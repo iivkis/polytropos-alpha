@@ -280,7 +280,8 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
     assert!(second_graph.contains(
         "write_checked_lean(&root.join(\"numeric_matmul.lean\"), &mat_plan.lean_source()?)?"
     ));
-    assert!(first_graph.contains(
-        "write_checked_lean(&root.join(\"numeric.lean\"), &plan.lean_source()?)?"
-    ));
+    assert!(
+        first_graph
+            .contains("write_checked_lean(&root.join(\"numeric.lean\"), &plan.lean_source()?)?")
+    );
 }
