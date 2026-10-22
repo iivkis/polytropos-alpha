@@ -13,8 +13,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    auto_bundle, FixedScan, GpuEngine, GpuError, GpuProgram, LeanProgram, LeanProofEngine, NeuralError,
-    NeuralGraph, NodeId, Operation, ProofError, ProofGoal,
+    FixedScan, GpuEngine, GpuError, GpuProgram, LeanProgram, LeanProofEngine, NeuralError,
+    NeuralGraph, NodeId, Operation, ProofError, ProofGoal, auto_bundle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -550,53 +550,52 @@ fn audit_text(lean_version: &str, axiom_dependencies: &BTreeMap<String, Vec<Stri
 
 fn report_text(graph: &NeuralGraph, report: &AutoBuildReport) -> String {
     let mut text = format!(
-            "architecture_assurance=ideal-Int-Lean-kernel-checked\n\
+        "architecture_assurance=ideal-Int-Lean-kernel-checked\n\
              connectivity_assurance=Rust-structural-validation\n\
              fp32_machine_equivalence=not-proven\n\
              nvidia_jit_sass_equivalence=not-proven\n\
              lean_version={}\n\
              nodes={}\ndata_edges={}\nmodule_ports={}\nmodule_instances={}\n\
              architecture_theorems={}\nsource_hypotheses={:?}\n",
-            report.lean_version,
-            graph.nodes().len(),
-            report.connectivity.data_edges,
-            report.connectivity.module_ports,
-            report.connectivity.module_instances,
-            report.architecture_theorems,
-            report.source_hypotheses,
-        );
-        for (name, count) in &report.goal_theorems {
-            let assumptions = report
-                .goal_hypotheses
-                .iter()
-                .find(|(goal, _)| goal == name)
-                .map(|(_, hypotheses)| hypotheses.as_slice())
-                .unwrap_or(&[]);
+        report.lean_version,
+        graph.nodes().len(),
+        report.connectivity.data_edges,
+        report.connectivity.module_ports,
+        report.connectivity.module_instances,
+        report.architecture_theorems,
+        report.source_hypotheses,
+    );
+    for (name, count) in &report.goal_theorems {
+        let assumptions = report
+            .goal_hypotheses
+            .iter()
+            .find(|(goal, _)| goal == name)
+            .map(|(_, hypotheses)| hypotheses.as_slice())
+            .unwrap_or(&[]);
+        text.push_str(&format!(
+            "goal={name};lean_theorems={count};status=proven-ideal-Int;hypotheses={assumptions:?}\n"
+        ));
+    }
+    for (theorem, axioms) in &report.axiom_dependencies {
+        text.push_str(&format!("axioms={theorem};dependencies={axioms:?}\n"));
+    }
+    for item in &report.output_evidence {
+        if let Some(ptx) = &item.ptx {
             text.push_str(&format!(
-                "goal={name};lean_theorems={count};status=proven-ideal-Int;hypotheses={assumptions:?}\n"
+                "gpu_output={};status=structurally-translated;ptx={}\n",
+                item.node,
+                ptx.display()
+            ));
+        } else {
+            text.push_str(&format!(
+                "gpu_output={};status=unsupported;reason={}\n",
+                item.node,
+                item.reason.as_deref().unwrap_or("unknown")
             ));
         }
-        for (theorem, axioms) in &report.axiom_dependencies {
-            text.push_str(&format!("axioms={theorem};dependencies={axioms:?}\n"));
-        }
-        for item in &report.output_evidence {
-            if let Some(ptx) = &item.ptx {
-                text.push_str(&format!(
-                    "gpu_output={};status=structurally-translated;ptx={}\n",
-                    item.node,
-                    ptx.display()
-                ));
-            } else {
-                text.push_str(&format!(
-                    "gpu_output={};status=unsupported;reason={}\n",
-                    item.node,
-                    item.reason.as_deref().unwrap_or("unknown")
-                ));
-            }
-        }
+    }
     text
 }
-
 
 impl ArchitectureAutoCompiler {
     /// Offline recheck of a previously emitted bundle against this precise
@@ -627,7 +626,9 @@ impl ArchitectureAutoCompiler {
         let (lean_version, architecture_theorems) = {
             let file = lean_dir.join("architecture.lean");
             verify_source(&self.proof, &file, &plan.architecture)?;
-            let audit = self.proof.audit_file(&file, plan.architecture.theorem_names())?;
+            let audit = self
+                .proof
+                .audit_file(&file, plan.architecture.theorem_names())?;
             for (theorem, axioms) in audit.axiom_dependencies {
                 axiom_dependencies.insert(format!("architecture.{theorem}"), axioms);
             }
@@ -678,19 +679,23 @@ impl ArchitectureAutoCompiler {
                     }
                     let ptx_file = gpu_dir.join("graph.ptx");
                     let ptx = fs::read_to_string(&ptx_file)?;
-                    let checked = translation.validate(program.llvm_ir(), &ptx)
-                        .map_err(|err| AutoBuildError::Integrity(format!(
-                            "GPU output {index} LLVM/PTX translation rejected: {err}"
-                        )))?;
-                    if fs::read_to_string(gpu_dir.join("translation.report"))?
-                        != checked.to_text()
+                    let checked = translation
+                        .validate(program.llvm_ir(), &ptx)
+                        .map_err(|err| {
+                            AutoBuildError::Integrity(format!(
+                                "GPU output {index} LLVM/PTX translation rejected: {err}"
+                            ))
+                        })?;
+                    if fs::read_to_string(gpu_dir.join("translation.report"))? != checked.to_text()
                     {
                         return Err(AutoBuildError::Integrity(format!(
                             "GPU output {index} translation report mismatch"
                         )));
                     }
                     output_evidence.push(OutputBuildEvidence {
-                        node: output.index(), ptx: Some(ptx_file), reason: None,
+                        node: output.index(),
+                        ptx: Some(ptx_file),
+                        reason: None,
                     });
                 }
                 PlannedGpu::Unsupported { output, reason } => {
@@ -700,7 +705,9 @@ impl ArchitectureAutoCompiler {
                         )));
                     }
                     output_evidence.push(OutputBuildEvidence {
-                        node: output.index(), ptx: None, reason: Some(reason.clone()),
+                        node: output.index(),
+                        ptx: None,
+                        reason: Some(reason.clone()),
                     });
                 }
             }
@@ -717,11 +724,9 @@ impl ArchitectureAutoCompiler {
             lean_version,
             manifest_sha256: digest,
         };
-        if fs::read_to_string(directory.join("report.txt"))?
-            != report_text(graph, &report)
-        {
+        if fs::read_to_string(directory.join("report.txt"))? != report_text(graph, &report) {
             return Err(AutoBuildError::Integrity(
-                "auto-build report does not describe the freshly rechecked evidence".into()
+                "auto-build report does not describe the freshly rechecked evidence".into(),
             ));
         }
         Ok(report)

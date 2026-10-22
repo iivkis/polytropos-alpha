@@ -4,14 +4,13 @@
 use std::fs;
 use std::path::Path;
 
-use crate::{ArchitectureProofTask, GpuRequirement, NeuralGraph, NodeId, ProofGoalKind};
 use crate::auto_build::{AutoBuildError, AutoBuildPlan, PlannedGpu};
+use crate::{ArchitectureProofTask, GpuRequirement, NeuralGraph, NodeId, ProofGoalKind};
 
 const MANIFEST: &str = "SHA256SUMS";
 
 fn hash_file(path: &Path) -> Result<String, AutoBuildError> {
-    crate::certificate::hash_file(path)
-        .map_err(|err| AutoBuildError::Integrity(err.to_string()))
+    crate::certificate::hash_file(path).map_err(|err| AutoBuildError::Integrity(err.to_string()))
 }
 
 pub(super) fn canonical_ir(
@@ -37,9 +36,16 @@ pub(super) fn canonical_ir(
     for (index, module) in graph.modules().iter().enumerate() {
         text.push_str(&format!(
             "module={index};name={};version={};inputs={:?};body_start={};output={};contract={:?}\n",
-            module.name, module.semantic_version,
-            module.inputs.iter().map(|id| id.index()).collect::<Vec<_>>(),
-            module.body_start, module.output.index(), module.contract
+            module.name,
+            module.semantic_version,
+            module
+                .inputs
+                .iter()
+                .map(|id| id.index())
+                .collect::<Vec<_>>(),
+            module.body_start,
+            module.output.index(),
+            module.contract
         ));
     }
     for (index, module) in graph.multi_modules().iter().enumerate() {
@@ -57,12 +63,15 @@ pub(super) fn canonical_ir(
             ArchitectureProofTask::Goal(goal) => match &goal.kind {
                 ProofGoalKind::Nonnegative { assumptions } => text.push_str(&format!(
                     "task={index};name={};output={};nonnegative_assumptions={:?}\n",
-                    goal.name, goal.output.index(),
+                    goal.name,
+                    goal.output.index(),
                     assumptions.iter().map(|id| id.index()).collect::<Vec<_>>(),
                 )),
                 ProofGoalKind::EqualTo { other } => text.push_str(&format!(
                     "task={index};name={};output={};equal_to={}\n",
-                    goal.name, goal.output.index(), other.index(),
+                    goal.name,
+                    goal.output.index(),
+                    other.index(),
                 )),
             },
             ArchitectureProofTask::FixedScanNonnegative { name, scan } => {
@@ -92,7 +101,12 @@ pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
     }
     for (index, item) in plan.gpu.iter().enumerate() {
         if matches!(item, PlannedGpu::Supported { .. }) {
-            for name in ["graph.ll", "graph.ptx", "translation.plan", "translation.report"] {
+            for name in [
+                "graph.ll",
+                "graph.ptx",
+                "translation.plan",
+                "translation.report",
+            ] {
                 files.push(format!("gpu_{index}/{name}"));
             }
         }
@@ -129,12 +143,14 @@ pub(super) fn verify_manifest(
     let expected = manifest_text(dir, plan)?;
     if existing != expected {
         return Err(AutoBuildError::Integrity(
-            "SHA256SUMS does not match the complete expected artifact set".into()
+            "SHA256SUMS does not match the complete expected artifact set".into(),
         ));
     }
     let digest = hash_file(&dir.join(MANIFEST))?;
     if expected_digest.is_some_and(|pinned| pinned != digest) {
-        return Err(AutoBuildError::Integrity("externally pinned manifest digest mismatch".into()));
+        return Err(AutoBuildError::Integrity(
+            "externally pinned manifest digest mismatch".into(),
+        ));
     }
     Ok(digest)
 }
@@ -142,19 +158,18 @@ pub(super) fn verify_manifest(
 pub(super) fn verify_current_ir(dir: &Path, source: &str) -> Result<(), AutoBuildError> {
     if fs::read_to_string(dir.join("semantic.ir"))? != source {
         return Err(AutoBuildError::Integrity(
-            "saved auto-build IR differs from current Rust architecture or proof tasks".into()
+            "saved auto-build IR differs from current Rust architecture or proof tasks".into(),
         ));
     }
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        ArchitectureAutoCompiler, ArchitectureProofTask, Domain, GpuRequirement,
-        NeuralGraph, ProofGoal, ProofGoalKind, Shape,
+        ArchitectureAutoCompiler, ArchitectureProofTask, Domain, GpuRequirement, NeuralGraph,
+        ProofGoal, ProofGoalKind, Shape,
     };
 
     fn graph() -> (NeuralGraph, NodeId) {
@@ -175,9 +190,14 @@ mod tests {
         let task = ArchitectureProofTask::Goal(ProofGoal {
             name: "consumer_claim".to_owned(),
             output: out1,
-            kind: ProofGoalKind::Nonnegative { assumptions: vec![] },
+            kind: ProofGoalKind::Nonnegative {
+                assumptions: vec![],
+            },
         });
-        assert_ne!(ir1, canonical_ir(&g1, &[out1], &[task], GpuRequirement::AllOutputs));
+        assert_ne!(
+            ir1,
+            canonical_ir(&g1, &[out1], &[task], GpuRequirement::AllOutputs)
+        );
         assert_ne!(
             ir1,
             canonical_ir(&g1, &[out1], &[], GpuRequirement::AllowUnsupported),
@@ -195,9 +215,11 @@ mod tests {
     fn auto_manifest_detects_tampering_and_rejects_unpinned_or_wrong_artifacts() {
         let (graph, output) = graph();
         let plan = ArchitectureAutoCompiler::default()
-            .plan(&graph, &[output], &[], GpuRequirement::AllOutputs).unwrap();
+            .plan(&graph, &[output], &[], GpuRequirement::AllOutputs)
+            .unwrap();
         let root = std::env::temp_dir().join(format!(
-            "verineural-auto-bundle-{}-{:?}", std::process::id(),
+            "verineural-auto-bundle-{}-{:?}",
+            std::process::id(),
             std::thread::current().id()
         ));
         if root.exists() {
@@ -238,9 +260,11 @@ mod tests {
     fn auto_manifest_requires_entire_planned_gpu_and_lean_artifact_set() {
         let (graph, output) = graph();
         let plan = ArchitectureAutoCompiler::default()
-            .plan(&graph, &[output], &[], GpuRequirement::AllOutputs).unwrap();
+            .plan(&graph, &[output], &[], GpuRequirement::AllOutputs)
+            .unwrap();
         let root = std::env::temp_dir().join(format!(
-            "verineural-auto-missing-{}-{:?}", std::process::id(),
+            "verineural-auto-missing-{}-{:?}",
+            std::process::id(),
             std::thread::current().id()
         ));
         std::fs::create_dir_all(&root).unwrap();

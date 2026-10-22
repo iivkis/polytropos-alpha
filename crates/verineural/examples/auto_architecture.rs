@@ -50,11 +50,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pinned = match args.as_slice() {
         [] => None,
         [command] if command == "--verify" => None,
-        [command, option, digest]
-            if command == "--verify" && option == "--pinned-sha256" => Some(digest.as_str()),
-        _ => return Err(
-            "usage: auto_architecture [--verify [--pinned-sha256 <64-hex-digest>]]".into()
-        ),
+        [command, option, digest] if command == "--verify" && option == "--pinned-sha256" => {
+            Some(digest.as_str())
+        }
+        _ => {
+            return Err(
+                "usage: auto_architecture [--verify [--pinned-sha256 <64-hex-digest>]]".into(),
+            );
+        }
     };
     let verify = !args.is_empty();
     let shape = Shape::new(vec![4])?;
@@ -89,7 +92,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let outputs = [left, right, output];
     let report = if verify {
         compiler.verify_bundle(
-            &graph, &outputs, &tasks, GpuRequirement::AllOutputs, root, pinned,
+            &graph,
+            &outputs,
+            &tasks,
+            GpuRequirement::AllOutputs,
+            root,
+            pinned,
         )?
     } else {
         compiler.build(&graph, &outputs, &tasks, GpuRequirement::AllOutputs, root)?
@@ -107,9 +115,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("GPU output {}: {:?}", artifact.node, artifact.ptx);
     }
     println!("Report: {}", report.directory.join("report.txt").display());
-    println!("SHA256SUMS digest (pin externally): {}", report.manifest_sha256);
+    println!(
+        "SHA256SUMS digest (pin externally): {}",
+        report.manifest_sha256
+    );
     if verify && pinned.is_none() {
-        println!("Provenance: unpinned replay checks current Rust IR and all bundle contents, not external authenticity");
+        println!(
+            "Provenance: unpinned replay checks current Rust IR and all bundle contents, not external authenticity"
+        );
     }
     println!(
         "Assurance: Lean ideal-Int and structural PTX translation only; GPU machine semantics not proven"
