@@ -2160,7 +2160,7 @@ impl RneRangePlan {
             };
             source.push_str(&format!(
                 "  have hsumContract_{j} : VeriNeural.ApproxContract {} {}\n      \
-                   {ideal_sum} sum_{j} := by\n    \
+                   ({ideal_sum}) sum_{j} := by\n    \
                  simpa [VeriNeural.binary32Step] using\n      \
                    (VeriNeural.approx_contract_add_rne (maxShift := {sum_max_shift})\n        \
                      {previous_contract_name} hproductContract_{j} (by decide) hsum_{j})\n",
