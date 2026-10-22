@@ -62,6 +62,64 @@ impl NeuralModule for SqrtModule {
     }
 }
 
+struct AddModule {
+    contract: MathContract,
+}
+
+impl AddModule {
+    fn new(dims: &[usize]) -> Self {
+        Self {
+            contract: MathContract::new(
+                vec![port(dims, Domain::Any), port(dims, Domain::Any)],
+                port(dims, Domain::Any),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for AddModule {
+    fn name(&self) -> &'static str {
+        "add_module"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.add(inputs[0], inputs[1])
+    }
+}
+
+struct MulModule {
+    contract: MathContract,
+}
+
+impl MulModule {
+    fn new(dims: &[usize]) -> Self {
+        Self {
+            contract: MathContract::new(
+                vec![port(dims, Domain::Any), port(dims, Domain::Any)],
+                port(dims, Domain::Any),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for MulModule {
+    fn name(&self) -> &'static str {
+        "mul_module"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.mul(inputs[0], inputs[1])
+    }
+}
+
 struct IncorrectClaim {
     contract: MathContract,
 }
@@ -305,6 +363,70 @@ fn proof_generator_keeps_source_domain_assumptions_explicit() {
             domain: Domain::NonNegativeFinite
         }]
     );
+}
+
+#[test]
+fn proof_generator_composes_explicit_global_nonnegative_property_over_module_dag() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[3]), Domain::Finite);
+    let y = graph.input(shape(&[3]), Domain::Finite);
+    let z = graph.input(shape(&[3]), Domain::Finite);
+    let add = AddModule::new(&[3]);
+    let mul = MulModule::new(&[3]);
+
+    let left = graph.apply_module(&add, &[x, y]).unwrap();
+    let right = graph.apply_module(&mul, &[x, z]).unwrap();
+    let output = graph.apply_module(&add, &[left, right]).unwrap();
+
+    let proof = LeanProofEngine::default()
+        .generate_global_nonnegative(&graph, output, &[x, y, z])
+        .unwrap();
+    let lean = proof.source();
+
+    assert!(lean.contains("theorem module_0_global_nonnegative"));
+    assert!(lean.contains("theorem module_1_global_nonnegative"));
+    assert!(lean.contains("theorem module_2_global_nonnegative"));
+    assert!(lean.contains("theorem architecture_global_nonnegative"));
+    assert!(lean.contains("VeriNeural.add_nonnegative"));
+    assert!(lean.contains("VeriNeural.mul_nonnegative"));
+    assert!(lean.contains("have arch_module_0 := module_0_global_nonnegative"));
+    assert!(lean.contains("have arch_module_1 := module_1_global_nonnegative"));
+    assert!(lean.contains("have arch_module_2 := module_2_global_nonnegative"));
+    assert!(lean.contains("exact arch_module_2"));
+    assert!(!lean.contains("sorry"));
+    assert!(!lean.contains("axiom "));
+
+    assert_eq!(
+        proof.assumptions(),
+        &[
+            ProofAssumption {
+                input_node: x.index(),
+                domain: Domain::NonNegativeFinite,
+            },
+            ProofAssumption {
+                input_node: y.index(),
+                domain: Domain::NonNegativeFinite,
+            },
+            ProofAssumption {
+                input_node: z.index(),
+                domain: Domain::NonNegativeFinite,
+            },
+        ]
+    );
+}
+
+#[test]
+fn proof_generator_global_nonnegative_fails_closed_without_required_source_assumption() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(&[2]), Domain::Finite);
+    let y = graph.input(shape(&[2]), Domain::Finite);
+    let add = AddModule::new(&[2]);
+    let output = graph.apply_module(&add, &[x, y]).unwrap();
+
+    assert!(matches!(
+        LeanProofEngine::default().generate_global_nonnegative(&graph, output, &[x]),
+        Err(ProofError::UnsupportedGuarantee { node }) if node == y.index()
+    ));
 }
 
 #[test]

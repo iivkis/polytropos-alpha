@@ -63,6 +63,18 @@ theorem reshape_pointwise {n : Nat} (a : Tensor n) (i : Fin n) :
     reshape a i = a i := by
   rfl
 
+theorem add_nonnegative {n : Nat} (a b : Tensor n)
+    (ha : Nonnegative a) (hb : Nonnegative b) :
+    Nonnegative (add a b) := by
+  intro i
+  exact Int.add_nonneg (ha i) (hb i)
+
+theorem mul_nonnegative {n : Nat} (a b : Tensor n)
+    (ha : Nonnegative a) (hb : Nonnegative b) :
+    Nonnegative (mul a b) := by
+  intro i
+  exact Int.mul_nonneg (ha i) (hb i)
+
 theorem relu_nonnegative {n : Nat} (a : Tensor n) :
     Nonnegative (relu a) := by
   intro i

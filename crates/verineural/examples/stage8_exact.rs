@@ -15,7 +15,7 @@ use verineural::{
     RneRangePlan, Shape, Tensor,
 };
 
-const FILES: [&str; 40] = [
+const FILES: [&str; 42] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -56,6 +56,8 @@ const FILES: [&str; 40] = [
     "nested_contract.txt",
     "numeric_nested_deep.lean",
     "nested_deep_contract.txt",
+    "architecture_property.lean",
+    "architecture_property_contract.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -98,6 +100,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_architecture_dag.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_nested.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_nested_deep.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("architecture_property.lean"))?;
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
         "Scope: ideal integer ranges, concrete dyadic RNE traces, and reusable bounded RNE/module contracts; not machine FP32 certification"
@@ -111,6 +114,74 @@ fn write_checked_lean(path: &Path, source: &str) -> Result<(), Box<dyn Error>> {
     fs::write(path, source)?;
     LeanProofEngine::default().check_file(path)?;
     Ok(())
+}
+
+struct GlobalAddModule {
+    contract: MathContract,
+}
+
+impl GlobalAddModule {
+    fn new(shape: Shape) -> Self {
+        let any = |shape| PortContract::new(shape, Domain::Any);
+        Self {
+            contract: MathContract::new(
+                vec![any(shape.clone()), any(shape.clone())],
+                any(shape),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for GlobalAddModule {
+    fn name(&self) -> &'static str {
+        "global_add"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        graph.add(inputs[0], inputs[1])
+    }
+}
+
+struct GlobalMulModule {
+    contract: MathContract,
+}
+
+impl GlobalMulModule {
+    fn new(shape: Shape) -> Self {
+        let any = |shape| PortContract::new(shape, Domain::Any);
+        Self {
+            contract: MathContract::new(
+                vec![any(shape.clone()), any(shape.clone())],
+                any(shape),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for GlobalMulModule {
+    fn name(&self) -> &'static str {
+        "global_mul"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(
+        &self,
+        graph: &mut NeuralGraph,
+        inputs: &[NodeId],
+    ) -> Result<NodeId, verineural::NeuralError> {
+        graph.mul(inputs[0], inputs[1])
+    }
 }
 
 struct NestedResidualPair {
@@ -756,6 +827,50 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Explicit architecture-level functional property in the ideal-Int model.
+    // Three user-declared nonnegative source assumptions flow through a module
+    // fork/fan-in DAG: Add(x,y), Mul(x,z), then Add(left,right).
+    let mut property_graph = NeuralGraph::default();
+    let property_shape = Shape::new(vec![3])?;
+    let property_x = property_graph.input(property_shape.clone(), Domain::Finite);
+    let property_y = property_graph.input(property_shape.clone(), Domain::Finite);
+    let property_z = property_graph.input(property_shape.clone(), Domain::Finite);
+    let property_add = GlobalAddModule::new(property_shape.clone());
+    let property_mul = GlobalMulModule::new(property_shape);
+    let property_left = property_graph.apply_module(&property_add, &[property_x, property_y])?;
+    let property_right = property_graph.apply_module(&property_mul, &[property_x, property_z])?;
+    let property_output =
+        property_graph.apply_module(&property_add, &[property_left, property_right])?;
+    let property_program = LeanProofEngine::default().generate_global_nonnegative(
+        &property_graph,
+        property_output,
+        &[property_x, property_y, property_z],
+    )?;
+    let property_source = property_program.source();
+    if !property_source.contains("theorem architecture_global_nonnegative")
+        || !property_source.contains("have arch_module_0 := module_0_global_nonnegative")
+        || !property_source.contains("have arch_module_1 := module_1_global_nonnegative")
+        || !property_source.contains("have arch_module_2 := module_2_global_nonnegative")
+        || !property_source.contains("exact arch_module_2")
+    {
+        return Err(io::Error::other(
+            "missing Stage 8 global architecture nonnegative proof",
+        )
+        .into());
+    }
+    write_checked_lean(&root.join("architecture_property.lean"), property_source)?;
+    fs::write(
+        root.join("architecture_property_contract.txt"),
+        format!(
+            "property=output_nonnegative\nmodel=ideal-int\nmodules=3\nshape=fork-fan-in\n\
+             assumptions=node:{},node:{},node:{}\n\
+             theorem=architecture_global_nonnegative\nfp32_gpu_claim=false\n",
+            property_x.index(),
+            property_y.index(),
+            property_z.index(),
+        ),
+    )?;
+
     let input_snapshot = inputs
         .iter()
         .map(|(id, tensor)| {
@@ -853,11 +968,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         deep_contract.epsilon_ticks()
     );
     println!(
+        "Stage 8 global property: architecture_global_nonnegative over a 3-module Add/Mul fan-in DAG (ideal-Int only)"
+    );
+    println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, and recursive nested-module theorem reuse through depth 3; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and an explicit global ideal-Int nonnegativity property; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }

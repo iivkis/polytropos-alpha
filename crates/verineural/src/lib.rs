@@ -16,6 +16,9 @@
 //! ModuleInvocation elementwise, including direct nested-module theorem reuse.
 //! Architecture-level range theorems compose the reachable top-level module DAG,
 //! including fork/fan-in boundaries, under the same formal RNE target relation.
+//! An explicit global ideal-Int nonnegativity request can also compose Add/Mul/
+//! ReLU/Reshape module proofs over a top-level DAG from user-supplied source
+//! hypotheses. This property is separate from FP32/GPU guarantees.
 //! The LLVM/PTX/GPU link is still trusted rather than formally certified.
 
 mod certificate;
