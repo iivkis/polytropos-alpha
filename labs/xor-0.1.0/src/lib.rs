@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use verineural::{
-    ArchitectureMetadata, ArchitectureProofTask, ContractClaim, Domain, MathContract, NeuralError,
-    NeuralGraph, NeuralModule, NodeId, PortContract, ProofGoal, ProofGoalKind, Shape, Tensor,
+    ArchitectureMetadata, ContractClaim, Domain, MathContract, NeuralError, NeuralGraph,
+    NeuralModule, NodeId, PortContract, Shape, Tensor,
 };
 
 pub const CASES: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
@@ -193,16 +193,6 @@ impl Lab {
         CASES.iter().map(|&(x, y)| f32::from(x ^ y)).collect()
     }
 
-    pub fn tasks(&self) -> Vec<ArchitectureProofTask> {
-        vec![ArchitectureProofTask::Goal(ProofGoal {
-            name: "xor_output_nonnegative".into(),
-            output: self.output,
-            kind: ProofGoalKind::Nonnegative {
-                assumptions: Vec::new(),
-            },
-        })]
-    }
-
     pub fn validate_inputs(&self) -> Result<(), NeuralError> {
         for (id, tensor) in &self.inputs {
             tensor.validate_domain(self.graph.node(*id)?.domain)?;
@@ -247,7 +237,7 @@ impl Lab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verineural::{ArchitectureAutoCompiler, GpuRequirement, LeanProofEngine, NeuralError};
+    use verineural::{GpuEngine, LeanProofEngine, NeuralError};
 
     #[test]
     fn xor_truth_table_and_exact_fixed_parameters() {
@@ -261,34 +251,27 @@ mod tests {
     }
 
     #[test]
-    fn supported_graph_generates_independent_goal_and_gpu_plan() {
+    fn supported_graph_generates_one_global_proof_and_gpu_plan() {
         let lab = build().unwrap();
-        let compiler = ArchitectureAutoCompiler::default();
-        let plan = compiler
-            .plan(
-                &lab.graph,
-                &[lab.output],
-                &lab.tasks(),
-                GpuRequirement::AllOutputs,
-            )
-            .unwrap();
-        assert_eq!(plan.goals.len(), 1);
-        assert!(plan.goals[0]
-            .1
-            .source()
-            .contains("theorem architecture_property_xor_output_nonnegative"));
-        assert!(!plan.architecture.theorem_names().is_empty());
-        // DOT's exported global-property identity must match a real Lean
-        // architecture theorem, not merely the consumer's goal nickname.
-        let gpu = verineural::GpuEngine::default()
+        let gpu = GpuEngine::default()
             .compile(&lab.graph, lab.output)
             .unwrap();
+        assert!(!gpu.translation_plan().unwrap().kernels.is_empty());
+
         let snapshot =
             verineural::snapshot_architecture(&lab.graph, lab.output, &gpu, &lab.metadata)
                 .unwrap();
         assert!(snapshot
             .dot
             .contains("vn_global_property=\"architecture_global_nonnegative\""));
+
+        let proof = LeanProofEngine::default()
+            .generate_global_nonnegative(&lab.graph, lab.output, &[])
+            .unwrap();
+        assert!(proof
+            .source()
+            .contains("theorem architecture_global_nonnegative"));
+
         let mut invalid_meta = lab.metadata.clone();
         invalid_meta.global_property = "xor_output_nonnegative".into();
         assert!(verineural::snapshot_architecture(
@@ -298,11 +281,6 @@ mod tests {
             &invalid_meta
         )
         .is_err());
-        assert!(LeanProofEngine::default()
-            .generate_global_nonnegative(&lab.graph, lab.output, &[])
-            .unwrap()
-            .source()
-            .contains("theorem architecture_global_nonnegative"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
-//! End-to-end XOR lab: consumer graph -> independent Lean goal -> NVPTX
-//! -> CUDA Graph execution -> bitwise truth table -> inspectable artifacts.
+//! End-to-end XOR lab: consumer graph -> Lean -> NVPTX
+//! -> CUDA Graph execution -> bitwise truth table -> one inspectable artifact set.
 //! --verify is offline: it does not rerun the CUDA driver.
 
 use std::error::Error;
@@ -7,12 +7,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use verineural::{
-    ArchitectureAutoCompiler, GpuEngine, GpuRequirement, LeanProofEngine, snapshot_architecture,
-};
-use xor_lab::{Lab, build, CASES};
+use verineural::{snapshot_architecture, GpuEngine, LeanProofEngine};
+use xor_lab::{build, Lab, CASES};
 
-const EVIDENCE: [&str; 14] = [
+const EVIDENCE: [&str; 13] = [
     "architecture.identity",
     "architecture.lean",
     "semantic.ir",
@@ -22,7 +20,6 @@ const EVIDENCE: [&str; 14] = [
     "parameters.bits",
     "output.bits",
     "report.txt",
-    "auto-build/SHA256SUMS",
     "gpu/graph.ll",
     "gpu/graph.ptx",
     "gpu/translation.plan",
@@ -65,8 +62,7 @@ fn report(ir_sha256: &str) -> String {
     format!(
         "architecture=xor-mlp\nversion=0.1.0\nsemantic_ir_sha256={ir_sha256}\n\
          global_property=architecture_global_nonnegative\n\
-         goal=xor_output_nonnegative\n\
-         lean=two-ideal-Int-nonnegative-kernel-checked-theorems\n\
+         lean=ideal-Int-nonnegative-kernel-checked\n\
          xor_truth_table=4-of-4-bitwise-gpu-tested\n\
          fp32=concrete-small-integers-only\n\
          translation=llvm-ptx-structurally-validated\n\
@@ -93,8 +89,7 @@ fn verify_gpu_files(root: &Path, program: &verineural::GpuProgram) -> Result<(),
 
 fn run(verify: bool, root: &Path) -> Result<(), Box<dyn Error>> {
     const IDENTITY: &str = "id=xor-mlp\nversion=0.1.0\n";
-    // The success marker is invalidated before any proof/compiler/GPU stage
-    // runs. A failed rerun must not preserve a stale successful certificate.
+
     if !verify {
         if root.join("architecture.identity").exists()
             && fs::read_to_string(root.join("architecture.identity"))? != IDENTITY
@@ -105,39 +100,34 @@ fn run(verify: bool, root: &Path) -> Result<(), Box<dyn Error>> {
         for name in ["SHA256SUMS", "report.txt", "output.bits"] {
             let _ = fs::remove_file(root.join(name));
         }
+        // Remove the obsolete duplicated layout produced by older XOR lab builds.
+        let _ = fs::remove_dir_all(root.join("auto-build"));
     }
 
     let lab = build()?;
     lab.validate_inputs()?;
-    let compiler = ArchitectureAutoCompiler::default();
-    let tasks = lab.tasks();
     let engine = GpuEngine::default();
     let program = engine.compile(&lab.graph, lab.output)?;
     let snapshot = snapshot_architecture(&lab.graph, lab.output, &program, &lab.metadata)?;
-    // This exact global theorem is what ArchitectureMetadata advertises.
-    // The auto compiler separately verifies the consumer's named goal.
-    let global_proof = LeanProofEngine::default()
-        .generate_global_nonnegative(&lab.graph, lab.output, &[])?;
     let lean = LeanProofEngine::default();
+    let proof = lean.generate_global_nonnegative(&lab.graph, lab.output, &[])?;
+
     if verify {
-        compiler.verify_bundle(
-            &lab.graph,
-            &[lab.output],
-            &tasks,
-            GpuRequirement::AllOutputs,
-            root,
-            None,
-        )?;
+        if root.join("auto-build").exists() {
+            return Err(invalid(
+                "stale duplicated auto-build artifacts exist; rerun lab-xor to clean them",
+            )
+            .into());
+        }
         snapshot.verify(root)?;
         verify_gpu_files(root, &program)?;
-        let saved_global = root.join("architecture.lean");
-        if fs::read_to_string(&saved_global)? != global_proof.source() {
-            return Err(invalid("global Lean theorem differs from current Rust graph").into());
+        let lean_file = root.join("architecture.lean");
+        if fs::read_to_string(&lean_file)? != proof.source() {
+            return Err(invalid("architecture.lean differs from current Rust graph").into());
         }
-        lean.check_file(&saved_global)?;
-        lean.audit_file(&saved_global, global_proof.theorem_names())?;
-        if fs::read_to_string(root.join("architecture.identity"))?
-            != "id=xor-mlp\nversion=0.1.0\n"
+        lean.check_file(&lean_file)?;
+        lean.audit_file(&lean_file, proof.theorem_names())?;
+        if fs::read_to_string(root.join("architecture.identity"))? != IDENTITY
             || fs::read_to_string(root.join("inputs.bits"))? != lab.input_bits()
             || fs::read_to_string(root.join("parameters.bits"))? != lab.parameter_bits()
             || fs::read_to_string(root.join("output.bits"))? != expected_bits()
@@ -146,18 +136,11 @@ fn run(verify: bool, root: &Path) -> Result<(), Box<dyn Error>> {
         {
             return Err(invalid("XOR evidence mismatch; rerun lab-xor").into());
         }
-        println!("XOR offline verification: IR/DOT/PNG, global Lean/goal axioms, executed GPU LLVM/PTX and input/parameter/output bits, SHA-256 PASS");
+        println!("XOR offline verification: one IR/DOT/PNG/Lean/GPU evidence set and SHA-256 PASS");
         return Ok(());
     }
 
-    compiler.build(
-        &lab.graph,
-        &[lab.output],
-        &tasks,
-        GpuRequirement::AllOutputs,
-        root,
-    )?;
-    lean.verify_certified(&global_proof, &root.join("architecture.lean"))?;
+    lean.verify_certified(&proof, &root.join("architecture.lean"))?;
     snapshot.write(root)?;
     fs::write(root.join("architecture.identity"), IDENTITY)?;
     fs::write(root.join("inputs.bits"), lab.input_bits())?;
@@ -186,9 +169,17 @@ fn run(verify: bool, root: &Path) -> Result<(), Box<dyn Error>> {
     fs::write(root.join("output.bits"), expected_bits())?;
     fs::write(root.join("report.txt"), report(&snapshot.ir_sha256))?;
     fs::write(root.join("SHA256SUMS"), manifest(root)?)?;
-    println!("XOR 4/4 exact FP32 truth-table checks PASS; artifacts: {}", root.display());
-    println!("Manifest SHA-256 (pin externally): {}", digest(&root.join("SHA256SUMS"))?);
-    println!("Lean proves ideal-Int nonnegativity, not Boolean XOR or CUDA/SASS equivalence; weights are fixed, not trained.");
+    println!(
+        "XOR 4/4 exact FP32 truth-table checks PASS; artifacts: {}",
+        root.display()
+    );
+    println!(
+        "Manifest SHA-256 (pin externally): {}",
+        digest(&root.join("SHA256SUMS"))?
+    );
+    println!(
+        "Lean proves ideal-Int nonnegativity, not Boolean XOR or CUDA/SASS equivalence; weights are fixed, not trained."
+    );
     Ok(())
 }
 
@@ -231,6 +222,7 @@ mod tests {
     fn artifact_root_defaults_to_package_and_accepts_overrides() {
         let (_, default_root) = parse_cli(&[]).unwrap();
         assert_eq!(default_root, PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        assert!(EVIDENCE.iter().all(|path| !path.starts_with("auto-build/")));
 
         let (verify, relative) = parse_cli(&[
             "--verify".to_owned(),

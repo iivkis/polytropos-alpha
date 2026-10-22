@@ -177,6 +177,6 @@ tasks:
       - cargo run -p xor-lab --example xor_lab -- --verify {{.CLI_ARGS}}
 
   test-lab-xor:
-    desc: Run CPU-only XOR consumer tests including proof and GPU compilation planning
+    desc: Run CPU-only XOR consumer tests including one global proof and GPU compilation planning
     cmds:
       - cargo test -p xor-lab --all-targets
