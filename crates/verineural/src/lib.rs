@@ -28,6 +28,7 @@
 //! Per-kernel translation plans fail closed on inconsistent LLVM/PTX lowering;
 //! structural validation is distinct from semantic proof or JIT/SASS assurance.
 
+mod architecture;
 mod certificate;
 mod cuda;
 mod error;
@@ -41,6 +42,7 @@ mod subnormal;
 mod tensor;
 mod translation;
 
+pub use architecture::{ArchitectureMetadata, ArchitectureSnapshot, snapshot_architecture};
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
 pub use gpu::{

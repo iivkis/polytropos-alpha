@@ -125,3 +125,13 @@ tasks:
     desc: Offline verify Stage 8 Lean, all per-kernel LLVM/PTX translation reports, FP32 bits and SHA-256
     cmds:
       - cargo run -p verineural --example stage8_exact -- --verify
+
+  lab-stage9:
+    desc: Build Stage 9 independent coupled-field research lab, Lean, CUDA Graph and DOT/PNG evidence
+    cmds:
+      - cargo run -p coupled-field-lab --example stage9_architecture
+
+  verify-lab-stage9:
+    desc: Offline reconstruct Stage 9 Semantic IR/DOT and check Lean, LLVM/PTX and SHA-256
+    cmds:
+      - cargo run -p coupled-field-lab --example stage9_architecture -- --verify

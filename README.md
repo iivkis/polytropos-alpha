@@ -40,6 +40,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Полный пример с пользовательским `NeuralModule` и `MathContract` находится в [examples/stage2_graph.rs](crates/verineural/examples/stage2_graph.rs).
 
+## Stage 9: отдельная исследовательская лаборатория (новый крупный срез, локально не проверен)
+
+Добавлен Rust consumer `labs/coupled-field-0.1.0/` (отдельный Cargo package `coupled-field-lab`), а не очередная готовая модель внутри библиотеки. Он задаёт нетиповую трёхуровневую композицию с **семью экземплярами модулей**, общими параметрами и fork/fan-in: `BoundaryCell → CoupledUnit → CoupledField`. Для конкретных неотрицательных точных FP32-входов независимый `i64`-oracle ожидает `[4, 10, 8, 12]`; глобальный Lean `architecture_global_nonnegative` строится из реального IR с явными исходными предположениями. Baseline и experimental fused исполнения работают через CUDA Graph с обязательной структурной LLVM/PTX validation.
+
+Переиспользуемый Rust API `snapshot_architecture` выводит канонический `semantic.ir` и один полный детерминированный `architecture.dot`: все узлы (включая недостижимые), вложенные `cluster_*`, устойчивые instance paths, входы/параметры, source/port ordering, tensor shapes, domains, контракты, профили FP32, memory/kernel lowering и явные границы гарантий. DOT содержит SHA-256 исходного Semantic IR. `ArchitectureSnapshot::write` вызывает **Graphviz из pinned Nix devShell** для генерации sibling `architecture.png`; Lean source, входные биты, параметры, оба GPU PTX/LLVM и translation plan/report попадают в **17-файловый SHA-256 manifest**. Команда `--verify` без CUDA пересобирает IR из Rust и проверяет содержимое DOT, Lean, параметры, ожидаемые биты, независимые планы LLVM/PTX и весь SHA-256 bundle. Все output writers используют единый `--artifact-root`, по умолчанию **корень package лаборатории**; чужая architecture id/version блокирует перезапись. Генерируемые артефакты игнорируются Git. `Cargo.lock` обновлён под новый consumer package.
+
+```bash
+task lab-stage9
+task verify-lab-stage9
+# Свой корень артефактов относительно Cargo package (или абсолютный):
+cargo run -p coupled-field-lab --example stage9_architecture -- --artifact-root experiments/run1
+```
+
+**Статус: ожидает локального Cargo/Lean/CUDA/Graphviz прогона.** Это первая исследовательская лаборатория, а не завершённый Stage 9/Stage 10 certified build, не общая поддержка state/control/cycles и не доказательство FP32/PTX/SASS семантики. Новых зависимостей или CI нет.
+
 **Граница гарантии:** `graph.input(shape, Domain::Finite)` регистрирует *предположение пользователя*, а не автоматически проверяет реальные данные. Для конкретного `Tensor<f32>` используйте `validate_domain` до исполнения. Гарантии модулей проверяются по консервативно выводимой информации графа; арифметическое переполнение означает, что два конечных входа не дают автоматически гарантированно конечный выход. Узлы `sqrt` без установленного неотрицательного конечного домена отклоняются. Общие редукции и GPU Sqrt пока не реализованы; GPU MatMul и BiasAdd добавлены в коде этапа 6, но новый end-to-end прогон ещё ожидает локального подтверждения. Наличие IR и контрактов не заменяет доказательство Lean. Для доказуемого подмножества теперь доступен отдельный генератор Lean; доказательством считается только результат успешного запуска Lean, а не генерация исходного файла.
 
 ## Локальная разработка
