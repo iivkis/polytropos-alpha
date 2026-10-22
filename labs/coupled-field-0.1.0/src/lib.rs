@@ -347,17 +347,31 @@ mod tests {
         assert_eq!(snapshot.dot.matches("subgraph cluster_m").count(), 7);
         assert!(snapshot.dot.contains(r#"vn_role="parameter""#));
         assert!(snapshot.dot.contains("vn_module_inputs="));
-        // 7 composed instances retain their input-port provenance without
-        // the 35+ redundant dashed arrows that overwhelmed the old diagram.
+        // Every semantic edge remains independently inspectable; visible
+        // module-interface relays replace long cross-cluster capture wires.
         let real_edges: usize = lab.graph.nodes().iter().map(|node| node.inputs.len()).sum();
-        assert_eq!(snapshot.dot.matches(" -> ").count(), real_edges);
+        let ports: usize = lab.graph.modules().iter().map(|m| m.inputs.len()).sum();
+        assert_eq!(snapshot.dot.matches(" -> ").count(), real_edges + ports);
+        assert_eq!(snapshot.dot.matches("vn_semantic_dst=").count(), real_edges);
+        assert_eq!(snapshot.dot.matches("vn_kind=\"module_interface\"").count(), ports);
+        assert_eq!(snapshot.dot.matches("vn_kind=\"module_input_port\"").count(), ports);
         assert!(!snapshot.dot.contains("module-input-port"));
         assert!(snapshot.dot.contains(r#"vn_input_port_0="n0""#));
+        // Interface relays keep external wires near their owning modules.
+        assert!(snapshot.dot.contains("n0 -> m6_in0 "));
+        assert!(snapshot.dot.contains("m6_in0 -> m2_in0 "));
+        assert!(snapshot.dot.contains("m2_in0 -> m0_in0 "));
+        assert!(snapshot.dot.contains("m0_in0 -> n5 "));
+        assert!(snapshot.dot.contains("n3 -> m6_in3 "));
+        assert!(!snapshot.dot.contains("n0 -> n5 "));
+        assert!(!snapshot.dot.contains("n3 -> n6 "));
+        assert!(snapshot.dot.contains("vn_semantic_src=\"n0\""));
+        assert!(snapshot.dot.contains("vn_visual_src=\"m0_in0\""));
         assert!(snapshot.dot.contains("rank=same; n0; n1; n2; n3; n4;"));
         assert!(snapshot.dot.contains("fillcolor=\"#FFF1DB\""));
         assert!(snapshot.dot.contains(r#"style="rounded,filled""#));
         assert!(snapshot.dot.contains("dpi=180"));
-        assert!(snapshot.dot.contains("splines=polyline"));
+        assert!(snapshot.dot.contains("splines=spline"));
         assert!(snapshot.dot.contains("concentrate=false"));
         // Parameter/bias edges are deliberately routed away from the primary
         // left-to-right data flow, while binary data inputs use separate ports.

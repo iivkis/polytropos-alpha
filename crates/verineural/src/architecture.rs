@@ -164,6 +164,16 @@ fn edge_theme(
     }
 }
 
+/// Stable visual identity for a module's declared input, distinct from the
+/// semantic source node. Module interfaces are explicit relay points.
+fn input_anchor_id(module: usize, port: usize) -> String {
+    format!("m{module}_in{port}")
+}
+
+fn source_is_outside_module(source: usize, module: &crate::ModuleInvocation) -> bool {
+    source < module.body_start || source > module.output.index()
+}
+
 impl ArchitectureSnapshot {
     /// Re-render the pinned DOT with Graphviz into architecture.png.
     /// Only the configured artifact root receives writes.
@@ -385,9 +395,9 @@ pub fn snapshot_architecture(
     // DPI belongs in DOT so rerendering via plain "dot -Tpng" is consistent.
     let mut dot = String::from(
         r##"digraph verineural {
-  graph [rankdir=LR, compound=true, newrank=true, splines=polyline,
+  graph [rankdir=LR, compound=true, newrank=true, splines=spline,
          concentrate=false, outputorder=edgesfirst,
-         nodesep=0.85, ranksep=1.20, pad=0.55, margin=0.18, dpi=180,
+         nodesep=0.90, ranksep=1.28, pad=0.60, margin=0.18, dpi=180,
          bgcolor="#FFFFFF", fontname="DejaVu Sans", fontcolor="#24324B",
          labelloc=t, labeljust=l];
   node [shape=box, style="rounded,filled", fontname="DejaVu Sans",
@@ -613,6 +623,48 @@ pub fn snapshot_architecture(
                 )
                 .expect("writing to string");
             }
+            // Tiny visible inlet per declared port. Unlike duplicate
+            // annotation edges to module outputs, this is an actual relay:
+            // captured data can enter a nested module only through its
+            // interface, never via a long diagonal across several clusters.
+            for (port, source) in module.inputs.iter().enumerate() {
+                let role = roles
+                    .get(&source.index())
+                    .map(String::as_str)
+                    .filter(|role| *role == "parameter")
+                    .unwrap_or("data");
+                let (fill, outline) = if role == "parameter" {
+                    ("#FFF1DB", "#B9772A")
+                } else {
+                    ("#EAF2FF", "#3972BD")
+                };
+                let properties = [
+                    ("label", format!("p{port}")),
+                    ("shape", "circle".into()),
+                    ("style", "filled".into()),
+                    ("width", "0.32".into()),
+                    ("height", "0.32".into()),
+                    ("fixedsize", "true".into()),
+                    ("fontsize", "9".into()),
+                    ("margin", "0.01".into()),
+                    ("fillcolor", fill.into()),
+                    ("color", outline.into()),
+                    ("fontcolor", outline.into()),
+                    ("tooltip", format!("{} input {port} from n{}", module.name, source.index())),
+                    ("vn_kind", "module_input_port".into()),
+                    ("vn_visual_only", "true".into()),
+                    ("vn_instance_path", paths[i].clone()),
+                    ("vn_port_index", port.to_string()),
+                    ("vn_source_node", format!("n{}", source.index())),
+                ];
+                writeln!(
+                    dot,
+                    "{inner}{} [{}];",
+                    input_anchor_id(i, port),
+                    attrs(&properties)
+                )
+                .expect("writing to string");
+            }
             render_scope(Some(i), context, depth + 1, dot);
             writeln!(dot, "{indent}}}").expect("writing to string");
         }
@@ -645,7 +697,74 @@ pub fn snapshot_architecture(
             .join(" ");
         writeln!(dot, "  {{ rank=same; {positions} }}").expect("writing to string");
     }
-    // Only real IR edges are drawn. Module ports are carried by vn_* attributes.
+    // Route each *declared* interface from its nearest containing module.
+    // This turns a source-to-deep-node diagonal into short parent-to-child
+    // segments. No synthetic edge is treated as a computational dependency:
+    // vn_kind and vn_semantic_src explicitly distinguish interface relays.
+    for (i, module) in mods.iter().enumerate() {
+        for (port, source) in module.inputs.iter().enumerate() {
+            let source_id = source.index();
+            if !source_is_outside_module(source_id, module) {
+                return Err(bad(format!(
+                    "module {i} input {port} is not external to its body"
+                )));
+            }
+            let visual_source = if let Some(parent) = parents[i] {
+                let outer = &mods[parent];
+                if source_is_outside_module(source_id, outer) {
+                    let outer_port = outer
+                        .inputs
+                        .iter()
+                        .position(|id| id.index() == source_id)
+                        .ok_or_else(|| bad(format!(
+                            "module m{i} captures n{source_id} without a declared parent m{parent} port"
+                        )))?;
+                    input_anchor_id(parent, outer_port)
+                } else {
+                    format!("n{source_id}")
+                }
+            } else {
+                format!("n{source_id}")
+            };
+            let role = metadata
+                .input_roles
+                .get(&source_id)
+                .map(String::as_str)
+                .filter(|role| *role == "parameter")
+                .unwrap_or("data");
+            let (color, width, _, _) = edge_theme(role, port);
+            let data = [
+                ("color", color.into()),
+                ("penwidth", width.into()),
+                ("tailport", "e".into()),
+                ("headport", "w".into()),
+                ("weight", "2".into()),
+                ("minlen", "1".into()),
+                ("vn_kind", "module_interface".into()),
+                ("vn_visual_only", "true".into()),
+                ("vn_semantic_src", format!("n{source_id}")),
+                ("vn_visual_src", visual_source.clone()),
+                ("vn_src_port", "output".into()),
+                ("vn_dst_port", format!("module_input_{port}")),
+                ("vn_role", role.into()),
+                ("vn_shape", format!("{:?}", graph.node(*source)
+                    .map_err(|err| bad(err.to_string()))?.shape.dims())),
+                ("vn_dtype", "binary32".into()),
+                ("vn_transform", "identity".into()),
+                ("vn_order", port.to_string()),
+                ("vn_instance_path", paths[i].clone()),
+            ];
+            writeln!(
+                dot,
+                "  {visual_source} -> {} [{}];",
+                input_anchor_id(i, port),
+                attrs(&data)
+            )
+            .expect("writing to string");
+        }
+    }
+    // Every original IR input receives exactly one edge with its original
+    // vn_* contract; only the *visual* source may be a nearby module inlet.
     for (i, node) in graph.nodes().iter().enumerate() {
         for (port, source) in node.inputs.iter().enumerate() {
             let from = graph.node(*source).map_err(|e| bad(e.to_string()))?;
@@ -662,6 +781,23 @@ pub fn snapshot_architecture(
                 .filter(|r| *r == "parameter")
                 .unwrap_or("data");
             let (edge_color, edge_width, edge_weight, edge_minlen) = edge_theme(role, port);
+            let visual_source = if let Some(owner) = owners[i] {
+                if source_is_outside_module(source.index(), &mods[owner]) {
+                    let module_port = mods[owner]
+                        .inputs
+                        .iter()
+                        .position(|id| id.index() == source.index())
+                        .ok_or_else(|| bad(format!(
+                            "node n{i} captures n{} outside module m{owner} without a declared input",
+                            source.index()
+                        )))?;
+                    input_anchor_id(owner, module_port)
+                } else {
+                    format!("n{}", source.index())
+                }
+            } else {
+                format!("n{}", source.index())
+            };
             let tailport = edge_tail_port(role, port);
             let headport = edge_head_port(&node.operation, port);
             let data = [
@@ -677,6 +813,9 @@ pub fn snapshot_architecture(
                 ),
                 ("vn_src_port", "output".into()),
                 ("vn_dst_port", format!("input_{port}")),
+                ("vn_semantic_src", format!("n{}", source.index())),
+                ("vn_semantic_dst", format!("n{i}")),
+                ("vn_visual_src", visual_source.clone()),
                 ("vn_role", role.into()),
                 ("vn_shape", format!("{:?}", from.shape.dims())),
                 ("vn_dtype", "binary32".into()),
@@ -684,7 +823,7 @@ pub fn snapshot_architecture(
                 ("vn_order", port.to_string()),
                 ("vn_constraint", "source-shape-checked".into()),
             ];
-            writeln!(dot, "  n{} -> n{i} [{}];", source.index(), attrs(&data))
+            writeln!(dot, "  {visual_source} -> n{i} [{}];", attrs(&data))
                 .expect("writing to string");
         }
     }
@@ -731,14 +870,15 @@ mod tests {
         // not synthetic module-port annotations that obscure the graph.
         let real_edges: usize = g1.nodes().iter().map(|n| n.inputs.len()).sum();
         assert_eq!(a.dot.matches(" -> ").count(), real_edges);
+        assert_eq!(a.dot.matches("vn_semantic_dst=").count(), real_edges);
         assert!(!a.dot.contains("module-input-port"));
         assert!(!a.dot.contains(r#"style="dashed""#));
         assert!(!a.dot.contains("vn_input_port_")); // no modules in this graph
         assert!(a.dot.contains("rank=same; n0; n1;"));
-        assert!(a.dot.contains("splines=polyline"));
+        assert!(a.dot.contains("splines=spline"));
         assert!(a.dot.contains("concentrate=false"));
-        assert!(a.dot.contains("nodesep=0.85"));
-        assert!(a.dot.contains("ranksep=1.20"));
+        assert!(a.dot.contains("nodesep=0.90"));
+        assert!(a.dot.contains("ranksep=1.28"));
         assert!(a.dot.contains("tailport=\"ne\""));
         assert!(a.dot.contains("headport=\"nw\""));
         assert!(a.dot.contains("tailport=\"e\""));
