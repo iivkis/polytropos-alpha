@@ -355,6 +355,12 @@ impl LeanProofEngine {
             .iter()
             .map(|assumption| assumption.input_node)
             .collect::<BTreeSet<_>>();
+        let claim_context = IdealNonnegativeClaimContext {
+            params: &params,
+            arguments: &arguments,
+            assumptions: &assumptions,
+            source_hypotheses: &source_hypotheses,
+        };
 
         let mut source = String::from(LEAN_LIBRARY);
         source.push_str("\n\nnamespace VeriNeural.Generated\n\n");
@@ -598,10 +604,7 @@ impl LeanProofEngine {
                             &mut theorems,
                             name,
                             module.output,
-                            &params,
-                            &arguments,
-                            &assumptions,
-                            &source_hypotheses,
+                            &claim_context,
                         )?;
                     }
                     ContractClaim::EqualsInput(port) => {
@@ -713,10 +716,7 @@ impl LeanProofEngine {
                                 &mut theorems,
                                 name,
                                 output,
-                                &params,
-                                &arguments,
-                                &assumptions,
-                                &source_hypotheses,
+                                &claim_context,
                             )?;
                         }
                         ContractClaim::EqualsInput(index) => {
@@ -1573,22 +1573,31 @@ fn prove_ideal_nonnegative(
     Ok(proof)
 }
 
+/// Shared, borrowed proof signature for independently claimed ideal-Int
+/// postconditions. Keeps source hypotheses explicit without bloating callers.
+struct IdealNonnegativeClaimContext<'a> {
+    params: &'a str,
+    arguments: &'a str,
+    assumptions: &'a [ProofAssumption],
+    source_hypotheses: &'a BTreeSet<usize>,
+}
+
 fn emit_ideal_nonnegative_claim(
     graph: &NeuralGraph,
     source: &mut String,
     names: &mut Vec<String>,
     theorem: String,
     output: NodeId,
-    params: &str,
-    arguments: &str,
-    assumptions: &[ProofAssumption],
-    source_hypotheses: &BTreeSet<usize>,
+    context: &IdealNonnegativeClaimContext<'_>,
 ) -> Result<(), ProofError> {
+    let params = context.params;
+    let arguments = context.arguments;
+    let assumptions = context.assumptions;
     let proof = prove_ideal_nonnegative(
         graph,
         output,
         arguments,
-        source_hypotheses,
+        context.source_hypotheses,
         &mut BTreeMap::new(),
     )?;
     // Keep the full positional hypothesis interface for every theorem, but
