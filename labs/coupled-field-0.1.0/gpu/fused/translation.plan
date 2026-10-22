@@ -1,0 +1,9 @@
+vn-translation-plan-v1
+threads=256
+kernel	7	mul_bias_relu	4	0:4,1:4,3:4	4	0
+kernel	10	mul_bias_relu	4	1:4,2:4,4:4	4	0
+kernel	12	add_relu	4	7:4,10:4	0	0
+kernel	15	mul_bias_relu	4	0:4,2:4,4:4	4	0
+kernel	18	mul_bias_relu	4	2:4,1:4,3:4	4	0
+kernel	20	add_relu	4	15:4,18:4	0	0
+kernel	22	add_relu	4	12:4,20:4	0	0

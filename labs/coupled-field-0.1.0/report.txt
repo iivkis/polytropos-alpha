@@ -1,0 +1,11 @@
+architecture=coupled-field
+version=0.1.0
+semantic_ir_sha256=9efb026ddffdcd6a52f209a26b185390cedb65bdff6f4478579155a466534049
+global_property=architecture_global_nonnegative
+lean=proven-under-declared-nonnegative-input-assumptions
+numeric_oracle=checked-integer-within-2^24
+gpu=baseline-fused-bitwise-tested
+translation=per-kernel-llvm-ptx-structural-validated
+cuda_jit_sass=trusted-not-proven
+parameter_values=explicitly-pinned-in-manifest
+artifact_root=explicit-lab-local
