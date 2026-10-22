@@ -286,8 +286,14 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
         first_graph
             .contains("write_checked_lean(&root.join(\"numeric.lean\"), &plan.lean_source()?)?")
     );
+    let (before_rne, after_rne) = second_graph
+        .split_once("let rne_plan =")
+        .expect("Stage 8 RNE graph");
+    assert!(!before_rne.contains("numeric_rne.lean"));
+    assert!(after_rne.contains(
+        "write_checked_lean(&root.join(\"numeric_rne.lean\"), rne_trace.lean_source())?"
+    ));
 }
-
 
 #[test]
 fn stage8_fractional_rne_trace_accumulates_nonzero_epsilon() {
