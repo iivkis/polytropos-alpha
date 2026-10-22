@@ -621,7 +621,10 @@ pub fn snapshot_architecture(
         .enumerate()
         .filter_map(|(i, node)| {
             (matches!(node.operation, Operation::Input)
-                && metadata.input_roles.get(&i).is_some_and(|role| role.as_str() == "input"))
+                && metadata
+                    .input_roles
+                    .get(&i)
+                    .is_some_and(|role| role.as_str() == "input"))
             .then_some(i)
         })
         .collect::<Vec<_>>();

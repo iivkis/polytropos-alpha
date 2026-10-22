@@ -357,7 +357,11 @@ mod tests {
         assert!(!snapshot.dot.contains("module_interface"));
         assert!(!snapshot.dot.contains("module_input_port"));
         assert!(snapshot.dot.contains(r#"vn_input_port_0="n0""#));
-        assert!(snapshot.dot.contains(r#"label="BOUNDARY RESPONSE  ·  m0\np0:n0"#));
+        assert!(
+            snapshot
+                .dot
+                .contains(r#"label="BOUNDARY RESPONSE  ·  m0\np0:n0"#)
+        );
         let has_edge = |source: &str, destination: &str| {
             let prefix = format!("{source} -> {destination} [");
             snapshot
