@@ -650,7 +650,10 @@ pub fn snapshot_architecture(
                     ("fillcolor", fill.into()),
                     ("color", outline.into()),
                     ("fontcolor", outline.into()),
-                    ("tooltip", format!("{} input {port} from n{}", module.name, source.index())),
+                    (
+                        "tooltip",
+                        format!("{} input {port} from n{}", module.name, source.index()),
+                    ),
                     ("vn_kind", "module_input_port".into()),
                     ("vn_visual_only", "true".into()),
                     ("vn_instance_path", paths[i].clone()),
@@ -747,8 +750,17 @@ pub fn snapshot_architecture(
                 ("vn_src_port", "output".into()),
                 ("vn_dst_port", format!("module_input_{port}")),
                 ("vn_role", role.into()),
-                ("vn_shape", format!("{:?}", graph.node(*source)
-                    .map_err(|err| bad(err.to_string()))?.shape.dims())),
+                (
+                    "vn_shape",
+                    format!(
+                        "{:?}",
+                        graph
+                            .node(*source)
+                            .map_err(|err| bad(err.to_string()))?
+                            .shape
+                            .dims()
+                    ),
+                ),
                 ("vn_dtype", "binary32".into()),
                 ("vn_transform", "identity".into()),
                 ("vn_order", port.to_string()),

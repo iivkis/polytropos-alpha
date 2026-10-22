@@ -353,8 +353,17 @@ mod tests {
         let ports: usize = lab.graph.modules().iter().map(|m| m.inputs.len()).sum();
         assert_eq!(snapshot.dot.matches(" -> ").count(), real_edges + ports);
         assert_eq!(snapshot.dot.matches("vn_semantic_dst=").count(), real_edges);
-        assert_eq!(snapshot.dot.matches("vn_kind=\"module_interface\"").count(), ports);
-        assert_eq!(snapshot.dot.matches("vn_kind=\"module_input_port\"").count(), ports);
+        assert_eq!(
+            snapshot.dot.matches("vn_kind=\"module_interface\"").count(),
+            ports
+        );
+        assert_eq!(
+            snapshot
+                .dot
+                .matches("vn_kind=\"module_input_port\"")
+                .count(),
+            ports
+        );
         assert!(!snapshot.dot.contains("module-input-port"));
         assert!(snapshot.dot.contains(r#"vn_input_port_0="n0""#));
         // Interface relays keep external wires near their owning modules.
