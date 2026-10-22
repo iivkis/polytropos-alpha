@@ -298,6 +298,8 @@ fn stage8_example_checks_each_lean_artifact_only_after_generation() {
     assert!(after_rne.contains("rne_mat_trace.lean_source()"));
     assert!(after_rne.contains("numeric_range.lean"));
     assert!(after_rne.contains("range_plan.lean_source()?"));
+    assert!(after_rne.contains("numeric_architecture.lean"));
+    assert!(after_rne.contains("architecture_plan.lean_source()?"));
 }
 
 #[test]
@@ -566,6 +568,44 @@ fn stage8_rne_range_contract_crosses_residual_ffn_module_boundary() {
     assert!(source.contains("exports q=30, ideal bound 34095104, epsilon 170 ticks"));
     assert!(source.contains("approx_contract_mul_rne"));
     assert!(source.contains("approx_contract_add_rne"));
+    assert!(!source.contains("sorry"));
+    assert!(!source.contains("admit"));
+}
+
+#[test]
+fn stage8_architecture_range_theorem_composes_two_module_boundaries() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![1, 2]).unwrap(), Domain::Finite);
+    let w1a = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2a = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w1b = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b1b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let w2b = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let b2b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let block = ResidualFfn::new(1, 2, 2).unwrap();
+    let hidden = graph
+        .apply_module(&block, &[x, w1a, b1a, w2a, b2a])
+        .unwrap();
+    let output = graph
+        .apply_module(&block, &[hidden, w1b, b1b, w2b, b2b])
+        .unwrap();
+
+    let plan = RneRangePlan::compile(&graph, output, 10, 16).unwrap();
+    let contract = plan.output_contract();
+    assert_eq!(contract.fraction_bits(), 50);
+    assert_eq!(contract.ideal_bound_ticks(), 53_928_163_016_704);
+    assert_eq!(contract.epsilon_ticks(), 184_963_072);
+
+    let source = plan.lean_source().unwrap();
+    assert!(source.contains("theorem module_0_global_contract"));
+    assert!(source.contains("theorem module_1_global_contract"));
+    assert!(source.contains("theorem architecture_global_contract"));
+    assert!(source.contains("have arch_module_0 := module_0_global_contract"));
+    assert!(source.contains("have arch_module_1 := module_1_global_contract"));
+    assert!(source.contains("arch_h_14_0 arch_h_14_1"));
+    assert!(source.contains("exact ⟨arch_h_20_0, arch_h_20_1⟩"));
     assert!(!source.contains("sorry"));
     assert!(!source.contains("admit"));
 }

@@ -14,7 +14,7 @@ use verineural::{
     ResidualFfn, RneFp32Plan, RneRangePlan, Shape, Tensor,
 };
 
-const FILES: [&str; 32] = [
+const FILES: [&str; 34] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -47,6 +47,8 @@ const FILES: [&str; 32] = [
     "rne_matmul_error.txt",
     "numeric_range.lean",
     "range_contract.txt",
+    "numeric_architecture.lean",
+    "architecture_contract.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -85,6 +87,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_rne.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_rne_matmul.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_range.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_architecture.lean"))?;
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
         "Scope: ideal integer ranges, concrete dyadic RNE traces, and reusable bounded RNE/module contracts; not machine FP32 certification"
@@ -424,6 +427,65 @@ fn main() -> Result<(), Box<dyn Error>> {
         ),
     )?;
 
+    // Architecture-level composition: the second ResidualFfn consumes the
+    // first module's output contract. The generated Lean theorem must compose
+    // module_0_global_contract -> module_1_global_contract instead of flattening
+    // both blocks into one proof body.
+    let mut architecture_graph = NeuralGraph::default();
+    let arch_x = architecture_graph.input(Shape::new(vec![1, 2])?, Domain::Finite);
+    let arch_w1a = architecture_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let arch_b1a = architecture_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let arch_w2a = architecture_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let arch_b2a = architecture_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let arch_w1b = architecture_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let arch_b1b = architecture_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let arch_w2b = architecture_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
+    let arch_b2b = architecture_graph.input(Shape::new(vec![2])?, Domain::Finite);
+    let arch_block = ResidualFfn::new(1, 2, 2)?;
+    let arch_hidden = architecture_graph.apply_module(
+        &arch_block,
+        &[arch_x, arch_w1a, arch_b1a, arch_w2a, arch_b2a],
+    )?;
+    let arch_output = architecture_graph.apply_module(
+        &arch_block,
+        &[arch_hidden, arch_w1b, arch_b1b, arch_w2b, arch_b2b],
+    )?;
+    let architecture_plan = RneRangePlan::compile(&architecture_graph, arch_output, 10, 16)?;
+    let architecture_contract = architecture_plan.output_contract();
+    if architecture_contract.fraction_bits() != 50
+        || architecture_contract.ideal_bound_ticks() != 53_928_163_016_704
+        || architecture_contract.epsilon_ticks() != 184_963_072
+    {
+        return Err(io::Error::other("unexpected Stage 8 architecture RNE contract").into());
+    }
+    let architecture_source = architecture_plan.lean_source()?;
+    if !architecture_source.contains("theorem architecture_global_contract")
+        || !architecture_source.contains("have arch_module_0 := module_0_global_contract")
+        || !architecture_source.contains("have arch_module_1 := module_1_global_contract")
+    {
+        return Err(io::Error::other("missing Stage 8 architecture composition theorem").into());
+    }
+    write_checked_lean(
+        &root.join("numeric_architecture.lean"),
+        &architecture_source,
+    )?;
+    fs::write(
+        root.join("architecture_contract.txt"),
+        format!(
+            "modules=2\nglobal_theorem=architecture_global_contract\n\
+             source_fraction_bits={}\nsource_bound_ticks={}\n\
+             output_fraction_bits={}\nideal_bound_ticks={}\nepsilon_ticks={}\n\
+             actual_bound_ticks={}\nepsilon={:.12e}\n",
+            architecture_plan.source_fraction_bits(),
+            architecture_plan.source_bound_ticks(),
+            architecture_contract.fraction_bits(),
+            architecture_contract.ideal_bound_ticks(),
+            architecture_contract.epsilon_ticks(),
+            architecture_contract.actual_bound_ticks(),
+            architecture_contract.epsilon(),
+        ),
+    )?;
+
     let input_snapshot = inputs
         .iter()
         .map(|(id, tensor)| {
@@ -497,11 +559,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         range_contract.epsilon_ticks()
     );
     println!(
+        "Stage 8 architecture composition: modules=2, q_out={}, ideal_bound={}, epsilon={} ticks",
+        architecture_contract.fraction_bits(),
+        architecture_contract.ideal_bound_ticks(),
+        architecture_contract.epsilon_ticks()
+    );
+    println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, and a whole-ResidualFfn elementwise composition theorem; LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, and a two-module architecture composition theorem; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }

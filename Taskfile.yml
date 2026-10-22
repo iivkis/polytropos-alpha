@@ -117,7 +117,7 @@ tasks:
       - cargo run -p verineural --example stage7_benchmark --release
 
   numeric-stage8:
-    desc: Prove Stage 8 integer/RNE, reusable range contracts and whole-module composition; compare CUDA and pin evidence
+    desc: Prove Stage 8 integer/RNE, range, whole-module and architecture composition; compare CUDA and pin evidence
     cmds:
       - cargo run -p verineural --example stage8_exact
 

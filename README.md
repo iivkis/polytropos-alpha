@@ -244,14 +244,16 @@ let model = plan.lean_source()?;
 
 Первый module-boundary пример использует `ResidualFfn(1, 2, 2)` при source `q=10`, `|ticks| ≤ 16`. Две MatMul, bias, ReLU и residual add выводят `q_out=30`, ideal bound `34 095 104` ticks, `ε=170` ticks и actual bound `34 095 274` ticks. `RneRangePlan::module_contracts()` экспортирует эту сводку на границе вызова `residual_ffn`; `range_contract.txt` и `numeric_range.lean` включены в Stage 8 evidence bundle.
 
-`task numeric-stage8` теперь проверяет пять Lean-артефактов: `numeric.lean`, `numeric_matmul.lean`, `numeric_rne.lean`, `numeric_rne_matmul.lean`, `numeric_range.lean`. Manifest расширен до 32 evidence-файлов. `task verify-numeric-stage8` повторно проверяет Lean и SHA-256 без GPU.
+`task numeric-stage8` теперь проверяет шесть Lean-артефактов: `numeric.lean`, `numeric_matmul.lean`, `numeric_rne.lean`, `numeric_rne_matmul.lean`, `numeric_range.lean`, `numeric_architecture.lean`. Новый architecture slice расширяет manifest до 34 evidence-файлов. `task verify-numeric-stage8` повторно проверяет Lean и SHA-256 без GPU.
 
 ```sh
 task numeric-stage8
 task verify-numeric-stage8
 ```
 
-**Граница гарантии:** подтверждённый range slice доказывает локальные bound/ε transfer rules и их конкретные node-инстанциации. Новый, ещё не проверенный локально генератор теперь дополнительно строит `module_<n>_global_contract`: одну Lean-теорему на `ModuleInvocation`, которая останавливается на declared module inputs, разворачивает flattened Add/Mul/BiasAdd/ReLU/Reshape и каждую строку/колонку MatMul с explicit product/sum RNE witnesses, а в заключении одновременно гарантирует `ApproxContract` для всех элементов выходного тензора. Для undeclared captured input генерация fail-closed. Это уже математическая композиция конкретного блока, но пока не универсальная теорема для произвольной глубины nested module hierarchy как единого architecture-level свойства. Также не закрыты FMA/contract behavior, FTZ/subnormal, NaN/Infinity, signed zero, overflow за текущим fail-closed профилем, условные ветви и translation validation. Новый whole-module slice ожидает локальной проверки; Stage 8 не завершён.
+**Граница гарантии:** whole-module slice локально подтверждён пользователем после formatting-коммита `489f5eb`: check/test/clippy, Stage 5 certificate, `task numeric-stage8` и offline verify прошли; 57 Rust-тестов были зелёными, а Stage 8 manifest стал `0fdf33efe2bc38014016d5777b35590753622cd3d32b51c74a0405b24bb60896`. `module_<n>_global_contract` действительно проверен Lean для полного `ResidualFfn` и fail-closed при undeclared capture.
+
+Новый, ещё не проверенный локально architecture slice строит `architecture_global_contract` для цепочки нескольких `ModuleInvocation`. В отличие от flattening он вызывает уже доказанный `module_0_global_contract`, извлекает его output `ApproxContract` и передаёт их как входные доказательства в `module_1_global_contract`. Контрольный граф содержит два последовательных `ResidualFfn(1,2,2)`: при q10 и source bound 16 итог имеет q50, ideal bound `53 928 163 016 704` ticks и `ε=184 963 072` ticks. `numeric_architecture.lean` и `architecture_contract.txt` расширяют Stage 8 evidence bundle до 34 файлов. Произвольная разветвлённая иерархия и architecture-level свойства помимо выходного численного контракта ещё не закрыты. Также не закрыты FMA/contract behavior, FTZ/subnormal, NaN/Infinity, signed zero, overflow за текущим fail-closed профилем, условные ветви и translation validation. Новый architecture-composition slice ожидает локальной проверки; Stage 8 не завершён.
 
 ## Git-процесс
 
