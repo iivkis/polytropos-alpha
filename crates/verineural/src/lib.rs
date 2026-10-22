@@ -35,6 +35,7 @@ mod modules;
 mod numeric;
 mod proof;
 mod tensor;
+mod subnormal;
 
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
@@ -54,6 +55,7 @@ pub use numeric::{
 };
 pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
 pub use tensor::{Shape, Tensor, TensorShape};
+pub use subnormal::{subnormal_add_exact_bits, subnormal_mul_rne_bits, subnormal_relu_bits};
 
 #[cfg(test)]
 mod tests;

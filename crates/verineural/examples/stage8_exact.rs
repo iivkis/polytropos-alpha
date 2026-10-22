@@ -13,9 +13,10 @@ use verineural::{
     Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, MathContract, NeuralGraph,
     NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd, ResidualFfn, RneFp32Plan,
     RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx,
+    subnormal_add_exact_bits, subnormal_mul_rne_bits, subnormal_relu_bits,
 };
 
-const FILES: [&str; 55] = [
+const FILES: [&str; 63] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -56,6 +57,14 @@ const FILES: [&str; 55] = [
     "fused_fma/graph.ptx",
     "fma_probe_inputs.bits",
     "fma_probe_output.bits",
+    "numeric_subnormal.lean",
+    "baseline_subnormal/graph.ll",
+    "baseline_subnormal/graph.ptx",
+    "fused_subnormal/graph.ll",
+    "fused_subnormal/graph.ptx",
+    "subnormal_inputs.bits",
+    "subnormal_output.bits",
+    "subnormal_evidence.txt",
     "fp32_contraction_report.txt",
     "numeric_architecture.lean",
     "architecture_contract.txt",
@@ -73,7 +82,7 @@ const FILES: [&str; 55] = [
     "architecture_property_matmul_bias_contract.txt",
 ];
 
-const PTX_PROFILES: [&str; 10] = [
+const PTX_PROFILES: [&str; 12] = [
     "baseline",
     "fused",
     "baseline_matmul",
@@ -84,6 +93,8 @@ const PTX_PROFILES: [&str; 10] = [
     "fused_rne_matmul",
     "baseline_fma",
     "fused_fma",
+    "baseline_subnormal",
+    "fused_subnormal",
 ];
 
 /// Recheck the actually saved PTX/LLVM pairs, not only the Rust generator.
@@ -142,6 +153,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_rne_matmul.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_range.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_threshold.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_subnormal.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_architecture.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_architecture_dag.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_nested.lean"))?;
@@ -784,6 +796,141 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     fs::write(root.join("fma_probe_output.bits"), "00000000\n")?;
 
+    // Gradual-underflow slice: the reference path uses integer significands
+    // and the 2^-149 subnormal lattice. It never executes host f32 arithmetic
+    // to obtain expected bits. Exact results exercise input denormals, output
+    // denormals, halfway ties-to-even, normal/subnormal crossing, and ReLU.
+    //
+    // These concrete tests do NOT enlarge the old finite-normal RneFp32Plan
+    // Lean proof domain. The new Lean evidence proves lattice facts only.
+    let lhs_bits: [u32; 8] = [
+        0x0080_0000, // min normal * 1/2 => subnormal
+        0x0080_0000, // min normal * 2^-24 => halfway zero
+        0x0000_0001, // min subnormal * 1/2 => halfway zero
+        0x0000_0003, // 3 min subnormal * 1/2 => 2 ticks, ties-to-even
+        0x0000_0001, // min subnormal * 1 => 1 tick, then bias
+        0x0080_0001, // midpoint after multiplication, even tick wins
+        0x8000_0001, // negative subnormal input -> ReLU +0
+        0x007f_ffff, // largest subnormal plus bias -> min normal
+    ];
+    let rhs_bits: [u32; 8] = [
+        0x3f00_0000, 0x3380_0000, 0x3f00_0000, 0x3f00_0000,
+        0x3f80_0000, 0x3f00_0000, 0x3f80_0000, 0x3f80_0000,
+    ];
+    let bias_bits: [u32; 8] = [0, 0, 0, 0, 1, 0, 0, 1];
+    let expected_fixed: [u32; 8] = [
+        0x0040_0000, 0, 0, 2, 2, 0x0040_0000, 0, 0x0080_0000,
+    ];
+    let mut expected_subnormal = Vec::with_capacity(lhs_bits.len());
+    let mut subnormal_evidence = String::from(
+        "model=integer-significand-exact-product-and-subnormal-RNE-lattice\n\
+         fractional_ulp=2^-149\n\
+         scope=finite-binary32-mul-to-subnormal-or-smallest-normal,exact-subnormal-add,ReLU\n\
+         lean_model=integer-half-tick-ties-even-examples-not-full-IEEE\n\
+         observed_gpu=baseline-and-fused-CUDA-Graph-bitwise\n\
+         machine_fp32_sass_jit=trusted-not-proven\n",
+    );
+    for lane in 0..lhs_bits.len() {
+        let product = subnormal_mul_rne_bits(lhs_bits[lane], rhs_bits[lane])
+            .ok_or_else(|| io::Error::other("subnormal product outside integer oracle domain"))?;
+        let biased = subnormal_add_exact_bits(product, bias_bits[lane])
+            .ok_or_else(|| io::Error::other("subnormal bias outside integer oracle domain"))?;
+        let expected = subnormal_relu_bits(biased)
+            .ok_or_else(|| io::Error::other("subnormal ReLU outside integer oracle domain"))?;
+        if expected != expected_fixed[lane] {
+            return Err(io::Error::other("subnormal integer oracle fixture regression").into());
+        }
+        expected_subnormal.push(expected);
+        subnormal_evidence.push_str(&format!(
+            "lane={lane} lhs={:08x} rhs={:08x} bias={:08x} product={product:08x} expected={expected:08x}\n",
+            lhs_bits[lane], rhs_bits[lane], bias_bits[lane]
+        ));
+    }
+    let mut subnormal_graph = NeuralGraph::default();
+    let subnormal_shape = Shape::new(vec![1, lhs_bits.len()])?;
+    let subnormal_x = subnormal_graph.input(subnormal_shape.clone(), Domain::Finite);
+    let subnormal_y = subnormal_graph.input(subnormal_shape.clone(), Domain::Finite);
+    let subnormal_bias = subnormal_graph.input(Shape::new(vec![lhs_bits.len()])?, Domain::Finite);
+    let subnormal_product = subnormal_graph.mul(subnormal_x, subnormal_y)?;
+    let subnormal_biased = subnormal_graph.bias_add(subnormal_product, subnormal_bias)?;
+    let subnormal_output = subnormal_graph.relu(subnormal_biased)?;
+    let subnormal_inputs = [
+        (
+            subnormal_x,
+            Tensor::new(
+                subnormal_shape.clone(),
+                lhs_bits.iter().map(|&bits| f32::from_bits(bits)).collect(),
+            )?,
+        ),
+        (
+            subnormal_y,
+            Tensor::new(
+                subnormal_shape,
+                rhs_bits.iter().map(|&bits| f32::from_bits(bits)).collect(),
+            )?,
+        ),
+        (
+            subnormal_bias,
+            Tensor::new(
+                Shape::new(vec![bias_bits.len()])?,
+                bias_bits.iter().map(|&bits| f32::from_bits(bits)).collect(),
+            )?,
+        ),
+    ];
+    for (label, engine) in [
+        ("baseline_subnormal", &baseline),
+        ("fused_subnormal", &fused),
+    ] {
+        let program = engine.compile(&subnormal_graph, subnormal_output)?;
+        if label == "fused_subnormal" && program.removed_kernel_count() != 2 {
+            return Err(io::Error::other("subnormal Mul/BiasAdd/ReLU fusion missing").into());
+        }
+        let output = engine.execute(&program, &subnormal_inputs, &root.join(label))?;
+        if output.values().len() != expected_subnormal.len() {
+            return Err(io::Error::other("subnormal GPU output length mismatch").into());
+        }
+        for (lane, (&observed, &expected)) in output
+            .values()
+            .iter()
+            .zip(expected_subnormal.iter())
+            .enumerate()
+        {
+            if observed.to_bits() != expected {
+                return Err(io::Error::other(format!(
+                    "{label}: subnormal gradual-underflow mismatch at lane {lane}: expected={expected:08x}, observed={:08x}",
+                    observed.to_bits()
+                )).into());
+            }
+        }
+        println!(
+            "Stage 8 {label}: {} gradual-underflow, RNE tie and FTZ-sensitive GPU values match integer oracle",
+            expected_subnormal.len()
+        );
+    }
+    fs::write(
+        root.join("subnormal_inputs.bits"),
+        (0..lhs_bits.len())
+            .map(|lane| {
+                format!(
+                    "lane={lane} lhs={:08x} rhs={:08x} bias={:08x}\n",
+                    lhs_bits[lane], rhs_bits[lane], bias_bits[lane]
+                )
+            })
+            .collect::<String>(),
+    )?;
+    fs::write(
+        root.join("subnormal_output.bits"),
+        expected_subnormal
+            .iter()
+            .map(|bits| format!("{bits:08x}\n"))
+            .collect::<String>(),
+    )?;
+    fs::write(root.join("subnormal_evidence.txt"), &subnormal_evidence)?;
+    write_checked_lean(
+        &root.join("numeric_subnormal.lean"),
+        include_str!("../../../lean/VeriNeural/Subnormal.lean"),
+    )?;
+
     // Reusable range contract over a composed module. Unlike the concrete RNE
     // traces above, the values are arbitrary within the source tick interval.
     // Lean proves the scalar transfer rules under Binary32RneTick hypotheses;
@@ -1413,12 +1560,13 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 FP32 PTX audit: explicit separate RNE mul/add, no emitted FMA/FTZ (LLVM/PTX static check only)"
     );
+    println!("Stage 8 gradual underflow: 8 signed/subnormal lanes in both baseline/fused kernels; integer bit oracle plus Lean half-tick model");
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; a PTX opcode audit and adversarial FMA probe have been checked, but LLVM/PTX-to-machine translation and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; a PTX opcode audit, FMA probe, and subnormal bit-oracle GPU probes have been checked; integer half-tick Lean lemmas cover only selected boundary examples; LLVM/PTX-to-machine translation and hardware remain trusted"
     );
     Ok(())
 }
