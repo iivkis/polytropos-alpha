@@ -149,6 +149,30 @@ impl Tensor<f32> {
         Self::new(shape, values)
     }
 
+    /// Canonical 0/1 positive mask: NaN and signed zero both take false.
+    /// This host operation is a reference, not an IEEE/GPU proof.
+    pub fn positive_mask(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            values: self.values.iter().map(|&v| if v > 0.0 { 1.0 } else { 0.0 }).collect(),
+        }
+    }
+
+    /// Select the original binary32 payload from one branch, without arithmetic,
+    /// using a strict positive comparison. The result has the branches' shape.
+    pub fn select_positive(&self, yes: &Self, no: &Self) -> Result<Self, NeuralError> {
+        let shape = Operation::SelectPositive.infer_shape(&[
+            self.shape.clone(),
+            yes.shape.clone(),
+            no.shape.clone(),
+        ])?;
+        let values = self.values.iter().zip(&yes.values).zip(&no.values)
+            .map(|((&mask, &on_true), &on_false)| {
+                if mask > 0.0 { on_true } else { on_false }
+            }).collect();
+        Self::new(shape, values)
+    }
+
     /// Elementwise max(x, 0), preserving NaN instead of silently hiding it.
     pub fn relu(&self) -> Self {
         Self {

@@ -108,6 +108,8 @@ fn operation_title(operation: &Operation) -> &'static str {
         Operation::Mul => "Multiply",
         Operation::BiasAdd => "Bias add",
         Operation::Relu => "ReLU",
+        Operation::PositiveMask => "Positive mask",
+        Operation::SelectPositive => "Select positive",
         Operation::MatMul => "MatMul",
         Operation::Sqrt => "Sqrt",
         Operation::Reshape(_) => "Reshape",

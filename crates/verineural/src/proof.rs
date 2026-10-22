@@ -280,6 +280,8 @@ impl LeanProofEngine {
                 | Operation::MatMul
                 | Operation::BiasAdd
                 | Operation::Relu
+                | Operation::PositiveMask
+                | Operation::SelectPositive
                 | Operation::Reshape(_) => {}
                 _ => {
                     return Err(ProofError::UnsupportedOperation {
@@ -405,6 +407,17 @@ impl LeanProofEngine {
                 Operation::Relu => {
                     format!("VeriNeural.relu {}", call(node.inputs[0].index()))
                 }
+                Operation::PositiveMask => {
+                    format!("VeriNeural.positiveMask {}", call(node.inputs[0].index()))
+                }
+                Operation::SelectPositive => {
+                    format!(
+                        "VeriNeural.selectPositive {} {} {}",
+                        call(node.inputs[0].index()),
+                        call(node.inputs[1].index()),
+                        call(node.inputs[2].index())
+                    )
+                }
                 Operation::Reshape(_) => {
                     format!("VeriNeural.reshape {}", call(node.inputs[0].index()))
                 }
@@ -485,6 +498,21 @@ impl LeanProofEngine {
                             call(node.inputs[0].index())
                         )
                     }
+                    Operation::PositiveMask => {
+                        format!(
+                            "VeriNeural.positiveMask_nonnegative {}",
+                            call(node.inputs[0].index())
+                        )
+                    }
+                    Operation::SelectPositive => {
+                        let yes = node.inputs[1].index();
+                        let no = node.inputs[2].index();
+                        format!(
+                            "VeriNeural.selectPositive_nonnegative {} {} {} ({}) ({})",
+                            call(node.inputs[0].index()), call(yes), call(no),
+                            proof_call(yes), proof_call(no)
+                        )
+                    }
                     Operation::Reshape(_) => {
                         let prev = node.inputs[0].index();
                         format!(
@@ -501,7 +529,10 @@ impl LeanProofEngine {
                 // parameter so existing proof applications remain unchanged, but
                 // mark only genuinely unused binders with Lean's underscore prefix.
                 let node_proof_params =
-                    if matches!(node.operation, Operation::Input | Operation::Relu) {
+                    if matches!(
+                        node.operation,
+                        Operation::Input | Operation::Relu | Operation::PositiveMask
+                    ) {
                         let hypothesis_binders = assumptions
                             .iter()
                             .map(|assumption| {
@@ -1493,6 +1524,23 @@ fn prove_module_node_nonnegative(
                 call(node.inputs[0].index())
             )
         }
+        Operation::PositiveMask => {
+            format!("VeriNeural.positiveMask_nonnegative {}", call(node.inputs[0].index()))
+        }
+        Operation::SelectPositive => {
+            let yes = node.inputs[1].index();
+            let no = node.inputs[2].index();
+            let hy = prove_module_node_nonnegative(
+                graph, module_index, yes, arguments, boundary, traversal, module_proofs,
+            )?;
+            let hn = prove_module_node_nonnegative(
+                graph, module_index, no, arguments, boundary, traversal, module_proofs,
+            )?;
+            format!(
+                "VeriNeural.selectPositive_nonnegative {} {} {} ({hy}) ({hn})",
+                call(node.inputs[0].index()), call(yes), call(no)
+            )
+        }
         Operation::Reshape(_) => {
             let input = node.inputs[0].index();
             let input_proof = prove_module_node_nonnegative(
@@ -1535,6 +1583,23 @@ fn prove_ideal_nonnegative(
     let proof = match node.operation {
         Operation::Input if source_hypotheses.contains(&index) => format!("h_{index}"),
         Operation::Relu => format!("VeriNeural.relu_nonnegative {}", call(node.inputs[0])),
+        Operation::PositiveMask => {
+            format!("VeriNeural.positiveMask_nonnegative {}", call(node.inputs[0]))
+        }
+        Operation::SelectPositive => {
+            let yes = node.inputs[1];
+            let no = node.inputs[2];
+            let hy = prove_ideal_nonnegative(
+                graph, yes, arguments, source_hypotheses, cache,
+            )?;
+            let hn = prove_ideal_nonnegative(
+                graph, no, arguments, source_hypotheses, cache,
+            )?;
+            format!(
+                "VeriNeural.selectPositive_nonnegative {} {} {} ({hy}) ({hn})",
+                call(node.inputs[0]), call(yes), call(no)
+            )
+        }
         Operation::Reshape(_) => {
             let input = node.inputs[0];
             let h = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;

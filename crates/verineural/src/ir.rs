@@ -92,6 +92,10 @@ pub enum Operation {
     MatMul,
     BiasAdd,
     Relu,
+    /// Elementwise 1 when x > 0, otherwise 0 (including NaN in host f32).
+    PositiveMask,
+    /// Choose true/false tensors by mask > 0, preserving selected element bits.
+    SelectPositive,
     Sqrt,
     Reshape(Shape),
 }
@@ -105,6 +109,8 @@ impl Operation {
             Self::MatMul => "matmul",
             Self::BiasAdd => "bias_add",
             Self::Relu => "relu",
+            Self::PositiveMask => "positive_mask",
+            Self::SelectPositive => "select_positive",
             Self::Sqrt => "sqrt",
             Self::Reshape(_) => "reshape",
         }
@@ -114,7 +120,8 @@ impl Operation {
         match self {
             Self::Input => 0,
             Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd => 2,
-            Self::Relu | Self::Sqrt | Self::Reshape(_) => 1,
+            Self::SelectPositive => 3,
+            Self::Relu | Self::PositiveMask | Self::Sqrt | Self::Reshape(_) => 1,
         }
     }
 
@@ -131,12 +138,14 @@ impl Operation {
             });
         }
         match self {
-            Self::Add | Self::Mul => {
-                if inputs[0] != inputs[1] {
-                    return Err(NeuralError::ShapeMismatch {
-                        expected: inputs[0].clone(),
-                        actual: inputs[1].clone(),
-                    });
+            Self::Add | Self::Mul | Self::SelectPositive => {
+                for other in &inputs[1..] {
+                    if inputs[0] != *other {
+                        return Err(NeuralError::ShapeMismatch {
+                            expected: inputs[0].clone(),
+                            actual: other.clone(),
+                        });
+                    }
                 }
                 Ok(inputs[0].clone())
             }
@@ -183,7 +192,7 @@ impl Operation {
                 }
                 Ok(inputs[0].clone())
             }
-            Self::Relu | Self::Sqrt => Ok(inputs[0].clone()),
+            Self::Relu | Self::PositiveMask | Self::Sqrt => Ok(inputs[0].clone()),
             Self::Reshape(output) => {
                 if inputs[0].element_count() != output.element_count() {
                     return Err(NeuralError::ElementCountMismatch {
@@ -215,7 +224,20 @@ impl Operation {
                     Domain::Any
                 }
             }
-            Self::Sqrt => Domain::NonNegativeFinite,
+            Self::Sqrt | Self::PositiveMask => Domain::NonNegativeFinite,
+            Self::SelectPositive => {
+                if inputs[1].satisfies(Domain::NonNegativeFinite)
+                    && inputs[2].satisfies(Domain::NonNegativeFinite)
+                {
+                    Domain::NonNegativeFinite
+                } else if inputs[1].satisfies(Domain::Finite)
+                    && inputs[2].satisfies(Domain::Finite)
+                {
+                    Domain::Finite
+                } else {
+                    Domain::Any
+                }
+            }
             Self::Reshape(_) => inputs[0],
             Self::Input | Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd => Domain::Any,
         }
@@ -554,6 +576,21 @@ impl NeuralGraph {
 
     pub fn relu(&mut self, a: NodeId) -> Result<NodeId, NeuralError> {
         self.apply(Operation::Relu, &[a])
+    }
+
+    /// Pointwise 0/1 mask for the strict positive branch (NaN takes false branch).
+    pub fn positive_mask(&mut self, a: NodeId) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::PositiveMask, &[a])
+    }
+
+    /// Elementwise conditional selection, no implicit broadcast or arithmetic.
+    pub fn select_positive(
+        &mut self,
+        mask: NodeId,
+        yes: NodeId,
+        no: NodeId,
+    ) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::SelectPositive, &[mask, yes, no])
     }
 
     pub fn sqrt(&mut self, a: NodeId) -> Result<NodeId, NeuralError> {

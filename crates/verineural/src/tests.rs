@@ -1814,3 +1814,165 @@ fn p1_symbolic_specialization_rolls_back_wrong_output_and_preserves_provenance()
     assert_eq!(graph.nodes().len(), 1);
     assert!(graph.modules().is_empty());
 }
+
+
+#[test]
+fn p1_mask_select_primitives_validate_shapes_domains_and_host_values() {
+    let tensor_shape = shape(&[5]);
+    let mask = Tensor::new(tensor_shape.clone(), vec![-1.0, -0.0, 0.0, 2.0, f32::NAN]).unwrap();
+    let yes = Tensor::new(tensor_shape.clone(), vec![1.0, 2.0, 3.0, f32::INFINITY, 5.0]).unwrap();
+    let no = Tensor::new(tensor_shape.clone(), vec![6.0, 7.0, 8.0, 9.0, -0.0]).unwrap();
+    let binary = mask.positive_mask();
+    assert_eq!(binary.values(), &[0.0, 0.0, 0.0, 1.0, 0.0]);
+    let chosen = mask.select_positive(&yes, &no).unwrap();
+    assert_eq!(chosen.values()[..4], [6.0, 7.0, 8.0, f32::INFINITY]);
+    assert_eq!(chosen.values()[4].to_bits(), (-0.0f32).to_bits());
+
+    let wrong = Tensor::new(shape(&[4]), vec![1.0; 4]).unwrap();
+    assert!(matches!(
+        mask.select_positive(&wrong, &no),
+        Err(NeuralError::ShapeMismatch { .. })
+    ));
+    let mut graph = NeuralGraph::default();
+    let condition = graph.input(tensor_shape.clone(), Domain::Any);
+    let true_branch = graph.input(tensor_shape.clone(), Domain::NonNegativeFinite);
+    let false_branch = graph.input(tensor_shape.clone(), Domain::NonNegativeFinite);
+    let mask_node = graph.positive_mask(condition).unwrap();
+    assert_eq!(graph.node(mask_node).unwrap().domain, Domain::NonNegativeFinite);
+    let selected = graph.select_positive(mask_node, true_branch, false_branch).unwrap();
+    assert_eq!(graph.node(selected).unwrap().domain, Domain::NonNegativeFinite);
+    let other_shape = graph.input(shape(&[4]), Domain::Any);
+    let nodes = graph.nodes().len();
+    assert!(matches!(
+        graph.select_positive(mask_node, true_branch, other_shape),
+        Err(NeuralError::ShapeMismatch { .. })
+    ));
+    assert_eq!(graph.nodes().len(), nodes);
+
+    let any_branch = graph.input(tensor_shape, Domain::Any);
+    let unknown_output = graph.select_positive(mask_node, true_branch, any_branch).unwrap();
+    assert_eq!(graph.node(unknown_output).unwrap().domain, Domain::Any);
+}
+
+#[test]
+fn p1_mask_select_lean_contract_and_numeric_gpu_profiles_fail_closed() {
+    let mut graph = NeuralGraph::default();
+    let condition = graph.input(shape(&[2]), Domain::Any);
+    let yes = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let no = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let expr = PrimitiveExpr::Apply(
+        Operation::SelectPositive,
+        vec![
+            PrimitiveExpr::Apply(Operation::PositiveMask, vec![PrimitiveExpr::Port(0)]),
+            PrimitiveExpr::Port(1),
+            PrimitiveExpr::Port(2),
+        ],
+    );
+    let module = PrimitiveSpec::new(
+        "consumer_gated_select",
+        "v1",
+        MathContract::new(
+            vec![
+                port(&[2], Domain::Any),
+                port(&[2], Domain::NonNegativeFinite),
+                port(&[2], Domain::NonNegativeFinite),
+            ],
+            port(&[2], Domain::NonNegativeFinite),
+        )
+        .with_claim(ContractClaim::Nonnegative),
+        expr,
+    ).unwrap();
+    let result = module.apply(&mut graph, &[condition, yes, no]).unwrap();
+    let program = LeanProofEngine::default().generate(&graph, result).unwrap();
+    assert!(program.source().contains("VeriNeural.positiveMask"));
+    assert!(program.source().contains("VeriNeural.selectPositive"));
+    assert!(program.source().contains("VeriNeural.selectPositive_nonnegative"));
+    assert!(program.theorem_names().iter().any(|n| n == "module_0_claim_0"));
+
+    assert!(matches!(
+        GpuEngine::default().compile(&graph, result),
+        Err(GpuError::UnsupportedOperation {
+            operation: "select_positive", ..
+        })
+    ));
+    assert!(matches!(
+        ExactFp32Plan::compile(&graph, result),
+        Err(NumericError::UnsupportedOperation {
+            operation: "select_positive", ..
+        })
+    ));
+    assert!(matches!(
+        RneFp32Plan::compile(&graph, result, 10),
+        Err(NumericError::UnsupportedOperation {
+            operation: "select_positive", ..
+        })
+    ));
+
+    // A false ideal-Int claim may never be accepted merely because the
+    // condition and one selected branch are nonnegative.
+    let bad = graph.input(shape(&[2]), Domain::Any);
+    let invalid_contract = MathContract::new(
+        vec![
+            port(&[2], Domain::Any),
+            port(&[2], Domain::NonNegativeFinite),
+            port(&[2], Domain::Any),
+        ],
+        port(&[2], Domain::Any),
+    ).with_claim(ContractClaim::Nonnegative);
+    let bad_module = PrimitiveSpec::new(
+        "incorrect_gated_claim", "v1", invalid_contract,
+        PrimitiveExpr::Apply(Operation::SelectPositive, vec![
+            PrimitiveExpr::Port(0), PrimitiveExpr::Port(1), PrimitiveExpr::Port(2),
+        ]),
+    ).unwrap();
+    let result = bad_module.apply(&mut graph, &[condition, yes, bad]).unwrap();
+    assert!(matches!(
+        LeanProofEngine::default().generate(&graph, result),
+        Err(ProofError::UnsupportedGuarantee { .. })
+    ));
+}
+
+#[test]
+fn p1_recurrent_gated_select_proves_bounded_state_invariant() {
+    struct Gate {
+        contract: MultiOutputContract,
+    }
+    impl MultiOutputModule for Gate {
+        fn name(&self) -> &'static str { "consumer_gated_transition" }
+        fn contract(&self) -> &MultiOutputContract { &self.contract }
+        fn build(
+            &self, graph: &mut NeuralGraph, inputs: &[NodeId],
+        ) -> Result<Vec<NodeId>, NeuralError> {
+            let mask = graph.positive_mask(inputs[1])?;
+            let next = graph.select_positive(mask, inputs[1], inputs[0])?;
+            let out = graph.relu(next)?;
+            Ok(vec![next, out])
+        }
+    }
+
+    let p = port(&[2], Domain::NonNegativeFinite);
+    let named = |name| NamedPortContract::new(name, p.clone());
+    let module = Gate {
+        contract: MultiOutputContract {
+            inputs: vec![named("state"), named("input")],
+            outputs: vec![
+                NamedPortContract {
+                    name: "next_state", port: p.clone(),
+                    claims: vec![ContractClaim::Nonnegative],
+                },
+                named("output"),
+            ],
+        },
+    };
+    let mut graph = NeuralGraph::default();
+    let s0 = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let x0 = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let x1 = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let scan = graph.scan_fixed(&module, s0, &[x0, x1]).unwrap();
+    let proof = LeanProofEngine::default()
+        .generate_fixed_scan_nonnegative(&graph, &scan, "gated")
+        .unwrap();
+    assert!(proof.theorem_names().iter().any(|n| n == "scan_gated_global_nonnegative"));
+    assert!(proof.source().contains("VeriNeural.selectPositive_nonnegative"));
+    assert!(proof.source().contains("multi_1_port_0_claim_0"));
+}

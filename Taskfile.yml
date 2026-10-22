@@ -86,6 +86,11 @@ tasks:
     cmds:
       - cargo run -p verineural --example scan_invariant
 
+  proof-gated-select:
+    desc: Check generic positive mask and conditional select with bounded Lean state invariant (GPU fail-closed)
+    cmds:
+      - cargo run -p verineural --example gated_select
+
   symbolic-shapes:
     desc: Verify two consumer symbolic-shape specializations with Lean and LLVM NVPTX (no GPU execution)
     cmds:

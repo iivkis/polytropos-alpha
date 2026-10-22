@@ -25,6 +25,15 @@ def mul {n : Nat} (a b : Tensor n) : Tensor n :=
 def relu {n : Nat} (a : Tensor n) : Tensor n :=
   fun i => max (a i) 0
 
+/-- Ideal integer mask: strict positivity becomes 1, everything else 0.
+    Finite integer values have no NaN, unlike the separate f32 host profile. -/
+def positiveMask {n : Nat} (a : Tensor n) : Tensor n :=
+  fun i => if 0 < a i then 1 else 0
+
+/-- Elementwise conditional selection, no broadcasting or mutation. -/
+def selectPositive {n : Nat} (mask yes no : Tensor n) : Tensor n :=
+  fun i => if 0 < mask i then yes i else no i
+
 /-- Reshape keeps the flat element order, after proving equal element counts. -/
 def reshape {n : Nat} (a : Tensor n) : Tensor n := a
 
@@ -57,6 +66,14 @@ theorem mul_pointwise {n : Nat} (a b : Tensor n) (i : Fin n) :
 
 theorem relu_pointwise {n : Nat} (a : Tensor n) (i : Fin n) :
     relu a i = max (a i) 0 := by
+  rfl
+
+theorem positiveMask_pointwise {n : Nat} (a : Tensor n) (i : Fin n) :
+    positiveMask a i = (if 0 < a i then 1 else 0) := by
+  rfl
+
+theorem selectPositive_pointwise {n : Nat} (mask yes no : Tensor n) (i : Fin n) :
+    selectPositive mask yes no i = (if 0 < mask i then yes i else no i) := by
   rfl
 
 theorem reshape_pointwise {n : Nat} (a : Tensor n) (i : Fin n) :
@@ -119,6 +136,21 @@ theorem relu_nonnegative {n : Nat} (a : Tensor n) :
     Nonnegative (relu a) := by
   intro i
   exact Int.le_max_right (a i) 0
+
+theorem positiveMask_nonnegative {n : Nat} (a : Tensor n) :
+    Nonnegative (positiveMask a) := by
+  intro i
+  unfold positiveMask
+  split <;> decide
+
+theorem selectPositive_nonnegative {n : Nat} (mask yes no : Tensor n)
+    (hy : Nonnegative yes) (hn : Nonnegative no) :
+    Nonnegative (selectPositive mask yes no) := by
+  intro i
+  unfold selectPositive
+  split
+  · exact hy i
+  · exact hn i
 
 theorem reshape_nonnegative {n : Nat} (a : Tensor n)
     (ha : Nonnegative a) : Nonnegative (reshape a) := by
