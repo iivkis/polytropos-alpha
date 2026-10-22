@@ -874,7 +874,7 @@ impl NeuralModule for CapturedDependencyModule {
 }
 
 #[test]
-fn stage8_module_global_range_theorem_rejects_undeclared_graph_capture() {
+fn stage8_module_boundary_rejects_undeclared_capture_before_numeric_proof() {
     let mut graph = NeuralGraph::default();
     let shape = Shape::new(vec![1]).unwrap();
     let declared = graph.input(shape.clone(), Domain::Finite);
@@ -883,19 +883,41 @@ fn stage8_module_global_range_theorem_rejects_undeclared_graph_capture() {
         captured,
         contract: MathContract::new(
             vec![PortContract::new(shape.clone(), Domain::Finite)],
+            PortContract::new(shape.clone(), Domain::Any),
+        ),
+    };
+
+    // The module must fail during construction, before it can enter the
+    // numeric proof engine. An invalid candidate leaves the graph untouched.
+    let original_nodes = graph.nodes().len();
+    let original_modules = graph.modules().len();
+    assert!(matches!(
+        graph.apply_module(&module, &[declared]),
+        Err(verineural::NeuralError::ContractViolation {
+            module: "captured_dependency",
+            detail: "undeclared external capture",
+        })
+    ));
+    assert_eq!(graph.nodes().len(), original_nodes);
+    assert_eq!(graph.modules().len(), original_modules);
+
+    // The same dependency is legal when explicitly declared as an input,
+    // and its range contract remains eligible for a generated Lean obligation.
+    let declared_module = CapturedDependencyModule {
+        captured,
+        contract: MathContract::new(
+            vec![PortContract::new(shape.clone(), Domain::Finite); 2],
             PortContract::new(shape, Domain::Any),
         ),
     };
-    let output = graph.apply_module(&module, &[declared]).unwrap();
+    let output = graph
+        .apply_module(&declared_module, &[declared, captured])
+        .unwrap();
     let plan = RneRangePlan::compile(&graph, output, 10, 16).unwrap();
-
-    assert!(matches!(
-        plan.lean_source(),
-        Err(NumericError::InvalidInput {
-            reason: "module global range proof reaches an undeclared preexisting node",
-            ..
-        })
-    ));
+    assert!(plan
+        .lean_source()
+        .unwrap()
+        .contains("theorem module_0_global_contract"));
 }
 
 #[test]
