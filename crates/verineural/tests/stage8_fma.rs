@@ -1,6 +1,6 @@
 use verineural::{
-    audit_fp32_ptx, Domain, Fp32PtxAudit, GpuEngine, GpuError, GpuLaunchConfig, NeuralGraph,
-    ReluFusion, Shape,
+    Domain, Fp32PtxAudit, GpuEngine, GpuError, GpuLaunchConfig, NeuralGraph, ReluFusion, Shape,
+    audit_fp32_ptx,
 };
 
 #[test]

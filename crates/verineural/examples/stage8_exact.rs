@@ -89,9 +89,7 @@ const PTX_PROFILES: [&str; 10] = [
 /// Recheck the actually saved PTX/LLVM pairs, not only the Rust generator.
 /// Static opcode/rounding checks are not a PTX-to-SASS translation proof.
 fn fp32_contraction_report(root: &Path) -> Result<String, Box<dyn Error>> {
-    let mut report = String::from(
-        "scope=LLVM-inline-PTX-vs-emitted-PTX\n"
-    );
+    let mut report = String::from("scope=LLVM-inline-PTX-vs-emitted-PTX\n");
     report.push_str("guarantee=static-rounded-add-mul-opcodes-and-no-PTX-FMA\n");
     report.push_str("machine_fp32_sass_jit=trusted-not-proven\n");
     for profile in PTX_PROFILES {
@@ -767,12 +765,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err(io::Error::other("FMA probe did not fuse Mul/BiasAdd/ReLU").into());
         }
         let output = engine.execute(&program, &fma_inputs, &root.join(label))?;
-        if output.values().len() != 1
-            || output.values()[0].to_bits() != 0.0f32.to_bits()
-        {
+        if output.values().len() != 1 || output.values()[0].to_bits() != 0.0f32.to_bits() {
             return Err(io::Error::other(format!(
                 "{label} introduced an unexpected FP32 contraction or rounding difference"
-            )).into());
+            ))
+            .into());
         }
         println!("Stage 8 {label}: FMA-sensitive separate-rounding GPU probe matches +0 bits");
     }
@@ -780,7 +777,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         root.join("fma_probe_inputs.bits"),
         format!(
             "a={:08x}\nb={:08x}\nbias={:08x}\n",
-            a.to_bits(), a.to_bits(), fma_bias.to_bits()
+            a.to_bits(),
+            a.to_bits(),
+            fma_bias.to_bits()
         ),
     )?;
     fs::write(root.join("fma_probe_output.bits"), "00000000\n")?;
@@ -1411,7 +1410,9 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 ReLU threshold margins: conditional positive/nonpositive proofs plus explicit ambiguity witness"
     );
-    println!("Stage 8 FP32 PTX audit: explicit separate RNE mul/add, no emitted FMA/FTZ (LLVM/PTX static check only)");
+    println!(
+        "Stage 8 FP32 PTX audit: explicit separate RNE mul/add, no emitted FMA/FTZ (LLVM/PTX static check only)"
+    );
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?

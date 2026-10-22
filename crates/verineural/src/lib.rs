@@ -39,8 +39,8 @@ mod tensor;
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
 pub use gpu::{
-    audit_fp32_ptx, Fp32PtxAudit, GpuBenchmark, GpuEngine, GpuError, GpuExecution, GpuLaunchConfig,
-    GpuMemoryContract, GpuMemoryPattern, GpuProgram, ReluFusion,
+    Fp32PtxAudit, GpuBenchmark, GpuEngine, GpuError, GpuExecution, GpuLaunchConfig,
+    GpuMemoryContract, GpuMemoryPattern, GpuProgram, ReluFusion, audit_fp32_ptx,
 };
 pub use ir::{
     Domain, FP32Policy, FmaMode, GpuSemantics, MathContract, ModuleInvocation, NeuralGraph,

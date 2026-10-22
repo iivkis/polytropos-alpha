@@ -133,7 +133,9 @@ impl fmt::Display for GpuError {
             Self::NoKernelGraph => write!(f, "GPU benchmark requires at least one CUDA kernel"),
             Self::Io(err) => write!(f, "GPU I/O failure: {err}"),
             Self::LlvmFailed { diagnostics } => write!(f, "NVPTX lowering failed: {diagnostics}"),
-            Self::Fp32PtxRejected { reason } => write!(f, "strict FP32 PTX audit rejected lowering: {reason}"),
+            Self::Fp32PtxRejected { reason } => {
+                write!(f, "strict FP32 PTX audit rejected lowering: {reason}")
+            }
             Self::Driver(message) => write!(f, "CUDA driver unavailable: {message}"),
             Self::Cuda { function, code } => write!(f, "{function} returned CUDA error {code}"),
         }
@@ -206,7 +208,9 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
         || llvm_ir.contains("fast ")
         || llvm_ir.contains("contract ")
     {
-        return Err(rejected("non-explicit/fast LLVM floating point operation".into()));
+        return Err(rejected(
+            "non-explicit/fast LLVM floating point operation".into(),
+        ));
     }
     const ADD_ASM: &str = "call float asm sideeffect \"add.rn.f32";
     const MUL_ASM: &str = "call float asm sideeffect \"mul.rn.f32";
