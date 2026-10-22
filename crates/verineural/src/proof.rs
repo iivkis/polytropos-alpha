@@ -593,8 +593,14 @@ impl LeanProofEngine {
                 match claim {
                     ContractClaim::Nonnegative => {
                         emit_ideal_nonnegative_claim(
-                            graph, &mut source, &mut theorems, name,
-                            module.output, &params, &arguments, &assumptions,
+                            graph,
+                            &mut source,
+                            &mut theorems,
+                            name,
+                            module.output,
+                            &params,
+                            &arguments,
+                            &assumptions,
                             &source_hypotheses,
                         )?;
                     }
@@ -702,8 +708,14 @@ impl LeanProofEngine {
                     match claim {
                         ContractClaim::Nonnegative => {
                             emit_ideal_nonnegative_claim(
-                                graph, &mut source, &mut theorems, name,
-                                output, &params, &arguments, &assumptions,
+                                graph,
+                                &mut source,
+                                &mut theorems,
+                                name,
+                                output,
+                                &params,
+                                &arguments,
+                                &assumptions,
                                 &source_hypotheses,
                             )?;
                         }
@@ -1066,7 +1078,10 @@ impl LeanProofEngine {
         let mut claim_names = Vec::new();
         let mut seen = BTreeSet::new();
         for (step, &index) in scan.module_indices.iter().enumerate() {
-            let module = graph.multi_modules().get(index).ok_or(ProofError::InvalidScan)?;
+            let module = graph
+                .multi_modules()
+                .get(index)
+                .ok_or(ProofError::InvalidScan)?;
             if !seen.insert(index)
                 || module.inputs.len() != 2
                 || module.outputs.len() != 2
@@ -1082,7 +1097,9 @@ impl LeanProofEngine {
             {
                 return Err(ProofError::InvalidScan);
             }
-            let claim = module.contract.outputs[0].claims.iter()
+            let claim = module.contract.outputs[0]
+                .claims
+                .iter()
                 .position(|c| *c == ContractClaim::Nonnegative)
                 .ok_or(ProofError::InvalidScan)?;
             claim_names.push(format!("multi_{index}_port_0_claim_{claim}"));
@@ -1094,24 +1111,53 @@ impl LeanProofEngine {
         for &target in &targets {
             used.extend(collect_used_nodes(graph, target)?);
         }
-        let sources = used.iter()
+        let sources = used
+            .iter()
             .filter(|&&i| matches!(graph.nodes()[i].operation, Operation::Input))
-            .copied().collect::<Vec<_>>();
-        let params = sources.iter().map(|&i| {
-            format!("(x_{i} : VeriNeural.Tensor {})", graph.nodes()[i].shape.element_count())
-        }).collect::<Vec<_>>().join(" ");
-        let args = sources.iter().map(|i| format!("x_{i}"))
-            .collect::<Vec<_>>().join(" ");
-        let hypotheses = program.assumptions().iter().map(|a| {
-            format!("(h_{} : VeriNeural.Nonnegative x_{})", a.input_node, a.input_node)
-        }).collect::<Vec<_>>().join(" ");
-        let hypothesis_args = program.assumptions().iter().map(|a| {
-            format!("h_{}", a.input_node)
-        }).collect::<Vec<_>>().join(" ");
-        let source_hypotheses = program.assumptions().iter().map(|a| a.input_node)
+            .copied()
+            .collect::<Vec<_>>();
+        let params = sources
+            .iter()
+            .map(|&i| {
+                format!(
+                    "(x_{i} : VeriNeural.Tensor {})",
+                    graph.nodes()[i].shape.element_count()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let args = sources
+            .iter()
+            .map(|i| format!("x_{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let hypotheses = program
+            .assumptions()
+            .iter()
+            .map(|a| {
+                format!(
+                    "(h_{} : VeriNeural.Nonnegative x_{})",
+                    a.input_node, a.input_node
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let hypothesis_args = program
+            .assumptions()
+            .iter()
+            .map(|a| format!("h_{}", a.input_node))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source_hypotheses = program
+            .assumptions()
+            .iter()
+            .map(|a| a.input_node)
             .collect::<BTreeSet<_>>();
         let base = prove_ideal_nonnegative(
-            graph, scan.states[0], &args, &source_hypotheses,
+            graph,
+            scan.states[0],
+            &args,
+            &source_hypotheses,
             &mut BTreeMap::new(),
         )?;
         let end = "end VeriNeural.Generated\n";
@@ -1122,9 +1168,12 @@ impl LeanProofEngine {
         }
         program.source.truncate(program.source.len() - end.len());
         let theorem = format!("scan_{name}_global_nonnegative");
-        let propositions = scan.states.iter().map(|state| {
-            format!("VeriNeural.Nonnegative (node_{} {args})", state.index())
-        }).collect::<Vec<_>>().join(" ∧\n    ");
+        let propositions = scan
+            .states
+            .iter()
+            .map(|state| format!("VeriNeural.Nonnegative (node_{} {args})", state.index()))
+            .collect::<Vec<_>>()
+            .join(" ∧\n    ");
         program.source.push_str(&format!(
             "-- Ideal-Int states 0..{}; no arbitrary-horizon induction.\n\
              theorem {theorem} {params} {hypotheses} :\n    {propositions} := by\n",
@@ -1144,7 +1193,9 @@ impl LeanProofEngine {
         for step in (0..scan.outputs.len()).rev() {
             conjunction = format!("And.intro scan_state_{step} ({conjunction})");
         }
-        program.source.push_str(&format!("  exact {conjunction}\n\n{end}"));
+        program
+            .source
+            .push_str(&format!("  exact {conjunction}\n\n{end}"));
         program.theorems.push(theorem);
         Ok(program)
     }
@@ -1464,7 +1515,6 @@ fn prove_module_node_nonnegative(
     Ok(proof)
 }
 
-
 /// A claim is about the ideal-Int interpretation of the graph, not the
 /// conservative FP32 value domain. Never infer proof from \`Domain::Any\` or
 /// from a user assertion: build it from trusted Lean operation lemmas and
@@ -1487,20 +1537,14 @@ fn prove_ideal_nonnegative(
         Operation::Relu => format!("VeriNeural.relu_nonnegative {}", call(node.inputs[0])),
         Operation::Reshape(_) => {
             let input = node.inputs[0];
-            let h = prove_ideal_nonnegative(
-                graph, input, arguments, source_hypotheses, cache,
-            )?;
+            let h = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;
             format!("VeriNeural.reshape_nonnegative {} ({h})", call(input))
         }
         Operation::Add | Operation::Mul | Operation::MatMul | Operation::BiasAdd => {
             let a = node.inputs[0];
             let b = node.inputs[1];
-            let ha = prove_ideal_nonnegative(
-                graph, a, arguments, source_hypotheses, cache,
-            )?;
-            let hb = prove_ideal_nonnegative(
-                graph, b, arguments, source_hypotheses, cache,
-            )?;
+            let ha = prove_ideal_nonnegative(graph, a, arguments, source_hypotheses, cache)?;
+            let hb = prove_ideal_nonnegative(graph, b, arguments, source_hypotheses, cache)?;
             let lemma = match node.operation {
                 Operation::Add => "VeriNeural.add_nonnegative".to_owned(),
                 Operation::Mul => "VeriNeural.mul_nonnegative".to_owned(),
@@ -1541,23 +1585,31 @@ fn emit_ideal_nonnegative_claim(
     source_hypotheses: &BTreeSet<usize>,
 ) -> Result<(), ProofError> {
     let proof = prove_ideal_nonnegative(
-        graph, output, arguments, source_hypotheses, &mut BTreeMap::new(),
+        graph,
+        output,
+        arguments,
+        source_hypotheses,
+        &mut BTreeMap::new(),
     )?;
     // Keep the full positional hypothesis interface for every theorem, but
     // mark unused binders to avoid Lean's unused-variable diagnostics.
-    let hypothesis_params = assumptions.iter().map(|a| {
-        let idx = a.input_node;
-        let wanted = format!("h_{idx}");
-        let identifier = if proof
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .any(|token| token == wanted)
-        {
-            format!("h_{idx}")
-        } else {
-            format!("_h_{idx}")
-        };
-        format!("({identifier} : VeriNeural.Nonnegative x_{idx})")
-    }).collect::<Vec<_>>().join(" ");
+    let hypothesis_params = assumptions
+        .iter()
+        .map(|a| {
+            let idx = a.input_node;
+            let wanted = format!("h_{idx}");
+            let identifier = if proof
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|token| token == wanted)
+            {
+                format!("h_{idx}")
+            } else {
+                format!("_h_{idx}")
+            };
+            format!("({identifier} : VeriNeural.Nonnegative x_{idx})")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     source.push_str(&format!(
         "theorem {theorem} {params} {hypothesis_params} :\n  \
          VeriNeural.Nonnegative (node_{} {arguments}) := by\n  \

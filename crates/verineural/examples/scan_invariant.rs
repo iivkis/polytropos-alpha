@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use verineural::{
-    ContractClaim, Domain, LeanProofEngine, MultiOutputContract,
-    MultiOutputModule, NamedPortContract, NeuralError, NeuralGraph, NodeId, PortContract, Shape,
+    ContractClaim, Domain, LeanProofEngine, MultiOutputContract, MultiOutputModule,
+    NamedPortContract, NeuralError, NeuralGraph, NodeId, PortContract, Shape,
 };
 
 struct Accumulate {
@@ -57,11 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let x0 = graph.input(shape.clone(), Domain::NonNegativeFinite);
     let x1 = graph.input(shape, Domain::NonNegativeFinite);
     let scan = graph.scan_fixed(&transition, initial, &[x0, x1])?;
-    let proof = LeanProofEngine::default().generate_fixed_scan_nonnegative(
-        &graph,
-        &scan,
-        "accumulator",
-    )?;
+    let proof =
+        LeanProofEngine::default().generate_fixed_scan_nonnegative(&graph, &scan, "accumulator")?;
     let output = Path::new("target/verineural/verification/scan_invariant.lean");
     let (checked, audit) = LeanProofEngine::default().verify_certified(&proof, output)?;
     println!(
@@ -70,7 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         checked.path.display(),
         scan.outputs.len(),
         checked.assumptions.len(),
-        audit.axiom_dependencies.values().flatten()
+        audit
+            .axiom_dependencies
+            .values()
+            .flatten()
             .collect::<std::collections::BTreeSet<_>>(),
     );
     println!(

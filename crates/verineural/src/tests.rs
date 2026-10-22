@@ -1552,7 +1552,9 @@ fn p0_p1_ideal_claim_and_bounded_scan_invariant_compose_without_fp32_claim() {
     let state = graph.input(shape(&[2]), Domain::NonNegativeFinite);
     let x0 = graph.input(shape(&[2]), Domain::NonNegativeFinite);
     let x1 = graph.input(shape(&[2]), Domain::NonNegativeFinite);
-    let scan = graph.scan_fixed(&ConsumerAccumulation::new(), state, &[x0, x1]).unwrap();
+    let scan = graph
+        .scan_fixed(&ConsumerAccumulation::new(), state, &[x0, x1])
+        .unwrap();
     // The graph conservatively refuses to treat finite source addition as
     // proven finite in FP32. The ideal-Int property is independently provable.
     assert_eq!(graph.node(scan.states[1]).unwrap().domain, Domain::Any);
@@ -1568,7 +1570,10 @@ fn p0_p1_ideal_claim_and_bounded_scan_invariant_compose_without_fp32_claim() {
         "multi_1_port_1_claim_0",
         "scan_accumulate_global_nonnegative",
     ] {
-        assert!(proof.theorem_names().iter().any(|theorem| theorem == name), "{name}");
+        assert!(
+            proof.theorem_names().iter().any(|theorem| theorem == name),
+            "{name}"
+        );
     }
     assert!(proof.source().contains("VeriNeural.add_nonnegative"));
     assert!(proof.source().contains("exact multi_0_port_0_claim_0"));
@@ -1588,7 +1593,9 @@ fn p0_p1_bounded_scan_invariant_fails_closed_without_actual_proof() {
     let transition = ConsumerAccumulation::new();
     // Construction succeeds because the numerical domain is Any. The
     // user-claimed ideal nonnegativity is *not* granted automatically.
-    let scan = graph.scan_fixed(&transition, state, &[allowed, unknown]).unwrap();
+    let scan = graph
+        .scan_fixed(&transition, state, &[allowed, unknown])
+        .unwrap();
     assert!(matches!(
         LeanProofEngine::default().generate_fixed_scan_nonnegative(&graph, &scan, "bad"),
         Err(ProofError::UnsupportedGuarantee { .. })
@@ -1608,16 +1615,22 @@ fn p0_p1_bounded_scan_invariant_fails_closed_without_actual_proof() {
     let mut second_graph = NeuralGraph::default();
     let second_state = second_graph.input(shape(&[2]), Domain::NonNegativeFinite);
     let second_x = second_graph.input(shape(&[2]), Domain::NonNegativeFinite);
-    let second_scan = second_graph.scan_fixed(&no_claim, second_state, &[second_x]).unwrap();
+    let second_scan = second_graph
+        .scan_fixed(&no_claim, second_state, &[second_x])
+        .unwrap();
     assert!(matches!(
         LeanProofEngine::default().generate_fixed_scan_nonnegative(
-            &second_graph, &second_scan, "missing",
+            &second_graph,
+            &second_scan,
+            "missing",
         ),
         Err(ProofError::InvalidScan)
     ));
     assert!(matches!(
         LeanProofEngine::default().generate_fixed_scan_nonnegative(
-            &second_graph, &second_scan, "not-valid!",
+            &second_graph,
+            &second_scan,
+            "not-valid!",
         ),
         Err(ProofError::InvalidGoalName)
     ));
