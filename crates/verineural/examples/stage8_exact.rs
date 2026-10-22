@@ -11,10 +11,10 @@ use std::process::Command;
 
 use verineural::{
     Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, NeuralGraph, ReluFusion,
-    Shape, Tensor,
+    RneFp32Plan, Shape, Tensor,
 };
 
-const FILES: [&str; 14] = [
+const FILES: [&str; 22] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -29,6 +29,14 @@ const FILES: [&str; 14] = [
     "fused_matmul/graph.ptx",
     "matmul_inputs.bits",
     "matmul_output.bits",
+    "numeric_rne.lean",
+    "baseline_rne/graph.ll",
+    "baseline_rne/graph.ptx",
+    "fused_rne/graph.ll",
+    "fused_rne/graph.ptx",
+    "rne_inputs.bits",
+    "rne_output.bits",
+    "rne_error.txt",
 ];
 
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
@@ -64,8 +72,11 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     }
     LeanProofEngine::default().check_file(&root.join("numeric.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
-    println!("Stage 8: saved Lean source and SHA-256 artifact manifest PASS");
-    println!("Scope: conditional integer range proof, not machine FP32 certification");
+    LeanProofEngine::default().check_file(&root.join("numeric_rne.lean"))?;
+    println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
+    println!(
+        "Scope: ideal integer ranges plus concrete dyadic RNE/epsilon trace; not machine FP32 certification"
+    );
     Ok(())
 }
 
@@ -196,6 +207,84 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect::<String>(),
     )?;
 
+    // Fractional dyadic RNE trace. With q=20, x=8+2^-20 and y=8
+    // produce the exact midpoint 16+2^-20, which RNE sends to even 16.
+    // Adding bias=2^-20 repeats the rounding loss, so epsilon is nonzero.
+    let mut rne_graph = NeuralGraph::default();
+    let rne_shape = Shape::new(vec![1, 1])?;
+    let rne_x = Tensor::new(rne_shape.clone(), vec![f32::from_bits(0x4100_0001)])?;
+    let rne_y = Tensor::new(rne_shape.clone(), vec![f32::from_bits(0x4100_0000)])?;
+    let rne_bias = Tensor::new(
+        Shape::new(vec![1])?,
+        vec![f32::from_bits(0x3580_0000)],
+    )?;
+    let rne_xid = rne_graph.input(rne_shape.clone(), Domain::Finite);
+    let rne_yid = rne_graph.input(rne_shape, Domain::Finite);
+    let rne_bid = rne_graph.input(rne_bias.shape().clone(), Domain::Finite);
+    let rne_sum = rne_graph.add(rne_xid, rne_yid)?;
+    let rne_biased = rne_graph.bias_add(rne_sum, rne_bid)?;
+    let rne_output = rne_graph.relu(rne_biased)?;
+    let rne_inputs = [(rne_xid, rne_x), (rne_yid, rne_y), (rne_bid, rne_bias)];
+    let rne_plan = RneFp32Plan::compile(&rne_graph, rne_output, 20)?;
+    let rne_trace = rne_plan.trace(&rne_inputs)?;
+    if rne_trace.observed_error_ticks() == 0 || rne_trace.epsilon_ticks() == 0 {
+        return Err(io::Error::other("expected a nonzero Stage 8 RNE error trace").into());
+    }
+    write_checked_lean(&root.join("numeric_rne.lean"), rne_trace.lean_source())?;
+    for (label, engine) in [("baseline_rne", &baseline), ("fused_rne", &fused)] {
+        let gpu_plan = engine.compile(&rne_graph, rne_output)?;
+        if label == "fused_rne" && gpu_plan.removed_kernel_count() != 2 {
+            return Err(io::Error::other("expected fractional Add/BiasAdd/Relu chain fusion").into());
+        }
+        let actual = engine.execute(&gpu_plan, &rne_inputs, &root.join(label))?;
+        rne_trace.compare_gpu(&actual)?;
+        println!(
+            "Stage 8 {label}: {} fractional FP32 outputs match integer RNE oracle",
+            actual.values().len()
+        );
+    }
+    fs::write(
+        root.join("rne_inputs.bits"),
+        rne_inputs
+            .iter()
+            .map(|(id, tensor)| {
+                format!(
+                    "node={} shape={:?} bits={:?}\n",
+                    id.index(),
+                    tensor.shape().dims(),
+                    tensor
+                        .values()
+                        .iter()
+                        .map(|x| format!("{:08x}", x.to_bits()))
+                        .collect::<Vec<_>>()
+                )
+            })
+            .collect::<String>(),
+    )?;
+    fs::write(
+        root.join("rne_output.bits"),
+        rne_trace
+            .expected()
+            .values()
+            .iter()
+            .map(|x| format!("{:08x}\n", x.to_bits()))
+            .collect::<String>(),
+    )?;
+    fs::write(
+        root.join("rne_error.txt"),
+        format!(
+            "fraction_bits={}\nideal_ticks={:?}\nrounded_ticks={:?}\nobserved_error_ticks={}\n\
+             epsilon_ticks={}\nobserved_error={:.12e}\nepsilon={:.12e}\n",
+            rne_plan.fraction_bits(),
+            rne_trace.ideal_output_ticks(),
+            rne_trace.rounded_output_ticks(),
+            rne_trace.observed_error_ticks(),
+            rne_trace.epsilon_ticks(),
+            rne_trace.observed_error(),
+            rne_trace.epsilon(),
+        ),
+    )?;
+
     let input_snapshot = inputs
         .iter()
         .map(|(id, tensor)| {
@@ -247,11 +336,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         mat_plan.output_bound()
     );
     println!(
+        "Stage 8 dyadic RNE profile: q={}, observed error={} ticks, proved epsilon={} ticks",
+        rne_plan.fraction_bits(),
+        rne_trace.observed_error_ticks(),
+        rne_trace.epsilon_ticks()
+    );
+    println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves composed ideal Int bounds; IEEE RNE, LLVM/PTX and hardware remain trusted"
+        "Lean proves ideal Int bounds and the concrete dyadic RNE epsilon trace; LLVM/PTX and hardware remain trusted"
     );
     Ok(())
 }
