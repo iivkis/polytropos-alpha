@@ -173,8 +173,14 @@ pub struct GpuMemoryContract {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuMemoryPattern {
     Pointwise,
-    BiasAdd { columns: usize },
-    MatMul { rows: usize, inner: usize, columns: usize },
+    BiasAdd {
+        columns: usize,
+    },
+    MatMul {
+        rows: usize,
+        inner: usize,
+        columns: usize,
+    },
 }
 
 /// A checked, immutable GPU compilation plan. No claims about machine-code proof.
@@ -275,7 +281,10 @@ impl GpuProgram {
                         }
                         _ => GpuMemoryPattern::Pointwise,
                     };
-                    (op_node.inputs.iter().map(|id| id.index()).collect(), pattern)
+                    (
+                        op_node.inputs.iter().map(|id| id.index()).collect(),
+                        pattern,
+                    )
                 };
             let required = match pattern {
                 GpuMemoryPattern::Pointwise => vec![writes; read_nodes.len()],
@@ -286,7 +295,11 @@ impl GpuProgram {
                         vec![writes, columns]
                     }
                 }
-                GpuMemoryPattern::MatMul { rows, inner, columns } => {
+                GpuMemoryPattern::MatMul {
+                    rows,
+                    inner,
+                    columns,
+                } => {
                     if rows.checked_mul(columns) != Some(writes) {
                         return Err(GpuError::InvalidInput {
                             node: index,
@@ -294,8 +307,11 @@ impl GpuProgram {
                         });
                     }
                     vec![
-                        rows.checked_mul(inner).ok_or(GpuError::UnsupportedSize { elements: writes })?,
-                        inner.checked_mul(columns).ok_or(GpuError::UnsupportedSize { elements: writes })?,
+                        rows.checked_mul(inner)
+                            .ok_or(GpuError::UnsupportedSize { elements: writes })?,
+                        inner
+                            .checked_mul(columns)
+                            .ok_or(GpuError::UnsupportedSize { elements: writes })?,
                     ]
                 }
             };
@@ -373,7 +389,11 @@ impl GpuProgram {
                         "example (index : Nat) : index % {columns} < {columns} :=\n  bias_address_bound (by decide)\n"
                     ));
                 }
-                GpuMemoryPattern::MatMul { rows, inner, columns } => {
+                GpuMemoryPattern::MatMul {
+                    rows,
+                    inner,
+                    columns,
+                } => {
                     source.push_str(&format!(
                         "example (index j : Nat) (active : index < {rows} * {columns}) (reduction : j < {inner}) :\n    (index / {columns}) * {inner} + j < {rows} * {inner} ∧\n    j * {columns} + index % {columns} < {inner} * {columns} :=\n  matmul_address_bounds (by decide) active reduction\n"
                     ));

@@ -246,7 +246,9 @@ mod platform {
             if context.is_null() {
                 // A successful retain must be balanced even for a bad handle.
                 unsafe { (functions.primary_release)(device) };
-                return Err(GpuError::Driver("CUDA returned a null primary context".into()));
+                return Err(GpuError::Driver(
+                    "CUDA returned a null primary context".into(),
+                ));
             }
             let mut session = Self {
                 functions,
@@ -307,10 +309,19 @@ mod platform {
         /// Check the actual device allocations backing a logical memory
         /// contract before graph capture. This is a preflight check, not an
         /// assertion about LLVM/PTX's machine-level memory accesses.
-        pub fn require_allocation(&self, address: DevicePtr, elements: usize) -> Result<(), GpuError> {
-            if !self.allocations.iter().any(|&(ptr, capacity)| ptr == address && capacity >= elements) {
+        pub fn require_allocation(
+            &self,
+            address: DevicePtr,
+            elements: usize,
+        ) -> Result<(), GpuError> {
+            if !self
+                .allocations
+                .iter()
+                .any(|&(ptr, capacity)| ptr == address && capacity >= elements)
+            {
                 return Err(GpuError::Driver(
-                    "CUDA kernel memory contract references an unallocated or undersized buffer".into(),
+                    "CUDA kernel memory contract references an unallocated or undersized buffer"
+                        .into(),
                 ));
             }
             Ok(())
@@ -334,7 +345,9 @@ mod platform {
                 (self.functions.pinned_allocate)(&mut address, bytes)
             })?;
             if address.is_null() {
-                return Err(GpuError::Driver("CUDA returned null pinned allocation".into()));
+                return Err(GpuError::Driver(
+                    "CUDA returned null pinned allocation".into(),
+                ));
             }
             Ok(PinnedBuffer {
                 address,
@@ -689,7 +702,11 @@ mod platform {
             for (address, _) in self.allocations.drain(..).rev() {
                 unsafe { (self.functions.mem_free)(address) };
             }
-            for host in self.staging_pending.drain(..).chain(self.staging_available.drain(..)) {
+            for host in self
+                .staging_pending
+                .drain(..)
+                .chain(self.staging_available.drain(..))
+            {
                 unsafe { (self.functions.pinned_free)(host.address) };
             }
             if !self.module.is_null() {

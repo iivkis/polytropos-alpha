@@ -79,7 +79,10 @@ fn staging_buffers_are_recycled_only_after_stream_sync() {
     let start = source.find("pub fn flush_input_copies").unwrap();
     let end = source[start..].find("/// Begin capturing").unwrap() + start;
     let flush = &source[start..end];
-    assert!(flush.find("self.synchronize()?").unwrap() < flush.find("self.release_completed_staging()").unwrap());
+    assert!(
+        flush.find("self.synchronize()?").unwrap()
+            < flush.find("self.release_completed_staging()").unwrap()
+    );
     assert!(source.contains("self.stream,"));
     assert!(source.contains("CU_STREAM_NON_BLOCKING"));
 }
@@ -143,7 +146,6 @@ fn stage7_replay_inputs_are_validated_before_cuda_setup() {
     ));
 }
 
-
 #[test]
 fn memory_contracts_cover_baseline_and_fused_read_extents() {
     use verineural::GpuMemoryPattern;
@@ -179,7 +181,10 @@ fn memory_contracts_cover_baseline_and_fused_read_extents() {
     let after = fused.memory_contracts().unwrap();
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].kernel_node, output.index());
-    assert_eq!(after[0].reads, vec![(x.index(), 6), (y.index(), 6), (bias.index(), 3)]);
+    assert_eq!(
+        after[0].reads,
+        vec![(x.index(), 6), (y.index(), 6), (bias.index(), 3)]
+    );
     assert_eq!(after[0].writes, 6);
     assert_eq!(after[0].pattern, GpuMemoryPattern::BiasAdd { columns: 3 });
 
@@ -202,7 +207,10 @@ fn matmul_memory_contract_uses_row_major_source_spans() {
     let program = GpuEngine::default().compile(&graph, result).unwrap();
     let contracts = program.memory_contracts().unwrap();
     assert_eq!(contracts.len(), 1);
-    assert_eq!(contracts[0].reads, vec![(left.index(), 8), (right.index(), 12)]);
+    assert_eq!(
+        contracts[0].reads,
+        vec![(left.index(), 8), (right.index(), 12)]
+    );
     assert_eq!(contracts[0].writes, 6);
     assert_eq!(
         contracts[0].pattern,

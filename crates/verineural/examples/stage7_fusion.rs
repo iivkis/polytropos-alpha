@@ -228,7 +228,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         digest(&root.join("SHA256SUMS"))?
     );
     println!("Recheck without a GPU: task verify-gpu-stage7");
-    println!("Stage 7 manifest covers fusion + baseline/fused memory Lean obligations and both Stage 5 evidence manifests.");
+    println!(
+        "Stage 7 manifest covers fusion + baseline/fused memory Lean obligations and both Stage 5 evidence manifests."
+    );
     println!("No certified PTX/FP32/machine-code equivalence is claimed.");
     Ok(())
 }
