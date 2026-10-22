@@ -34,6 +34,7 @@ mod ir;
 mod modules;
 mod numeric;
 mod proof;
+mod special;
 mod subnormal;
 mod tensor;
 
@@ -54,6 +55,10 @@ pub use numeric::{
     RneModuleErrorContract, RneRangePlan, RneThresholdEvidence, RneThresholdSide,
 };
 pub use proof::{CheckedLean, LeanProgram, LeanProofEngine, ProofAssumption, ProofError};
+pub use special::{
+    Fp32SpecialExpected, special_add_boundary, special_mul_bias_relu_boundary,
+    special_mul_boundary, special_relu_boundary,
+};
 pub use subnormal::{subnormal_add_exact_bits, subnormal_mul_rne_bits, subnormal_relu_bits};
 pub use tensor::{Shape, Tensor, TensorShape};
 

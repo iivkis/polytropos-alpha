@@ -13,10 +13,11 @@ use verineural::{
     Domain, ExactFp32Plan, GpuEngine, GpuLaunchConfig, LeanProofEngine, MathContract, NeuralGraph,
     NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd, ResidualFfn, RneFp32Plan,
     RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx, subnormal_add_exact_bits,
-    subnormal_mul_rne_bits, subnormal_relu_bits,
+    subnormal_mul_rne_bits, subnormal_relu_bits, special_mul_bias_relu_boundary,
+    Fp32SpecialExpected,
 };
 
-const FILES: [&str; 63] = [
+const FILES: [&str; 72] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
@@ -65,6 +66,15 @@ const FILES: [&str; 63] = [
     "subnormal_inputs.bits",
     "subnormal_output.bits",
     "subnormal_evidence.txt",
+    "numeric_special.lean",
+    "baseline_special/graph.ll",
+    "baseline_special/graph.ptx",
+    "fused_special/graph.ll",
+    "fused_special/graph.ptx",
+    "special_inputs.bits",
+    "special_baseline_output.bits",
+    "special_fused_output.bits",
+    "special_evidence.txt",
     "fp32_contraction_report.txt",
     "numeric_architecture.lean",
     "architecture_contract.txt",
@@ -82,7 +92,7 @@ const FILES: [&str; 63] = [
     "architecture_property_matmul_bias_contract.txt",
 ];
 
-const PTX_PROFILES: [&str; 12] = [
+const PTX_PROFILES: [&str; 14] = [
     "baseline",
     "fused",
     "baseline_matmul",
@@ -95,6 +105,8 @@ const PTX_PROFILES: [&str; 12] = [
     "fused_fma",
     "baseline_subnormal",
     "fused_subnormal",
+    "baseline_special",
+    "fused_special",
 ];
 
 /// Recheck the actually saved PTX/LLVM pairs, not only the Rust generator.
@@ -116,6 +128,64 @@ fn fp32_contraction_report(root: &Path) -> Result<String, Box<dyn Error>> {
     Ok(report)
 }
 
+const SPECIAL_PROBE_LANES: usize = 13;
+
+/// Validate *saved* observed GPU bits against the independent narrow bit oracle.
+/// NaN payload/sign can vary; for all other cases exact bits are required.
+/// Every returned line is checked again by offline verification.
+fn special_values_report(root: &Path) -> Result<String, Box<dyn Error>> {
+    let inputs = fs::read_to_string(root.join("special_inputs.bits"))?;
+    let baseline = fs::read_to_string(root.join("special_baseline_output.bits"))?;
+    let fused = fs::read_to_string(root.join("special_fused_output.bits"))?;
+    let input_lines = inputs.lines().collect::<Vec<_>>();
+    let baseline_lines = baseline.lines().collect::<Vec<_>>();
+    let fused_lines = fused.lines().collect::<Vec<_>>();
+    if input_lines.len() != SPECIAL_PROBE_LANES
+        || baseline_lines.len() != SPECIAL_PROBE_LANES
+        || fused_lines.len() != SPECIAL_PROBE_LANES
+    {
+        return Err(io::Error::other("special FP32 evidence row count mismatch").into());
+    }
+    let parse = |word: &str| -> Result<u32, Box<dyn Error>> {
+        if word.len() != 8 || !word.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(io::Error::other("invalid special FP32 hex word").into());
+        }
+        Ok(u32::from_str_radix(word, 16)?)
+    };
+    let mut report = String::from(
+        "model=restricted-exceptional-binary32-bit-oracle\n\
+         comparison=exact-bits-or-quiet-nan-class\n\
+         operations=Mul,BiasAdd,Relu\n\
+         nan_payload=unconstrained\n\
+         signaling_nan=unsupported\n\
+         cuda_jit_sass=trusted-not-proven\n",
+    );
+    for lane in 0..SPECIAL_PROBE_LANES {
+        let tokens = input_lines[lane].split_whitespace().collect::<Vec<_>>();
+        if tokens.len() != 3 {
+            return Err(io::Error::other("invalid special FP32 input row").into());
+        }
+        let lhs = parse(tokens[0])?;
+        let rhs = parse(tokens[1])?;
+        let bias = parse(tokens[2])?;
+        let expected = special_mul_bias_relu_boundary(lhs, rhs, bias)
+            .ok_or_else(|| io::Error::other("special FP32 oracle rejected a probe lane"))?;
+        let baseline_bits = parse(baseline_lines[lane])?;
+        let fused_bits = parse(fused_lines[lane])?;
+        if !expected.accepts(baseline_bits) || !expected.accepts(fused_bits) {
+            return Err(io::Error::other(format!(
+                "special FP32 GPU bits mismatch at lane {lane}: expected={}, baseline={baseline_bits:08x}, fused={fused_bits:08x}",
+                expected.description()
+            )).into());
+        }
+        report.push_str(&format!(
+            "lane={lane} lhs={lhs:08x} rhs={rhs:08x} bias={bias:08x} expected={} baseline={baseline_bits:08x} fused={fused_bits:08x}\n",
+            expected.description(),
+        ));
+    }
+    Ok(report)
+}
+
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
     let output = Command::new("sha256sum").arg(path).output()?;
     if !output.status.success() {
@@ -130,6 +200,22 @@ fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
 
 fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     let manifest = root.join("SHA256SUMS");
+    // Reject stale or truncated manifests even if their own old hashes still
+    // verify. A successful previous Stage 8 version is not a current success.
+    let manifest_text = fs::read_to_string(&manifest)?;
+    let manifest_lines = manifest_text.lines().collect::<Vec<_>>();
+    if manifest_lines.len() != FILES.len()
+        || manifest_lines.iter().zip(FILES).any(|(line, expected)| {
+            let Some((digest, path)) = line.split_once("  ") else {
+                return true;
+            };
+            digest.len() != 64
+                || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || path != expected
+        })
+    {
+        return Err(io::Error::other("Stage 8 manifest file list is stale or incomplete").into());
+    }
     if let Ok(pinned) = std::env::var("VERINEURAL_STAGE8_SHA256") {
         if sha256(&manifest)? != pinned {
             return Err(io::Error::other("Stage 8 externally pinned hash mismatch").into());
@@ -154,6 +240,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
     LeanProofEngine::default().check_file(&root.join("numeric_range.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_threshold.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_subnormal.lean"))?;
+    LeanProofEngine::default().check_file(&root.join("numeric_special.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_architecture.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_architecture_dag.lean"))?;
     LeanProofEngine::default().check_file(&root.join("numeric_nested.lean"))?;
@@ -165,6 +252,9 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
         != fp32_contraction_report(root)?
     {
         return Err(io::Error::other("saved Stage 8 FP32 PTX audit report mismatch").into());
+    }
+    if fs::read_to_string(root.join("special_evidence.txt"))? != special_values_report(root)? {
+        return Err(io::Error::other("saved Stage 8 special FP32 evidence mismatch").into());
     }
     println!("Stage 8: saved Lean sources and SHA-256 artifact manifest PASS");
     println!(
@@ -935,6 +1025,138 @@ fn main() -> Result<(), Box<dyn Error>> {
         include_str!("../../../lean/VeriNeural/Subnormal.lean"),
     )?;
 
+    // Exceptional FP32 inputs are allowed only by the explicit Domain::Any
+    // assumption. Neither RneRangePlan nor numeric_subnormal.lean claims to
+    // model NaNs, infinities, signed zero, or overflow.
+    //
+    // GPU bits are checked against a deliberately narrow integer-bit oracle.
+    // Unlike a naive f32 host comparison, this also sees -0 versus +0 and
+    // never treats NaN == NaN as a meaningful numerical assertion.
+    let special_lhs: [u32; SPECIAL_PROBE_LANES] = [
+        0x7f80_0000, // +inf * +1 -> +inf
+        0xff80_0000, // -inf * +1 -> -inf, ReLU +0
+        0x0000_0000, // +0 * +inf -> quiet NaN
+        0x7fc0_0123, // explicit quiet NaN payload, only class constrained
+        0x7f7f_ffff, // max finite * 2 -> +inf overflow
+        0xff7f_ffff, // -max finite * 2 -> -inf, ReLU +0
+        0x8000_0000, // -0 * +1 + +0 -> +0
+        0x0000_0000, // +0 * -1 + -0 -> -0, ReLU +0
+        0x3f80_0000, // +1 * +1 - 1 -> exact +0
+        0x3f80_0000, // +1 * +1 + 0 -> exact +1
+        0x8000_0001, // -min subnormal * +1 + 0 -> ReLU +0
+        0x0000_0001, // +min subnormal * +1 + 0 -> preserved
+        0x7f80_0000, // +inf * -1 + 0 -> -inf, ReLU +0
+    ];
+    let special_rhs: [u32; SPECIAL_PROBE_LANES] = [
+        0x3f80_0000, 0x3f80_0000, 0x7f80_0000, 0x3f80_0000,
+        0x4000_0000, 0x4000_0000, 0x3f80_0000, 0xbf80_0000,
+        0x3f80_0000, 0x3f80_0000, 0x3f80_0000, 0x3f80_0000,
+        0xbf80_0000,
+    ];
+    let special_bias: [u32; SPECIAL_PROBE_LANES] = [
+        0, 0, 0, 0, 0, 0, 0, 0x8000_0000, 0xbf80_0000, 0, 0, 0, 0,
+    ];
+    let fixed_expected: [Fp32SpecialExpected; SPECIAL_PROBE_LANES] = [
+        Fp32SpecialExpected::Exact(0x7f80_0000),
+        Fp32SpecialExpected::Exact(0),
+        Fp32SpecialExpected::QuietNaN,
+        Fp32SpecialExpected::QuietNaN,
+        Fp32SpecialExpected::Exact(0x7f80_0000),
+        Fp32SpecialExpected::Exact(0),
+        Fp32SpecialExpected::Exact(0),
+        Fp32SpecialExpected::Exact(0),
+        Fp32SpecialExpected::Exact(0),
+        Fp32SpecialExpected::Exact(0x3f80_0000),
+        Fp32SpecialExpected::Exact(0),
+        Fp32SpecialExpected::Exact(1),
+        Fp32SpecialExpected::Exact(0),
+    ];
+    for lane in 0..SPECIAL_PROBE_LANES {
+        let oracle = special_mul_bias_relu_boundary(
+            special_lhs[lane],
+            special_rhs[lane],
+            special_bias[lane],
+        );
+        if oracle != Some(fixed_expected[lane]) {
+            return Err(io::Error::other(format!(
+                "special FP32 independent fixture disagreement at lane {lane}"
+            )).into());
+        }
+    }
+    let mut special_graph = NeuralGraph::default();
+    let special_shape = Shape::new(vec![1, SPECIAL_PROBE_LANES])?;
+    let special_x = special_graph.input(special_shape.clone(), Domain::Any);
+    let special_y = special_graph.input(special_shape.clone(), Domain::Any);
+    let special_b = special_graph.input(Shape::new(vec![SPECIAL_PROBE_LANES])?, Domain::Any);
+    let special_product = special_graph.mul(special_x, special_y)?;
+    let special_biased = special_graph.bias_add(special_product, special_b)?;
+    let special_result = special_graph.relu(special_biased)?;
+    let special_inputs = [
+        (
+            special_x,
+            Tensor::new(
+                special_shape.clone(),
+                special_lhs.iter().map(|&bits| f32::from_bits(bits)).collect(),
+            )?,
+        ),
+        (
+            special_y,
+            Tensor::new(
+                special_shape,
+                special_rhs.iter().map(|&bits| f32::from_bits(bits)).collect(),
+            )?,
+        ),
+        (
+            special_b,
+            Tensor::new(
+                Shape::new(vec![SPECIAL_PROBE_LANES])?,
+                special_bias.iter().map(|&bits| f32::from_bits(bits)).collect(),
+            )?,
+        ),
+    ];
+    fs::write(
+        root.join("special_inputs.bits"),
+        (0..SPECIAL_PROBE_LANES)
+            .map(|lane| format!(
+                "{:08x} {:08x} {:08x}\n",
+                special_lhs[lane], special_rhs[lane], special_bias[lane]
+            ))
+            .collect::<String>(),
+    )?;
+    for (label, filename, engine) in [
+        ("baseline_special", "special_baseline_output.bits", &baseline),
+        ("fused_special", "special_fused_output.bits", &fused),
+    ] {
+        let program = engine.compile(&special_graph, special_result)?;
+        if label == "fused_special" && program.removed_kernel_count() != 2 {
+            return Err(io::Error::other("special FP32 probe expected guarded full-chain fusion").into());
+        }
+        let output = engine.execute(&program, &special_inputs, &root.join(label))?;
+        if output.values().len() != SPECIAL_PROBE_LANES {
+            return Err(io::Error::other("special FP32 GPU output length mismatch").into());
+        }
+        let mut bits = String::new();
+        for (lane, value) in output.values().iter().enumerate() {
+            let observed = value.to_bits();
+            if !fixed_expected[lane].accepts(observed) {
+                return Err(io::Error::other(format!(
+                    "{label} special FP32 lane {lane}: expected={}, got={observed:08x}",
+                    fixed_expected[lane].description()
+                )).into());
+            }
+            bits.push_str(&format!("{observed:08x}\n"));
+        }
+        fs::write(root.join(filename), bits)?;
+        println!(
+            "Stage 8 {label}: {SPECIAL_PROBE_LANES} FP32 special/overflow/zero lanes match bit-class oracle"
+        );
+    }
+    fs::write(root.join("special_evidence.txt"), special_values_report(root)?)?;
+    write_checked_lean(
+        &root.join("numeric_special.lean"),
+        include_str!("../../../lean/VeriNeural/Special.lean"),
+    )?;
+
     // Reusable range contract over a composed module. Unlike the concrete RNE
     // traces above, the values are arbitrary within the source tick interval.
     // Lean proves the scalar transfer rules under Binary32RneTick hypotheses;
@@ -1567,12 +1789,13 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 gradual underflow: 8 signed/subnormal lanes in both baseline/fused kernels; integer bit oracle plus Lean half-tick model"
     );
+    println!("Stage 8 FP32 special-value boundary: 13 lanes baseline/fused with exact-bit or quiet-NaN class oracle");
     println!(
         "Manifest SHA256 (pin externally): {}",
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; a PTX opcode audit, FMA probe, and subnormal bit-oracle GPU probes have been checked; integer half-tick Lean lemmas cover only selected boundary examples; LLVM/PTX-to-machine translation and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; a PTX opcode audit, FMA probe, and subnormal bit-oracle GPU probes have been checked; integer half-tick and exceptional-value Lean lemmas cover only selected encoded cases; special FP32 GPU probes are checked by an independent restricted bit-class oracle; LLVM/PTX-to-machine translation and hardware remain trusted"
     );
     Ok(())
 }
