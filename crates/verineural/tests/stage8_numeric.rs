@@ -557,9 +557,7 @@ fn stage8_rne_range_contract_crosses_residual_ffn_module_boundary() {
     assert_eq!(modules[0].contract(), contract);
 
     let source = plan.lean_source().unwrap();
-    assert!(source.contains(
-        "ApproxContract 256 2\n      (idealA_0 * idealB_0) sum_0"
-    ));
+    assert!(source.contains("ApproxContract 256 2\n      (idealA_0 * idealB_0) sum_0"));
     assert!(source.contains("module_0_contract_well_formed"));
     assert!(source.contains("exports q=30, ideal bound 34095104, epsilon 170 ticks"));
     assert!(source.contains("approx_contract_mul_rne"));
