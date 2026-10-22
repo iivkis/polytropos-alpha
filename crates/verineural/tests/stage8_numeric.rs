@@ -132,3 +132,43 @@ fn stage8_invalid_batches_and_gpu_outputs_fail_closed() {
         Err(NumericError::OutputBits { index: 0, .. })
     ));
 }
+
+#[test]
+fn stage8_lean_uses_only_live_hypotheses_and_explicit_bias_shapes() {
+    let (graph, output, _) = plan();
+    let source = ExactFp32Plan::compile(&graph, output)
+        .unwrap()
+        .lean_source()
+        .unwrap();
+
+    let input_header = source
+        .lines()
+        .find(|line| line.starts_with("theorem node_0_integer_range "))
+        .unwrap();
+    assert!(input_header.contains("(h_0 :"));
+    assert!(!input_header.contains("(h_1 :"));
+    assert!(!input_header.contains("(h_2 :"));
+
+    let sum_header = source
+        .lines()
+        .find(|line| line.starts_with("theorem node_3_integer_range "))
+        .unwrap();
+    assert!(sum_header.contains("(h_0 :"));
+    assert!(sum_header.contains("(h_1 :"));
+    assert!(!sum_header.contains("(h_2 :"));
+
+    let bias_header = source
+        .lines()
+        .find(|line| line.starts_with("theorem node_4_integer_range "))
+        .unwrap();
+    for hypothesis in ["(h_0 :", "(h_1 :", "(h_2 :"] {
+        assert!(bias_header.contains(hypothesis));
+    }
+    assert!(source.contains("tensor_within_biasAdd (m := 2) (n := 3)"));
+    assert!(source.contains("(a := (node_3 x_0 x_1 x_2))"));
+    assert!(source.contains("(b := (node_2 x_0 x_1 x_2))"));
+
+    let library = include_str!("../../../lean/VeriNeural/Numeric.lean");
+    assert!(library.contains("Int.max_eq_right"));
+    assert!(library.contains("Int.max_eq_left"));
+}

@@ -210,32 +210,49 @@ impl ExactFp32Plan {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        let hypotheses = self
-            .inputs
-            .iter()
-            .map(|id| {
-                format!(
-                    "(h_{} : VeriNeural.TensorWithin {SOURCE_INTEGER_LIMIT} x_{})",
-                    id.index(),
-                    id.index()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        // A node's proof needs hypotheses only for its actual data ancestors,
+        // not every reachable input in the enclosing graph. This prevents
+        // vacuous assumptions and Lean's unused-variable warnings.
+        let mut dependencies: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+        for &index in &self.reachable {
+            let node = &self.graph.nodes()[index];
+            let mut sources = BTreeSet::new();
+            if matches!(node.operation, Operation::Input) {
+                sources.insert(index);
+            } else {
+                for parent in &node.inputs {
+                    sources.extend(dependencies[&parent.index()].iter().copied());
+                }
+            }
+            dependencies.insert(index, sources);
+        }
+        let hypotheses_for = |index: usize| {
+            dependencies[&index]
+                .iter()
+                .map(|source| {
+                    format!(
+                        "(h_{source} : VeriNeural.TensorWithin {SOURCE_INTEGER_LIMIT} x_{source})"
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         let args = self
             .inputs
             .iter()
             .map(|id| format!("x_{}", id.index()))
             .collect::<Vec<_>>()
             .join(" ");
-        let conditions = self
-            .inputs
-            .iter()
-            .map(|id| format!("h_{}", id.index()))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let conditions_for = |index: usize| {
+            dependencies[&index]
+                .iter()
+                .map(|source| format!("h_{source}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         let call = |index: usize| format!("(node_{index} {args})");
-        let proof = |index: usize| format!("(node_{index}_integer_range {args} {conditions})");
+        let proof =
+            |index: usize| format!("(node_{index}_integer_range {args} {})", conditions_for(index));
 
         for &index in &self.reachable {
             let node = &self.graph.nodes()[index];
@@ -248,7 +265,12 @@ impl ExactFp32Plan {
                     proof(node.inputs[1].index())
                 ),
                 Operation::BiasAdd => format!(
-                    "VeriNeural.tensor_within_biasAdd (by decide : 0 < {}) {} {}",
+                    "VeriNeural.tensor_within_biasAdd (m := {}) (n := {}) (a := {}) (b := {}) \
+                     (by decide : 0 < {}) {} {}",
+                    node.shape.dims()[0],
+                    node.shape.dims()[1],
+                    call(node.inputs[0].index()),
+                    call(node.inputs[1].index()),
                     node.shape.dims()[1],
                     proof(node.inputs[0].index()),
                     proof(node.inputs[1].index())
@@ -267,7 +289,8 @@ impl ExactFp32Plan {
                 "theorem node_{index}_integer_range {params} {hypotheses} :\n  \
                  VeriNeural.TensorWithin {bound} {} := by\n  \
                  simpa [node_{index}] using ({derived})\n\n",
-                call(index)
+                call(index),
+                hypotheses = hypotheses_for(index)
             ));
         }
         let final_bound = self.output_bound();
@@ -279,6 +302,7 @@ impl ExactFp32Plan {
              exact {}\n\nend VeriNeural.Generated\n",
             call(self.output.index()),
             proof(self.output.index()),
+            hypotheses = hypotheses_for(self.output.index()),
         ));
         Ok(source)
     }

@@ -26,9 +26,13 @@ theorem within_add {a b boundA boundB : Int}
 theorem within_relu {a bound : Int}
     (nonnegative : 0 ≤ bound) (ha : Within bound a) :
     Within bound (max a 0) := by
-  constructor
-  · exact le_trans (by omega : -bound ≤ (0 : Int)) (le_max_right a 0)
-  · exact max_le ha.2 nonnegative
+  unfold Within at ha ⊢
+  by_cases h : a ≤ 0
+  · rw [Int.max_eq_right h]
+    constructor <;> omega
+  · have hpos : 0 ≤ a := by omega
+    rw [Int.max_eq_left hpos]
+    exact ha
 
 theorem tensor_within_add {n : Nat} {a b : Tensor n}
     {boundA boundB : Int}
