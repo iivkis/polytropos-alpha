@@ -1369,3 +1369,126 @@ fn p1_multi_output_proof_rejects_empty_duplicate_foreign_and_unchecked_input_cla
     assert_eq!(graph.nodes().len(), 1);
     assert!(graph.multi_modules().is_empty());
 }
+
+#[test]
+fn p1_fixed_scan_unrolls_explicit_state_and_checks_each_step_in_lean() {
+    struct Step {
+        contract: MultiOutputContract,
+    }
+    impl MultiOutputModule for Step {
+        fn name(&self) -> &'static str {
+            "bounded_consumer_step"
+        }
+        fn contract(&self) -> &MultiOutputContract {
+            &self.contract
+        }
+        fn build(
+            &self,
+            graph: &mut NeuralGraph,
+            inputs: &[NodeId],
+        ) -> Result<Vec<NodeId>, NeuralError> {
+            let next_state = graph.relu(inputs[0])?;
+            let output = graph.add(next_state, inputs[1])?;
+            Ok(vec![next_state, output])
+        }
+    }
+    let mut graph = NeuralGraph::default();
+    let initial = graph.input(shape(&[2]), Domain::Finite);
+    let x0 = graph.input(shape(&[2]), Domain::Any);
+    let x1 = graph.input(shape(&[2]), Domain::Any);
+    let transition = Step {
+        contract: MultiOutputContract {
+            inputs: vec![
+                NamedPortContract::new("state", port(&[2], Domain::Finite)),
+                NamedPortContract::new("input", port(&[2], Domain::Any)),
+            ],
+            outputs: vec![
+                NamedPortContract {
+                    name: "next_state",
+                    port: port(&[2], Domain::NonNegativeFinite),
+                    claims: vec![ContractClaim::Nonnegative],
+                },
+                NamedPortContract::new("output", port(&[2], Domain::Any)),
+            ],
+        },
+    };
+    let scan = graph
+        .scan_fixed(&transition, initial, &[x0, x1])
+        .unwrap();
+    assert_eq!(scan.states.len(), 3);
+    assert_eq!(scan.outputs.len(), 2);
+    assert_eq!(scan.module_indices, vec![0, 1]);
+    assert_eq!(scan.states[0], initial);
+    assert_eq!(graph.multi_modules()[0].inputs, vec![initial, x0]);
+    assert_eq!(graph.multi_modules()[1].inputs, vec![scan.states[1], x1]);
+
+    // Every per-step state assertion is a separate Lean theorem. No claim
+    // of an unbounded inductive invariant or GPU machine-code proof is made.
+    let lean = LeanProofEngine::default()
+        .generate_outputs(&graph, &scan.proof_outputs())
+        .unwrap();
+    for name in [
+        "multi_0_port_0_claim_0",
+        "multi_1_port_0_claim_0",
+        "multi_0_port_1_shape",
+        "multi_1_port_1_shape",
+    ] {
+        assert!(lean.theorem_names().iter().any(|theorem| theorem == name));
+    }
+}
+
+#[test]
+fn p1_fixed_scan_rolls_back_when_later_step_violates_contract() {
+    struct Step {
+        contract: MultiOutputContract,
+    }
+    impl MultiOutputModule for Step {
+        fn name(&self) -> &'static str {
+            "fail_on_later_input"
+        }
+        fn contract(&self) -> &MultiOutputContract {
+            &self.contract
+        }
+        fn build(
+            &self,
+            graph: &mut NeuralGraph,
+            inputs: &[NodeId],
+        ) -> Result<Vec<NodeId>, NeuralError> {
+            Ok(vec![graph.relu(inputs[0])?, graph.relu(inputs[1])?])
+        }
+    }
+    let mut graph = NeuralGraph::default();
+    let initial = graph.input(shape(&[2]), Domain::Finite);
+    let first = graph.input(shape(&[2]), Domain::NonNegativeFinite);
+    let second = graph.input(shape(&[2]), Domain::Any);
+    let transition = Step {
+        contract: MultiOutputContract {
+            inputs: vec![
+                NamedPortContract::new("state", port(&[2], Domain::Finite)),
+                NamedPortContract::new("input", port(&[2], Domain::NonNegativeFinite)),
+            ],
+            outputs: vec![
+                NamedPortContract::new("next_state", port(&[2], Domain::NonNegativeFinite)),
+                NamedPortContract::new("output", port(&[2], Domain::NonNegativeFinite)),
+            ],
+        },
+    };
+    let count = graph.nodes().len();
+    assert!(matches!(
+        graph.scan_fixed(&transition, initial, &[first, second]),
+        Err(NeuralError::DomainNotEstablished {
+            required: Domain::NonNegativeFinite,
+            actual: Domain::Any,
+        })
+    ));
+    assert_eq!(graph.nodes().len(), count);
+    assert!(graph.multi_modules().is_empty());
+
+    assert!(matches!(
+        graph.scan_fixed(&transition, initial, &[]),
+        Err(NeuralError::ContractViolation {
+            detail: "fixed scan requires at least one step",
+            ..
+        })
+    ));
+}

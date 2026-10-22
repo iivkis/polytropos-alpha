@@ -389,6 +389,30 @@ impl MultiModuleInvocation {
     }
 }
 
+/// A bounded, explicit state-transition chain. `states[0]` is the initial
+/// value and `states[t + 1]` is the `next_state` returned at step `t`.
+/// This represents finite unrolling, not inductive verification for all time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixedScan {
+    pub states: Vec<NodeId>,
+    pub outputs: Vec<NodeId>,
+    /// Indices of instantiated step modules in `NeuralGraph::multi_modules`.
+    pub module_indices: Vec<usize>,
+}
+
+impl FixedScan {
+    /// Select every state transition and readout for a single Lean program.
+    /// Proof generation still requires a separate Lean checker invocation.
+    pub fn proof_outputs(&self) -> Vec<NodeId> {
+        self.states
+            .iter()
+            .skip(1)
+            .chain(self.outputs.iter())
+            .copied()
+            .collect()
+    }
+}
+
 /// Append-only Semantic Neural IR with graph-scoped edges and checked contracts.
 #[derive(Clone, Debug)]
 pub struct NeuralGraph {
@@ -666,6 +690,75 @@ impl NeuralGraph {
         });
         *self = candidate;
         Ok(output)
+    }
+
+    /// Unroll a statically bounded state transition, without introducing a
+    /// built-in recurrent architecture or an implicit GPU execution mode.
+    /// The transition's interface must be exactly:
+    /// inputs: `state`, `input`; outputs: `next_state`, `output`.
+    /// Step instances use `apply_multi_module` with the same shape/domain
+    /// checks and named proof obligations as any other consumer module.
+    ///
+    /// All steps are committed atomically, including when a later input
+    /// violates its contract. The final state and every readout are explicit
+    /// IR nodes usable by Lean generation and CUDA Graph lowering.
+    pub fn scan_fixed<M: MultiOutputModule>(
+        &mut self,
+        transition: &M,
+        initial_state: NodeId,
+        inputs: &[NodeId],
+    ) -> Result<FixedScan, NeuralError> {
+        let contract = transition.contract();
+        if contract.inputs.len() != 2
+            || contract.outputs.len() != 2
+            || contract.inputs[0].name != "state"
+            || contract.inputs[1].name != "input"
+            || contract.outputs[0].name != "next_state"
+            || contract.outputs[1].name != "output"
+        {
+            return Err(NeuralError::ContractViolation {
+                module: transition.name(),
+                detail: "fixed scan requires state/input and next_state/output ports",
+            });
+        }
+        if inputs.is_empty() {
+            return Err(NeuralError::ContractViolation {
+                module: transition.name(),
+                detail: "fixed scan requires at least one step",
+            });
+        }
+        if contract.inputs[0].port.shape != contract.outputs[0].port.shape
+            || !contract.outputs[0]
+                .port
+                .domain
+                .satisfies(contract.inputs[0].port.domain)
+        {
+            return Err(NeuralError::ContractViolation {
+                module: transition.name(),
+                detail: "next_state does not satisfy the next step's state port",
+            });
+        }
+        self.node(initial_state)?;
+        for &input in inputs {
+            self.node(input)?;
+        }
+        let mut candidate = self.clone();
+        let mut states = vec![initial_state];
+        let mut outputs = Vec::with_capacity(inputs.len());
+        let mut module_indices = Vec::with_capacity(inputs.len());
+        for &input in inputs {
+            let state = *states.last().expect("initialized with initial_state");
+            let result = candidate.apply_multi_module(transition, &[state, input])?;
+            module_indices.push(candidate.multi_modules.len() - 1);
+            states.push(result[0]);
+            outputs.push(result[1]);
+        }
+        *self = candidate;
+        Ok(FixedScan {
+            states,
+            outputs,
+            module_indices,
+        })
     }
 
     /// Multi-output module invocation is atomic; each returned port has its own
