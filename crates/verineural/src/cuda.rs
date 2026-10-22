@@ -28,15 +28,23 @@ mod platform {
 
     impl Library {
         fn open() -> Result<Self, GpuError> {
-            let name = c"libcuda.so.1";
-            // SAFETY: name is a NUL-terminated static string.
-            let handle = unsafe { dlopen(name.as_ptr(), RTLD_NOW) };
-            if handle.is_null() {
-                return Err(GpuError::Driver(
-                    "could not load libcuda.so.1; install an NVIDIA driver".into(),
-                ));
+            // The host driver, NOT the CUDA toolkit's stub library, provides
+            // libcuda.so.1. NixOS exposes its kernel-matched driver under
+            // /run/opengl-driver/lib, which may be absent from the dynamic
+            // loader search path inside nix develop.
+            for name in [
+                c"libcuda.so.1",
+                c"/run/opengl-driver/lib/libcuda.so.1",
+            ] {
+                // SAFETY: each candidate is a NUL-terminated static string.
+                let handle = unsafe { dlopen(name.as_ptr(), RTLD_NOW) };
+                if !handle.is_null() {
+                    return Ok(Self(handle));
+                }
             }
-            Ok(Self(handle))
+            Err(GpuError::Driver(
+                "could not load host libcuda.so.1 (also tried /run/opengl-driver/lib/libcuda.so.1); check the NVIDIA driver and its library path".into(),
+            ))
         }
 
         fn function<T: Copy>(&self, name: &'static str) -> Result<T, GpuError> {

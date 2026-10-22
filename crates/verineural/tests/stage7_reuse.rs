@@ -256,3 +256,13 @@ fn memory_proof_files_are_pinned_in_stage7_manifest() {
     assert!(source.contains("proof.check_file(&root.join(\"memory_baseline.lean\"))"));
     assert!(source.contains("proof.check_file(&root.join(\"memory_fused.lean\"))"));
 }
+
+#[test]
+fn cuda_driver_loader_checks_nixos_host_driver_without_toolkit_stub() {
+    let source = include_str!("../src/cuda.rs");
+    assert!(source.contains("c\"libcuda.so.1\""));
+    assert!(source.contains("c\"/run/opengl-driver/lib/libcuda.so.1\""));
+    assert!(source.contains("dlopen(name.as_ptr(), RTLD_NOW)"));
+    // The CUDA toolkit stub is not a replacement for the host driver.
+    assert!(!source.contains("lib64/stubs/libcuda.so"));
+}

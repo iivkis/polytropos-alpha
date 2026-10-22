@@ -150,6 +150,19 @@ task neural-stage6
 **Граница текущего среза:** иерархическая архитектура с пользовательскими глобальными теоремами, произвольные новые математические операции, циклы/состояние и доказательство FP32/GPU lowering ещё не реализованы. Attention, KV Cache, MHA/GQA, MoE и другие готовые архитектурные LLM-блоки **не планируются как обязательный каталог**.
 
 
+### NVIDIA Driver в NixOS devShell
+
+Для GPU-кода необходима **реальная системная** `libcuda.so.1` из установленного NVIDIA-драйвера, а не stub-библиотека из CUDA Toolkit. На NixOS она обычно доступна по пути `/run/opengl-driver/lib/libcuda.so.1`. `CudaSession` сначала пробует стандартное имя через `dlopen`, затем этот абсолютный путь; глобальный `LD_LIBRARY_PATH` не изменяется.
+
+При ошибке загрузки на хосте проверяйте:
+
+```sh
+nvidia-smi
+ls -l /run/opengl-driver/lib/libcuda.so.1
+```
+
+Отсутствие файла или неработающий `nvidia-smi` означает проблему конфигурации драйвера на хосте; `cuda_nvcc` и `cuda_cudart` из `flake.nix` не устанавливают драйвер. Сначала должен пройти `task gpu-stage4`, только затем имеет смысл запускать `task cert-stage5`, `task verify-stage5`, `task gpu-stage7` и `task verify-gpu-stage7`: команды `verify-*` не восстановят манифесты после неудачного GPU-прогона.
+
 ## CUDA Graph-only execution (после запрета legacy streams)
 
 VeriNeural теперь **не использует CUDA Legacy Streams**: CUDA-kernels захватываются в **CUDA Graph** и исполняются через `cuGraphLaunch` на явно созданном `CU_STREAM_NON_BLOCKING`. Host↔device копирование использует `cuMemcpyHtoDAsync_v2` / `cuMemcpyDtoHAsync_v2` с pinned host buffers на том же потоке, а ожидание выполняется `cuStreamSynchronize`. Память GPU выделяется до захвата, чтобы CUDA Graph не перехватывал операции выделения. Если CUDA Graph API отсутствуют или создание графа завершилось ошибкой, выполнение останавливается без legacy fallback. `GpuEngine::prepare` один раз компилирует/загружает PTX, выделяет buffers, захватывает граф и создаёт `CUgraphExec`; `GpuExecution::replay` затем повторно вызывает `cuGraphLaunch` без повторной сборки и инстанцирования графа. Обычный `execute` использует тот же путь с одним replay. Для графов из одних входов/Reshape GPU kernels отсутствуют, поэтому запускается только необходимая передача данных без пустого графа. Поле `gpu_launch.execution` в SHA-256-отчёте по-прежнему фиксирует graph-only non-blocking-stream режим.
