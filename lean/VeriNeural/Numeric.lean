@@ -138,4 +138,115 @@ theorem tensor_within_matmul {m k n : Nat}
     0 0 hf hzero
   simpa [matmul, f, List.length_range] using h
 
+
+/-!
+A second Stage 8 slice models round-to-nearest, ties-to-even for concrete
+dyadic fixed-point traces. Values are represented as mathematical Int "ticks"
+of one common power-of-two quantum chosen by Rust. For fractionBits <= 30,
+every nonzero i64 tick is far above the binary32 subnormal range and far below
+overflow; the Rust trace generator still rejects inputs that do not lie on the
+chosen lattice.
+
+Binary32RneTick does not claim that LLVM/PTX/GPU hardware followed this
+relation. It is the formal target relation used by the independent integer
+rounding oracle and concrete Lean trace.
+-/
+
+def ApproxWithin (epsilon ideal actual : Int) : Prop :=
+  Within epsilon (actual - ideal)
+
+theorem approx_refl (a : Int) : ApproxWithin 0 a a := by
+  unfold ApproxWithin Within
+  constructor <;> omega
+
+theorem approx_weaken {small big ideal actual : Int}
+    (hbound : small ≤ big) (h : ApproxWithin small ideal actual) :
+    ApproxWithin big ideal actual := by
+  unfold ApproxWithin Within at h ⊢
+  constructor <;> omega
+
+theorem approx_add {idealA actualA idealB actualB epsilonA epsilonB : Int}
+    (ha : ApproxWithin epsilonA idealA actualA)
+    (hb : ApproxWithin epsilonB idealB actualB) :
+    ApproxWithin (epsilonA + epsilonB)
+      (idealA + idealB) (actualA + actualB) := by
+  unfold ApproxWithin Within at ha hb ⊢
+  constructor <;> omega
+
+theorem approx_trans {ideal middle actual epsilonA epsilonB : Int}
+    (ha : ApproxWithin epsilonA ideal middle)
+    (hb : ApproxWithin epsilonB middle actual) :
+    ApproxWithin (epsilonA + epsilonB) ideal actual := by
+  unfold ApproxWithin Within at ha hb ⊢
+  constructor <;> omega
+
+theorem approx_add_round
+    {idealA actualA idealB actualB rounded epsilonA epsilonB epsilonRound : Int}
+    (ha : ApproxWithin epsilonA idealA actualA)
+    (hb : ApproxWithin epsilonB idealB actualB)
+    (hr : ApproxWithin epsilonRound (actualA + actualB) rounded) :
+    ApproxWithin (epsilonA + epsilonB + epsilonRound)
+      (idealA + idealB) rounded := by
+  have hsum := approx_add ha hb
+  have h := approx_trans hsum hr
+  simpa [Int.add_assoc] using h
+
+theorem approx_relu {ideal actual epsilon : Int}
+    (h : ApproxWithin epsilon ideal actual) :
+    ApproxWithin epsilon (max ideal 0) (max actual 0) := by
+  unfold ApproxWithin Within at h ⊢
+  rcases h with ⟨hlower, hupper⟩
+  by_cases hi : ideal ≤ 0
+  · rw [Int.max_eq_right hi]
+    by_cases ha : actual ≤ 0
+    · rw [Int.max_eq_right ha]
+      constructor <;> omega
+    · have ha0 : 0 ≤ actual := by omega
+      rw [Int.max_eq_left ha0]
+      constructor <;> omega
+  · have hi0 : 0 ≤ ideal := by omega
+    rw [Int.max_eq_left hi0]
+    by_cases ha : actual ≤ 0
+    · rw [Int.max_eq_right ha]
+      constructor <;> omega
+    · have ha0 : 0 ≤ actual := by omega
+      rw [Int.max_eq_left ha0]
+      exact ⟨hlower, hupper⟩
+
+def binary32Step (shift : Nat) : Int :=
+  Int.ofNat (2 ^ shift)
+
+/-- RNE on a dyadic integer lattice.
+    shift = 0 means the exact tick magnitude is below 2^24 and therefore
+    exactly representable. For shift > 0, one binary32 ulp is 2^shift ticks.
+    The final clause is nearest with an explicit ties-to-even rule. -/
+def Binary32RneTick (exact rounded : Int) (shift : Nat) : Prop :=
+  let step := binary32Step shift
+  let magnitude : Int := Int.ofNat exact.natAbs
+  0 < step ∧
+    ((shift = 0 ∧ magnitude < 16777216) ∨
+      (0 < shift ∧ 8388608 * step ≤ magnitude ∧
+        magnitude < 16777216 * step)) ∧
+    rounded % step = 0 ∧
+    let distance : Int := Int.ofNat (rounded - exact).natAbs
+    (2 * distance < step ∨
+      (2 * distance = step ∧ (rounded / step) % 2 = 0))
+
+/-- RNE implies a conservative one-ulp absolute error bound in tick units.
+    This deliberately keeps the proof simple; concrete traces may observe a
+    smaller half-ulp error, but composition uses this proved budget. -/
+theorem binary32_rne_within_step {exact rounded : Int} {shift : Nat}
+    (h : Binary32RneTick exact rounded shift) :
+    ApproxWithin (binary32Step shift) exact rounded := by
+  unfold Binary32RneTick at h
+  rcases h with ⟨hstep, _hbin, _halign, hnearest⟩
+  let distance : Int := Int.ofNat (rounded - exact).natAbs
+  have hdistance : distance ≤ binary32Step shift := by
+    dsimp [distance]
+    rcases hnearest with hlt | heq
+    · omega
+    · omega
+  unfold ApproxWithin Within
+  rcases Int.natAbs_eq (rounded - exact) with hs | hs <;> omega
+
 end VeriNeural
