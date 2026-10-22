@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use crate::translation::{TranslationKernel, TranslationKind, TranslationPlan};
 use crate::{NeuralError, NeuralGraph, NodeId, Operation, Shape, Tensor};
 
 use super::cuda::CudaSession;
@@ -459,6 +460,86 @@ impl GpuProgram {
         Ok(result)
     }
 
+    /// Derive the expected kernel composition from the original reachable
+    /// graph, checked fusion decisions and exact memory contracts, not PTX.
+    /// Each plan row is later cross-checked against LLVM and PTX per kernel.
+    pub fn translation_plan(&self) -> Result<TranslationPlan, GpuError> {
+        let mut kernels = Vec::new();
+        for contract in self.memory_contracts()? {
+            let node = &self.graph.nodes()[contract.kernel_node];
+            let kind = if let Some(chain) = self.fused_pointwise_chains.get(&contract.kernel_node) {
+                let inner = &self.graph.nodes()[chain[0]].operation;
+                let columns = match contract.pattern {
+                    GpuMemoryPattern::BiasAdd { columns } => columns,
+                    _ => return Err(GpuError::Fp32PtxRejected {
+                        reason: "fused chain lacks BiasAdd memory contract".into()
+                    }),
+                };
+                match inner {
+                    Operation::Add => TranslationKind::AddBiasRelu { columns },
+                    Operation::Mul => TranslationKind::MulBiasRelu { columns },
+                    _ => return Err(GpuError::Fp32PtxRejected {
+                        reason: "unsupported fused inner operation".into()
+                    }),
+                }
+            } else if let Some(&producer) = self.fused_relus.get(&contract.kernel_node) {
+                match self.graph.nodes()[producer].operation {
+                    Operation::Add => TranslationKind::AddRelu,
+                    Operation::Mul => TranslationKind::MulRelu,
+                    Operation::BiasAdd => {
+                        let columns = match contract.pattern {
+                            GpuMemoryPattern::BiasAdd { columns } => columns,
+                            _ => return Err(GpuError::Fp32PtxRejected {
+                                reason: "fused bias lacks broadcast memory contract".into()
+                            }),
+                        };
+                        TranslationKind::BiasAddRelu { columns }
+                    }
+                    _ => return Err(GpuError::Fp32PtxRejected {
+                        reason: "unsupported fused producer operation".into()
+                    }),
+                }
+            } else {
+                match node.operation {
+                    Operation::Add => TranslationKind::Add,
+                    Operation::Mul => TranslationKind::Mul,
+                    Operation::BiasAdd => {
+                        let columns = match contract.pattern {
+                            GpuMemoryPattern::BiasAdd { columns } => columns,
+                            _ => return Err(GpuError::Fp32PtxRejected {
+                                reason: "bias lacks broadcast memory contract".into()
+                            }),
+                        };
+                        TranslationKind::BiasAdd { columns }
+                    }
+                    Operation::MatMul => {
+                        let (inner, columns) = match contract.pattern {
+                            GpuMemoryPattern::MatMul { inner, columns, .. } => (inner, columns),
+                            _ => return Err(GpuError::Fp32PtxRejected {
+                                reason: "MatMul lacks reduction memory contract".into()
+                            }),
+                        };
+                        TranslationKind::MatMul { inner, columns }
+                    }
+                    Operation::Relu => TranslationKind::Relu,
+                    _ => return Err(GpuError::Fp32PtxRejected {
+                        reason: "unexpected operation in kernel translation plan".into()
+                    }),
+                }
+            };
+            kernels.push(TranslationKernel {
+                node: contract.kernel_node,
+                kind,
+                reads: contract.reads,
+                writes: contract.writes,
+            });
+        }
+        Ok(TranslationPlan {
+            threads_per_block: self.launch.threads_per_block(),
+            kernels,
+        })
+    }
+
     /// Lean proofs of the natural-number address bounds for the actual shapes.
     /// The proof does not validate the LLVM/PTX instructions or GPU pointers.
     pub fn memory_lean_source(&self) -> Result<String, GpuError> {
@@ -803,12 +884,24 @@ impl GpuEngine {
                 ),
             });
         }
-        // Every llc output is checked before CUDA can load it.
+        // Translation validation must succeed before the PTX reaches CUDA JIT.
+        // The generated plan is derived from Semantic IR and fusion/memory
+        // contracts, while the report is checked from both emitted artifacts.
         let ptx_source = fs::read_to_string(&ptx)?;
-        if let Err(err) = audit_fp32_ptx(program.llvm_ir(), &ptx_source) {
-            let _ = fs::remove_file(&ptx);
-            return Err(err);
-        }
+        let plan = program.translation_plan()?;
+        let validated = plan.validate(program.llvm_ir(), &ptx_source)
+            .map_err(|err| GpuError::Fp32PtxRejected {
+                reason: format!("per-kernel translation validation: {err}")
+            });
+        let report = match validated {
+            Ok(report) => report,
+            Err(err) => {
+                let _ = fs::remove_file(&ptx);
+                return Err(err);
+            }
+        };
+        fs::write(dir.join("translation.plan"), plan.to_text())?;
+        fs::write(dir.join("translation.report"), report.to_text())?;
         Ok(ptx)
     }
 

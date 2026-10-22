@@ -117,11 +117,11 @@ tasks:
       - cargo run -p verineural --example stage7_benchmark --release
 
   numeric-stage8:
-    desc: Check Stage 8 Lean/RNE, FMA, subnormal and exceptional FP32 CUDA Graph evidence
+    desc: Check Stage 8 Lean/RNE and per-kernel Numeric Translation Validation before CUDA Graph execution
     cmds:
       - cargo run -p verineural --example stage8_exact
 
   verify-numeric-stage8:
-    desc: Offline verify Stage 8 Lean, SHA-256, PTX and saved exceptional FP32 bits without CUDA
+    desc: Offline verify Stage 8 Lean, all per-kernel LLVM/PTX translation reports, FP32 bits and SHA-256
     cmds:
       - cargo run -p verineural --example stage8_exact -- --verify

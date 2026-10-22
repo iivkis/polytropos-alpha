@@ -14,37 +14,53 @@ use verineural::{
     MathContract, NeuralGraph, NeuralModule, NodeId, PortContract, ReluFusion, ResidualAdd,
     ResidualFfn, RneFp32Plan, RneRangePlan, RneThresholdSide, Shape, Tensor, audit_fp32_ptx,
     special_mul_bias_relu_boundary, subnormal_add_exact_bits, subnormal_mul_rne_bits,
-    subnormal_relu_bits,
+    subnormal_relu_bits, TranslationPlan,
 };
 
-const FILES: [&str; 72] = [
+const FILES: [&str; 101] = [
     "numeric.lean",
     "baseline/graph.ll",
     "baseline/graph.ptx",
+    "baseline/translation.plan",
+    "baseline/translation.report",
     "fused/graph.ll",
     "fused/graph.ptx",
+    "fused/translation.plan",
+    "fused/translation.report",
     "inputs.bits",
     "output.bits",
     "numeric_matmul.lean",
     "baseline_matmul/graph.ll",
     "baseline_matmul/graph.ptx",
+    "baseline_matmul/translation.plan",
+    "baseline_matmul/translation.report",
     "fused_matmul/graph.ll",
     "fused_matmul/graph.ptx",
+    "fused_matmul/translation.plan",
+    "fused_matmul/translation.report",
     "matmul_inputs.bits",
     "matmul_output.bits",
     "numeric_rne.lean",
     "baseline_rne/graph.ll",
     "baseline_rne/graph.ptx",
+    "baseline_rne/translation.plan",
+    "baseline_rne/translation.report",
     "fused_rne/graph.ll",
     "fused_rne/graph.ptx",
+    "fused_rne/translation.plan",
+    "fused_rne/translation.report",
     "rne_inputs.bits",
     "rne_output.bits",
     "rne_error.txt",
     "numeric_rne_matmul.lean",
     "baseline_rne_matmul/graph.ll",
     "baseline_rne_matmul/graph.ptx",
+    "baseline_rne_matmul/translation.plan",
+    "baseline_rne_matmul/translation.report",
     "fused_rne_matmul/graph.ll",
     "fused_rne_matmul/graph.ptx",
+    "fused_rne_matmul/translation.plan",
+    "fused_rne_matmul/translation.report",
     "rne_matmul_inputs.bits",
     "rne_matmul_output.bits",
     "rne_matmul_error.txt",
@@ -54,28 +70,41 @@ const FILES: [&str; 72] = [
     "threshold_certificates.txt",
     "baseline_fma/graph.ll",
     "baseline_fma/graph.ptx",
+    "baseline_fma/translation.plan",
+    "baseline_fma/translation.report",
     "fused_fma/graph.ll",
     "fused_fma/graph.ptx",
+    "fused_fma/translation.plan",
+    "fused_fma/translation.report",
     "fma_probe_inputs.bits",
     "fma_probe_output.bits",
     "numeric_subnormal.lean",
     "baseline_subnormal/graph.ll",
     "baseline_subnormal/graph.ptx",
+    "baseline_subnormal/translation.plan",
+    "baseline_subnormal/translation.report",
     "fused_subnormal/graph.ll",
     "fused_subnormal/graph.ptx",
+    "fused_subnormal/translation.plan",
+    "fused_subnormal/translation.report",
     "subnormal_inputs.bits",
     "subnormal_output.bits",
     "subnormal_evidence.txt",
     "numeric_special.lean",
     "baseline_special/graph.ll",
     "baseline_special/graph.ptx",
+    "baseline_special/translation.plan",
+    "baseline_special/translation.report",
     "fused_special/graph.ll",
     "fused_special/graph.ptx",
+    "fused_special/translation.plan",
+    "fused_special/translation.report",
     "special_inputs.bits",
     "special_baseline_output.bits",
     "special_fused_output.bits",
     "special_evidence.txt",
     "fp32_contraction_report.txt",
+    "translation_summary.txt",
     "numeric_architecture.lean",
     "architecture_contract.txt",
     "numeric_architecture_dag.lean",
@@ -186,6 +215,38 @@ fn special_values_report(root: &Path) -> Result<String, Box<dyn Error>> {
     Ok(report)
 }
 
+/// Offline translation validation reconstructs and rechecks each complete
+/// kernel plan against saved LLVM/PTX. The plan itself is integrity-pinned,
+/// but correspondence between serialized plan and original Rust IR remains
+/// an explicitly trusted evidence-generation step.
+fn translation_summary(root: &Path) -> Result<String, Box<dyn Error>> {
+    let mut summary = String::from(
+        "scope=Semantic-IR-derived-kernel-plan-vs-saved-LLVM-and-PTX\n\
+         validator=per-kernel-structural-rejection\n\
+         lean=separate-ideal-Int-and-bounded-dyadic-proofs\n\
+         gpu=concrete-oracle-tested-on-local-run\n\
+         fp32-translation-semantic-proof=not-proven\n\
+         cuda-jit-sass-hardware=trusted\n",
+    );
+    for profile in PTX_PROFILES {
+        let dir = root.join(profile);
+        let plan = TranslationPlan::from_text(&fs::read_to_string(dir.join("translation.plan"))?)?;
+        let llvm = fs::read_to_string(dir.join("graph.ll"))?;
+        let ptx = fs::read_to_string(dir.join("graph.ptx"))?;
+        let report = plan.validate(&llvm, &ptx)?;
+        if fs::read_to_string(dir.join("translation.report"))? != report.to_text() {
+            return Err(io::Error::other(format!(
+                "Stage 8 {profile}: saved translation report does not match evidence"
+            )).into());
+        }
+        summary.push_str(&format!(
+            "{profile}:kernels={} add.rn.f32={} mul.rn.f32={} relu_guards={} status=structural-pass\n",
+            report.kernel_count, report.rounded_adds, report.rounded_muls, report.relu_guards
+        ));
+    }
+    Ok(summary)
+}
+
 fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
     let output = Command::new("sha256sum").arg(path).output()?;
     if !output.status.success() {
@@ -252,6 +313,9 @@ fn verify(root: &Path) -> Result<(), Box<dyn Error>> {
         != fp32_contraction_report(root)?
     {
         return Err(io::Error::other("saved Stage 8 FP32 PTX audit report mismatch").into());
+    }
+    if fs::read_to_string(root.join("translation_summary.txt"))? != translation_summary(root)? {
+        return Err(io::Error::other("saved Stage 8 translation validation summary mismatch").into());
     }
     if fs::read_to_string(root.join("special_evidence.txt"))? != special_values_report(root)? {
         return Err(io::Error::other("saved Stage 8 special FP32 evidence mismatch").into());
@@ -1729,6 +1793,7 @@ end VeriNeural.Generated.RneThreshold
         root.join("fp32_contraction_report.txt"),
         fp32_contraction_report(root)?,
     )?;
+    fs::write(root.join("translation_summary.txt"), translation_summary(root)?)?;
     let result = Command::new("sha256sum")
         .args(FILES)
         .current_dir(root)
@@ -1816,6 +1881,7 @@ end VeriNeural.Generated.RneThreshold
     println!(
         "Stage 8 FP32 PTX audit: explicit separate RNE mul/add, no emitted FMA/FTZ (LLVM/PTX static check only)"
     );
+    println!("Stage 8 Numeric Translation Validation: 14 per-kernel Semantic-plan/LLVM/PTX profiles (structural only)");
     println!(
         "Stage 8 gradual underflow: 8 signed/subnormal lanes in both baseline/fused kernels; integer bit oracle plus Lean half-tick model"
     );
@@ -1827,7 +1893,7 @@ end VeriNeural.Generated.RneThreshold
         sha256(&root.join("SHA256SUMS"))?
     );
     println!(
-        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; a PTX opcode audit, FMA probe, and subnormal bit-oracle GPU probes have been checked; integer half-tick and exceptional-value Lean lemmas cover only selected encoded cases; special FP32 GPU probes are checked by an independent restricted bit-class oracle; LLVM/PTX-to-machine translation and hardware remain trusted"
+        "Lean proves ideal Int bounds, concrete dyadic RNE composition, reusable bounded transfer rules, whole-module theorems, fork/fan-in architecture DAG composition, recursive nested-module theorem reuse through depth 3, and global ideal-Int nonnegativity for Add/Mul/MatMul/BiasAdd and nested modules; ReLU margins are conditional with explicit ambiguity witness; a PTX opcode audit, FMA probe, and subnormal bit-oracle GPU probes have been checked; integer half-tick and exceptional-value Lean lemmas cover only selected encoded cases; special FP32 GPU probes are checked by an independent restricted bit-class oracle; per-kernel LLVM/PTX structure is checked against Semantic-IR-derived plans, but full FP32 semantic translation and CUDA JIT/SASS/hardware remain trusted"
     );
     Ok(())
 }

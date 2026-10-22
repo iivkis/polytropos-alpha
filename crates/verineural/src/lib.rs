@@ -25,6 +25,8 @@
 //! Strict FP32 NVPTX lowering uses explicit rounded PTX operations and
 //! rejects unsupported contraction at the emitted PTX level. The LLVM/PTX/GPU
 //! machine correspondence remains trusted rather than formally certified.
+//! Per-kernel translation plans fail closed on inconsistent LLVM/PTX lowering;
+//! structural validation is distinct from semantic proof or JIT/SASS assurance.
 
 mod certificate;
 mod cuda;
@@ -37,6 +39,7 @@ mod proof;
 mod special;
 mod subnormal;
 mod tensor;
+mod translation;
 
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use error::NeuralError;
@@ -61,6 +64,9 @@ pub use special::{
 };
 pub use subnormal::{subnormal_add_exact_bits, subnormal_mul_rne_bits, subnormal_relu_bits};
 pub use tensor::{Shape, Tensor, TensorShape};
+pub use translation::{
+    TranslationError, TranslationKernel, TranslationKind, TranslationPlan, TranslationReport,
+};
 
 #[cfg(test)]
 mod tests;
