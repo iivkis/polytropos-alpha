@@ -1,0 +1,4 @@
+node=1 shape=[2, 2] bits=3f800000,3f800000,3f800000,3f800000
+node=2 shape=[2] bits=00000000,bf800000
+node=3 shape=[2, 1] bits=3f800000,c0000000
+node=4 shape=[1] bits=00000000

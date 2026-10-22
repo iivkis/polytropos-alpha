@@ -1,0 +1,31 @@
+verineural-architecture-ir-v1
+id=xor-mlp
+version=0.1.0
+output=10
+fp32=FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }
+property=architecture_global_nonnegative
+node=0;op=Input;inputs=[];shape=[4, 2];dtype=binary32;layout=row-major;domain=NonNegativeFinite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([4, 2]), domain: NonNegativeFinite };role=input
+node=1;op=Input;inputs=[];shape=[2, 2];dtype=binary32;layout=row-major;domain=Finite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([2, 2]), domain: Finite };role=parameter
+node=2;op=Input;inputs=[];shape=[2];dtype=binary32;layout=row-major;domain=Finite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([2]), domain: Finite };role=parameter
+node=3;op=Input;inputs=[];shape=[2, 1];dtype=binary32;layout=row-major;domain=Finite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([2, 1]), domain: Finite };role=parameter
+node=4;op=Input;inputs=[];shape=[1];dtype=binary32;layout=row-major;domain=Finite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([1]), domain: Finite };role=parameter
+node=5;op=MatMul;inputs=[0, 1];shape=[4, 2];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: MatMul, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }];ensures=PortContract { shape: Shape([4, 2]), domain: Any };role=primitive
+node=6;op=BiasAdd;inputs=[5, 2];shape=[4, 2];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: BiasAdd, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }];ensures=PortContract { shape: Shape([4, 2]), domain: Any };role=primitive
+node=7;op=Relu;inputs=[6];shape=[4, 2];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([4, 2]), domain: Any }];ensures=PortContract { shape: Shape([4, 2]), domain: Any };role=primitive
+node=8;op=MatMul;inputs=[7, 3];shape=[4, 1];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: MatMul, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Any }];ensures=PortContract { shape: Shape([4, 1]), domain: Any };role=primitive
+node=9;op=BiasAdd;inputs=[8, 4];shape=[4, 1];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: BiasAdd, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([4, 1]), domain: Any }, PortContract { shape: Shape([1]), domain: Any }];ensures=PortContract { shape: Shape([4, 1]), domain: Any };role=primitive
+node=10;op=Relu;inputs=[9];shape=[4, 1];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([4, 1]), domain: Any }];ensures=PortContract { shape: Shape([4, 1]), domain: Any };role=primitive
+module=0;name=xor_affine;semantic_version=1.0;inputs=[0, 1, 2];body_start=5;output=6;requires=[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }];ensures=PortContract { shape: Shape([4, 2]), domain: Any };claims=[]
+module=1;name=xor_activated_affine;semantic_version=1.0;inputs=[0, 1, 2];body_start=5;output=7;requires=[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }];ensures=PortContract { shape: Shape([4, 2]), domain: Any };claims=[Nonnegative]
+module=2;name=xor_affine;semantic_version=1.0;inputs=[7, 3, 4];body_start=8;output=9;requires=[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Any }, PortContract { shape: Shape([1]), domain: Any }];ensures=PortContract { shape: Shape([4, 1]), domain: Any };claims=[]
+module=3;name=xor_mlp;semantic_version=0.1.0;inputs=[0, 1, 2, 3, 4];body_start=5;output=10;requires=[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Any }, PortContract { shape: Shape([1]), domain: Any }];ensures=PortContract { shape: Shape([4, 1]), domain: Any };claims=[Nonnegative]
+translation_plan_begin
+vn-translation-plan-v1
+threads=256
+kernel	5	matmul	8	0:8,1:4	2	2
+kernel	6	bias_add	8	5:8,2:2	2	0
+kernel	7	relu	8	6:8	0	0
+kernel	8	matmul	4	7:8,3:2	1	2
+kernel	9	bias_add	4	8:4,4:1	1	0
+kernel	10	relu	4	9:4	0	0
+translation_plan_end

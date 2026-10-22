@@ -1,0 +1,113 @@
+digraph verineural_auto {
+  graph [rankdir=LR, compound=true, newrank=true, splines=spline,
+         concentrate=false, outputorder=edgesfirst, mclimit=4,
+         nodesep=0.75, ranksep=1.15, pad=0.60, margin=0.18, dpi=180,
+         bgcolor="#FFFFFF", fontname="DejaVu Sans", fontcolor="#24324B",
+         labelloc=t, labeljust=l];
+  node [shape=box, style="rounded,filled", fontname="DejaVu Sans",
+        fontsize=12, fontcolor="#24324B", penwidth=1.5, margin="0.17,0.13"];
+  edge [color="#8796AA", penwidth=1.1, arrowsize=0.72];
+  label="VeriNeural · auto architecture\n11 nodes · 4 module instances · 1 outputs";
+  vn_export_version="auto-v1";
+  vn_ir_sha256="e3219af831e16d91465ab12079cce856cff56f8593931c513e56ebeeb4ff514a";
+  vn_fp32_profile="FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }";
+  vn_selected_outputs="{10}";
+  vn_lean_assurance="ideal-Int;conditional-source-assumptions;kernel-checked-at-build";
+  vn_gpu_assurance="LLVM/PTX-structural;JIT-SASS-not-proven";
+  vn_connectivity="Rust-structural-validation";
+  vn_unmodeled="arbitrary-dtype;implicit-broadcast;machine-equivalence";
+  n0 [label="INPUT · n0\n[4, 2]", fillcolor="#EAF2FF", color="#3972BD", vn_id="n0", vn_kind="input", vn_op="input", vn_instance_path="root", vn_inputs="[]", vn_shape="[4, 2]", vn_dtype="binary32", vn_layout="row-major", vn_domain="NonNegativeFinite", vn_contract="MathContract { requires: [], ensures: PortContract { shape: Shape([4, 2]), domain: NonNegativeFinite }, claims: [] }", vn_semantics="OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+  n1 [label="INPUT · n1\n[2, 2]", fillcolor="#EAF2FF", color="#3972BD", vn_id="n1", vn_kind="input", vn_op="input", vn_instance_path="root", vn_inputs="[]", vn_shape="[2, 2]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Finite", vn_contract="MathContract { requires: [], ensures: PortContract { shape: Shape([2, 2]), domain: Finite }, claims: [] }", vn_semantics="OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+  n2 [label="INPUT · n2\n[2]", fillcolor="#EAF2FF", color="#3972BD", vn_id="n2", vn_kind="input", vn_op="input", vn_instance_path="root", vn_inputs="[]", vn_shape="[2]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Finite", vn_contract="MathContract { requires: [], ensures: PortContract { shape: Shape([2]), domain: Finite }, claims: [] }", vn_semantics="OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+  n3 [label="INPUT · n3\n[2, 1]", fillcolor="#EAF2FF", color="#3972BD", vn_id="n3", vn_kind="input", vn_op="input", vn_instance_path="root", vn_inputs="[]", vn_shape="[2, 1]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Finite", vn_contract="MathContract { requires: [], ensures: PortContract { shape: Shape([2, 1]), domain: Finite }, claims: [] }", vn_semantics="OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+  n4 [label="INPUT · n4\n[1]", fillcolor="#EAF2FF", color="#3972BD", vn_id="n4", vn_kind="input", vn_op="input", vn_instance_path="root", vn_inputs="[]", vn_shape="[1]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Finite", vn_contract="MathContract { requires: [], ensures: PortContract { shape: Shape([1]), domain: Finite }, claims: [] }", vn_semantics="OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+  subgraph cluster_m3 {
+    style="rounded,filled";
+    fillcolor="#F5F8FF";
+    color="#93A9D4";
+    fontname="DejaVu Sans";
+    fontsize="14";
+    labelloc="t";
+    labeljust="l";
+    margin="22";
+    label="XOR MLP · m3\ninput_0:n0  input_1:n1  input_2:n2  input_3:n3  input_4:n4 → output:n10";
+    vn_instance_path="m3_xor_mlp";
+    vn_definition_id="xor_mlp";
+    vn_semantic_version="0.1.0";
+    vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Any }, PortContract { shape: Shape([1]), domain: Any }], ensures: PortContract { shape: Shape([4, 1]), domain: Any }, claims: [Nonnegative] }";
+    vn_input_ports="[(\"input_0\", 0), (\"input_1\", 1), (\"input_2\", 2), (\"input_3\", 3), (\"input_4\", 4)]";
+    vn_output_ports="[(\"output\", 10)]";
+    vn_proof_status="module-contracts-checkable;see-Lean-artifact";
+    n10 [label="OUTPUT · ReLU · n10\n[4, 1]", fillcolor="#DDF8E9", color="#26805A", vn_id="n10", vn_kind="architecture_output", vn_op="relu", vn_instance_path="m3_xor_mlp", vn_inputs="[9]", vn_shape="[4, 1]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Any", vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 1]), domain: Any }], ensures: PortContract { shape: Shape([4, 1]), domain: Any }, claims: [] }", vn_semantics="OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="true", vn_reachable_from_outputs="true", vn_gpu_lowering="nvptx-supported", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+    subgraph cluster_m1 {
+      style="rounded,filled";
+      fillcolor="#F1F5FD";
+      color="#A4B4CB";
+      fontname="DejaVu Sans";
+      fontsize="14";
+      labelloc="t";
+      labeljust="l";
+      margin="22";
+      label="XOR ACTIVATED AFFINE · m1\ninput_0:n0  input_1:n1  input_2:n2 → output:n7";
+      vn_instance_path="m3_xor_mlp/m1_xor_activated_affine";
+      vn_definition_id="xor_activated_affine";
+      vn_semantic_version="1.0";
+      vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }], ensures: PortContract { shape: Shape([4, 2]), domain: Any }, claims: [Nonnegative] }";
+      vn_input_ports="[(\"input_0\", 0), (\"input_1\", 1), (\"input_2\", 2)]";
+      vn_output_ports="[(\"output\", 7)]";
+      vn_proof_status="module-contracts-checkable;see-Lean-artifact";
+      n7 [label="RELU · n7\n[4, 2]", fillcolor="#F0EDFF", color="#8160BF", vn_id="n7", vn_kind="primitive", vn_op="relu", vn_instance_path="m3_xor_mlp/m1_xor_activated_affine", vn_inputs="[6]", vn_shape="[4, 2]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Any", vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 2]), domain: Any }], ensures: PortContract { shape: Shape([4, 2]), domain: Any }, claims: [] }", vn_semantics="OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+      subgraph cluster_m0 {
+        style="rounded,filled";
+        fillcolor="#F8FAFD";
+        color="#BCC8D7";
+        fontname="DejaVu Sans";
+        fontsize="14";
+        labelloc="t";
+        labeljust="l";
+        margin="22";
+        label="XOR AFFINE · m0\ninput_0:n0  input_1:n1  input_2:n2 → output:n6";
+        vn_instance_path="m3_xor_mlp/m1_xor_activated_affine/m0_xor_affine";
+        vn_definition_id="xor_affine";
+        vn_semantic_version="1.0";
+        vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }], ensures: PortContract { shape: Shape([4, 2]), domain: Any }, claims: [] }";
+        vn_input_ports="[(\"input_0\", 0), (\"input_1\", 1), (\"input_2\", 2)]";
+        vn_output_ports="[(\"output\", 6)]";
+        vn_proof_status="module-contracts-checkable;see-Lean-artifact";
+        n5 [label="MATMUL · n5\n[4, 2]", fillcolor="#E8F5FE", color="#4C90B5", vn_id="n5", vn_kind="primitive", vn_op="matmul", vn_instance_path="m3_xor_mlp/m1_xor_activated_affine/m0_xor_affine", vn_inputs="[0, 1]", vn_shape="[4, 2]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Any", vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }], ensures: PortContract { shape: Shape([4, 2]), domain: Any }, claims: [] }", vn_semantics="OperationSemantics { ideal: MatMul, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+        n6 [label="BIAS ADD · n6\n[4, 2]", fillcolor="#FDEEF3", color="#B76A91", vn_id="n6", vn_kind="primitive", vn_op="bias_add", vn_instance_path="m3_xor_mlp/m1_xor_activated_affine/m0_xor_affine", vn_inputs="[5, 2]", vn_shape="[4, 2]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Any", vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }], ensures: PortContract { shape: Shape([4, 2]), domain: Any }, claims: [] }", vn_semantics="OperationSemantics { ideal: BiasAdd, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+      }
+    }
+    subgraph cluster_m2 {
+      style="rounded,filled";
+      fillcolor="#F1F5FD";
+      color="#A4B4CB";
+      fontname="DejaVu Sans";
+      fontsize="14";
+      labelloc="t";
+      labeljust="l";
+      margin="22";
+      label="XOR AFFINE · m2\ninput_0:n7  input_1:n3  input_2:n4 → output:n9";
+      vn_instance_path="m3_xor_mlp/m2_xor_affine";
+      vn_definition_id="xor_affine";
+      vn_semantic_version="1.0";
+      vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Any }, PortContract { shape: Shape([1]), domain: Any }], ensures: PortContract { shape: Shape([4, 1]), domain: Any }, claims: [] }";
+      vn_input_ports="[(\"input_0\", 7), (\"input_1\", 3), (\"input_2\", 4)]";
+      vn_output_ports="[(\"output\", 9)]";
+      vn_proof_status="module-contracts-checkable;see-Lean-artifact";
+      n8 [label="MATMUL · n8\n[4, 1]", fillcolor="#E8F5FE", color="#4C90B5", vn_id="n8", vn_kind="primitive", vn_op="matmul", vn_instance_path="m3_xor_mlp/m2_xor_affine", vn_inputs="[7, 3]", vn_shape="[4, 1]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Any", vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Any }], ensures: PortContract { shape: Shape([4, 1]), domain: Any }, claims: [] }", vn_semantics="OperationSemantics { ideal: MatMul, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+      n9 [label="BIAS ADD · n9\n[4, 1]", fillcolor="#FDEEF3", color="#B76A91", vn_id="n9", vn_kind="primitive", vn_op="bias_add", vn_instance_path="m3_xor_mlp/m2_xor_affine", vn_inputs="[8, 4]", vn_shape="[4, 1]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Any", vn_contract="MathContract { requires: [PortContract { shape: Shape([4, 1]), domain: Any }, PortContract { shape: Shape([1]), domain: Any }], ensures: PortContract { shape: Shape([4, 1]), domain: Any }, claims: [] }", vn_semantics="OperationSemantics { ideal: BiasAdd, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_selected_output="false", vn_reachable_from_outputs="true", vn_gpu_lowering="no-selected-output-profile", vn_proof_status="ideal-Int;checked-in-auto-bundle"];
+    }
+  }
+  { rank=same; n0; n1; n2; n3; n4; }
+  n0 -> n5 [color="#7489A8", penwidth="1.15", weight="2", minlen="1", constraint="true", vn_semantic_src="n0", vn_semantic_dst="n5", vn_dst_port="input_0", vn_order="0", vn_shape="[4, 2]", vn_dtype="binary32", vn_role="data"];
+  n1 -> n5 [color="#95A3B5", penwidth="1.15", weight="2", minlen="1", constraint="true", vn_semantic_src="n1", vn_semantic_dst="n5", vn_dst_port="input_1", vn_order="1", vn_shape="[2, 2]", vn_dtype="binary32", vn_role="data"];
+  n5 -> n6 [color="#7489A8", penwidth="1.15", weight="5", minlen="1", constraint="true", vn_semantic_src="n5", vn_semantic_dst="n6", vn_dst_port="input_0", vn_order="0", vn_shape="[4, 2]", vn_dtype="binary32", vn_role="data"];
+  n2 -> n6 [color="#95A3B5", penwidth="1.15", weight="2", minlen="1", constraint="true", vn_semantic_src="n2", vn_semantic_dst="n6", vn_dst_port="input_1", vn_order="1", vn_shape="[2]", vn_dtype="binary32", vn_role="data"];
+  n6 -> n7 [color="#7489A8", penwidth="1.15", weight="2", minlen="1", constraint="true", vn_semantic_src="n6", vn_semantic_dst="n7", vn_dst_port="input_0", vn_order="0", vn_shape="[4, 2]", vn_dtype="binary32", vn_role="data"];
+  n7 -> n8 [color="#7489A8", penwidth="1.15", weight="2", minlen="1", constraint="true", vn_semantic_src="n7", vn_semantic_dst="n8", vn_dst_port="input_0", vn_order="0", vn_shape="[4, 2]", vn_dtype="binary32", vn_role="data"];
+  n3 -> n8 [color="#95A3B5", penwidth="1.15", weight="2", minlen="1", constraint="true", vn_semantic_src="n3", vn_semantic_dst="n8", vn_dst_port="input_1", vn_order="1", vn_shape="[2, 1]", vn_dtype="binary32", vn_role="data"];
+  n8 -> n9 [color="#7489A8", penwidth="1.15", weight="5", minlen="1", constraint="true", vn_semantic_src="n8", vn_semantic_dst="n9", vn_dst_port="input_0", vn_order="0", vn_shape="[4, 1]", vn_dtype="binary32", vn_role="data"];
+  n4 -> n9 [color="#95A3B5", penwidth="1.15", weight="2", minlen="1", constraint="true", vn_semantic_src="n4", vn_semantic_dst="n9", vn_dst_port="input_1", vn_order="1", vn_shape="[1]", vn_dtype="binary32", vn_role="data"];
+  n9 -> n10 [color="#7489A8", penwidth="1.15", weight="2", minlen="1", constraint="true", vn_semantic_src="n9", vn_semantic_dst="n10", vn_dst_port="input_0", vn_order="0", vn_shape="[4, 1]", vn_dtype="binary32", vn_role="data"];
+}
