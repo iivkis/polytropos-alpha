@@ -1296,12 +1296,19 @@ fn p1_multi_output_single_lean_artifact_checks_named_ports_and_downstream() {
         "multi_0_port_1_claim_0",
         "node_3_semantics",
     ] {
-        assert!(program.theorem_names().iter().any(|name| name == theorem), "{theorem}");
+        assert!(
+            program.theorem_names().iter().any(|name| name == theorem),
+            "{theorem}"
+        );
     }
     assert!(program.source().contains("(node_2 x_0) = (node_0 x_0)"));
     assert_eq!(
         program.theorem_names().len(),
-        program.theorem_names().iter().collect::<std::collections::BTreeSet<_>>().len(),
+        program
+            .theorem_names()
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
     );
 }
 
@@ -1412,9 +1419,7 @@ fn p1_fixed_scan_unrolls_explicit_state_and_checks_each_step_in_lean() {
             ],
         },
     };
-    let scan = graph
-        .scan_fixed(&transition, initial, &[x0, x1])
-        .unwrap();
+    let scan = graph.scan_fixed(&transition, initial, &[x0, x1]).unwrap();
     assert_eq!(scan.states.len(), 3);
     assert_eq!(scan.outputs.len(), 2);
     assert_eq!(scan.module_indices, vec![0, 1]);

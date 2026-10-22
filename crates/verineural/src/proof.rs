@@ -61,7 +61,10 @@ impl fmt::Display for ProofError {
                 write!(f, "property name must be a nonempty Lean-safe identifier")
             }
             Self::InvalidOutputs => {
-                write!(f, "Lean proof requires a nonempty set of distinct output nodes")
+                write!(
+                    f,
+                    "Lean proof requires a nonempty set of distinct output nodes"
+                )
             }
             Self::Io(error) => write!(f, "Lean checker I/O failure: {error}"),
             Self::LeanRejected { details } => write!(f, "Lean proof rejected: {details}"),
@@ -626,19 +629,28 @@ impl LeanProofEngine {
 
             // All input ports are part of the declared module interface, even
             // if a particular output does not use the associated tensor.
-            for (port_index, (&input, port)) in
-                module.inputs.iter().zip(&module.contract.inputs).enumerate()
+            for (port_index, (&input, port)) in module
+                .inputs
+                .iter()
+                .zip(&module.contract.inputs)
+                .enumerate()
             {
                 let actual = graph.node(input)?;
                 emit_decidable(
                     &mut source,
                     &mut theorems,
                     format!("multi_{module_index}_input_{port_index}_shape"),
-                    format!("{} = {}", shape_expr(&actual.shape), shape_expr(&port.port.shape)),
+                    format!(
+                        "{} = {}",
+                        shape_expr(&actual.shape),
+                        shape_expr(&port.port.shape)
+                    ),
                 );
                 if port.port.domain == Domain::NonNegativeFinite {
                     if actual.domain != Domain::NonNegativeFinite {
-                        return Err(ProofError::UnsupportedGuarantee { node: input.index() });
+                        return Err(ProofError::UnsupportedGuarantee {
+                            node: input.index(),
+                        });
                     }
                     emit_nonnegative_alias(
                         &mut source,
@@ -651,8 +663,11 @@ impl LeanProofEngine {
                 }
             }
 
-            for (port_index, (&output, port)) in
-                module.outputs.iter().zip(&module.contract.outputs).enumerate()
+            for (port_index, (&output, port)) in module
+                .outputs
+                .iter()
+                .zip(&module.contract.outputs)
+                .enumerate()
             {
                 if !used.contains(&output.index()) {
                     continue;
@@ -662,11 +677,17 @@ impl LeanProofEngine {
                     &mut source,
                     &mut theorems,
                     format!("multi_{module_index}_port_{port_index}_shape"),
-                    format!("{} = {}", shape_expr(&actual.shape), shape_expr(&port.port.shape)),
+                    format!(
+                        "{} = {}",
+                        shape_expr(&actual.shape),
+                        shape_expr(&port.port.shape)
+                    ),
                 );
                 if port.port.domain == Domain::NonNegativeFinite {
                     if actual.domain != Domain::NonNegativeFinite {
-                        return Err(ProofError::UnsupportedGuarantee { node: output.index() });
+                        return Err(ProofError::UnsupportedGuarantee {
+                            node: output.index(),
+                        });
                     }
                     emit_nonnegative_alias(
                         &mut source,
@@ -678,7 +699,8 @@ impl LeanProofEngine {
                     );
                 }
                 for (claim_index, claim) in port.claims.iter().enumerate() {
-                    let name = format!("multi_{module_index}_port_{port_index}_claim_{claim_index}");
+                    let name =
+                        format!("multi_{module_index}_port_{port_index}_claim_{claim_index}");
                     match claim {
                         ContractClaim::Nonnegative => {
                             if actual.domain != Domain::NonNegativeFinite {

@@ -51,10 +51,10 @@ pub use gpu::{
     GpuMemoryContract, GpuMemoryPattern, GpuProgram, ReluFusion, audit_fp32_ptx,
 };
 pub use ir::{
-    ContractClaim, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics, MathContract, ModuleInvocation,
-    MultiModuleInvocation, MultiOutputContract, MultiOutputModule, NamedPortContract, NeuralGraph,
-    NeuralModule, Node, NodeId, Operation, OperationSemantics, PortContract, ReductionOrder,
-    RoundingMode, SubnormalMode,
+    ContractClaim, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics, MathContract,
+    ModuleInvocation, MultiModuleInvocation, MultiOutputContract, MultiOutputModule,
+    NamedPortContract, NeuralGraph, NeuralModule, Node, NodeId, Operation, OperationSemantics,
+    PortContract, ReductionOrder, RoundingMode, SubnormalMode,
 };
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
 pub use numeric::{
