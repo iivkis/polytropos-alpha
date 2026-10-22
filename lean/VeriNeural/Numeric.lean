@@ -232,6 +232,11 @@ def Binary32RneTick (exact rounded : Int) (shift : Nat) : Prop :=
     (2 * distance < step ∨
       (2 * distance = step ∧ (rounded / step) % 2 = 0))
 
+instance binary32RneTickDecidable (exact rounded : Int) (shift : Nat) :
+    Decidable (Binary32RneTick exact rounded shift) := by
+  unfold Binary32RneTick
+  infer_instance
+
 /-- RNE implies a conservative one-ulp absolute error bound in tick units.
     This deliberately keeps the proof simple; concrete traces may observe a
     smaller half-ulp error, but composition uses this proved budget. -/
