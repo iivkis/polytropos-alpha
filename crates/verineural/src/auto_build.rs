@@ -621,6 +621,27 @@ impl ArchitectureAutoCompiler {
             &directory,
             &auto_bundle::canonical_ir(graph, outputs, tasks, gpu_requirement),
         )?;
+        let ir_sha256 = auto_bundle::hash_file(&directory.join("semantic.ir"))?;
+        let expected_dot = crate::architecture::auto_architecture_dot(graph, &plan, &ir_sha256)?;
+        let dot_file = directory.join("architecture.dot");
+        if fs::read_to_string(&dot_file)? != expected_dot {
+            return Err(AutoBuildError::Integrity(
+                "architecture.dot does not match current Semantic IR and output status".into(),
+            ));
+        }
+        // Re-render the exact saved DOT with the pinned Nix Graphviz tool.
+        // A PNG that was swapped while retaining the manifest is rejected.
+        let rerendered = directory.join("architecture.replay.png");
+        crate::architecture::render_dot_png(&dot_file, &rerendered)?;
+        let image_check = (|| -> Result<bool, AutoBuildError> {
+            Ok(fs::read(&rerendered)? == fs::read(directory.join("architecture.png"))?)
+        })();
+        let _ = fs::remove_file(&rerendered);
+        if !image_check? {
+            return Err(AutoBuildError::Integrity(
+                "saved architecture.png differs from pinned Graphviz render of DOT".into(),
+            ));
+        }
         let lean_dir = directory.join("lean");
         let mut axiom_dependencies = BTreeMap::new();
         let (lean_version, architecture_theorems) = {
@@ -712,6 +733,13 @@ impl ArchitectureAutoCompiler {
                 }
             }
         }
+        let ir_sha256 = auto_bundle::hash_file(&directory.join("semantic.ir"))?;
+        let dot = crate::architecture::auto_architecture_dot(graph, &plan, &ir_sha256)?;
+        fs::write(directory.join("architecture.dot"), dot)?;
+        crate::architecture::render_dot_png(
+            &directory.join("architecture.dot"),
+            &directory.join("architecture.png"),
+        )?;
         let report = AutoBuildReport {
             directory: directory.clone(),
             connectivity: plan.connectivity,

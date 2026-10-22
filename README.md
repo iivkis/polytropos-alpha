@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `ArchitectureAutoCompiler` объединяет проверку типизированных связей компонентов, генерацию и Lean-аудит всех выбранных выходов и независимых целей, LLVM/PTX lowering каждого поддерживаемого NVIDIA-выхода и один отчёт с гипотезами и статусами. Модули и математические цели объявляются потребителем на Rust; встроенной LLM-архитектуры нет. Неподдерживаемые GPU-операции либо отклоняются (`GpuRequirement::AllOutputs`), либо получают явный статус `unsupported`. **Структурная проверка связей на Rust и доказательство свойств Lean не являются доказательством PTX/SASS и FP32 эквивалентности.**
 
-См. [руководство по автоматической сборке](docs/verineural/AUTO_BUILD.md), `task auto-architecture` и `task verify-auto-architecture`. Для авто-сборки теперь формируются канонический `semantic.ir`, `SHA256SUMS` и replay с повторной проверкой Lean/аксиом и существующих LLVM/PTX validation планов без CUDA. Digest SHA256SUMS следует закреплять вне каталога артефактов. Новый replay-срез ожидает локальных проверок.
+См. [руководство по автоматической сборке](docs/verineural/AUTO_BUILD.md), `task auto-architecture` и `task verify-auto-architecture`. Для авто-сборки теперь формируются канонический `semantic.ir`, единственный `architecture.dot` с вложенными и многовыходными блоками, `architecture.png` через закреплённый Graphviz, `SHA256SUMS` и replay с повторной проверкой DOT/PNG, Lean/аксиом и существующих LLVM/PTX validation планов без CUDA. Повторный рендер PNG требует Graphviz из Nix devShell. Digest SHA256SUMS следует закреплять вне каталога артефактов. Новый replay-срез ожидает локальных проверок.
 
 ## Stage 9: отдельная исследовательская лаборатория (новый крупный срез, локально не проверен)
 

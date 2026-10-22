@@ -9,7 +9,7 @@ use crate::{ArchitectureProofTask, GpuRequirement, NeuralGraph, NodeId, ProofGoa
 
 const MANIFEST: &str = "SHA256SUMS";
 
-fn hash_file(path: &Path) -> Result<String, AutoBuildError> {
+pub(super) fn hash_file(path: &Path) -> Result<String, AutoBuildError> {
     crate::certificate::hash_file(path).map_err(|err| AutoBuildError::Integrity(err.to_string()))
 }
 
@@ -92,6 +92,8 @@ pub(super) fn canonical_ir(
 pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
     let mut files = vec![
         "semantic.ir".to_owned(),
+        "architecture.dot".to_owned(),
+        "architecture.png".to_owned(),
         "report.txt".to_owned(),
         "lean/architecture.lean".to_owned(),
         "lean/audit.txt".to_owned(),
@@ -228,6 +230,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let files = artifact_files(&plan);
         assert!(files.contains(&"gpu_0/graph.ptx".to_owned()));
+        assert!(files.contains(&"architecture.dot".to_owned()));
+        assert!(files.contains(&"architecture.png".to_owned()));
         for file in &files {
             let path = root.join(file);
             if let Some(parent) = path.parent() {
