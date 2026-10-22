@@ -1514,7 +1514,6 @@ impl RneFp32Trace {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RneErrorContract {
     ideal_bound_ticks: i64,
@@ -1676,11 +1675,15 @@ impl RneRangePlan {
                 Operation::MatMul => {
                     let left = contracts[&node.inputs[0].index()];
                     let right = contracts[&node.inputs[1].index()];
-                    let (product, product_max_shift) =
-                        Self::mul_contract(index, left, right)?;
+                    let (product, product_max_shift) = Self::mul_contract(index, left, right)?;
                     let inner = graph.nodes()[node.inputs[0].index()].shape.dims()[1];
-                    let mut accumulator =
-                        Self::contract(index, 0, 0, product.fraction_bits, "RNE MatMul zero contract")?;
+                    let mut accumulator = Self::contract(
+                        index,
+                        0,
+                        0,
+                        product.fraction_bits,
+                        "RNE MatMul zero contract",
+                    )?;
                     let mut sums = Vec::with_capacity(inner);
                     for _ in 0..inner {
                         let (next, left_shift, right_shift, max_shift) =
@@ -1743,10 +1746,9 @@ impl RneRangePlan {
         if ideal_bound_ticks < 0 || epsilon_ticks < 0 {
             return Err(NumericError::InvalidInput { node, reason });
         }
-        let actual_bound_ticks =
-            ideal_bound_ticks
-                .checked_add(epsilon_ticks)
-                .ok_or(NumericError::InvalidInput { node, reason })?;
+        let actual_bound_ticks = ideal_bound_ticks
+            .checked_add(epsilon_ticks)
+            .ok_or(NumericError::InvalidInput { node, reason })?;
         Ok(RneErrorContract {
             ideal_bound_ticks,
             epsilon_ticks,
@@ -1770,13 +1772,14 @@ impl RneRangePlan {
             node,
             reason: "RNE range scale factor overflow",
         })?;
-        let ideal_bound_ticks = contract
-            .ideal_bound_ticks
-            .checked_mul(factor)
-            .ok_or(NumericError::InvalidInput {
-                node,
-                reason: "RNE range ideal-bound rescale overflow",
-            })?;
+        let ideal_bound_ticks =
+            contract
+                .ideal_bound_ticks
+                .checked_mul(factor)
+                .ok_or(NumericError::InvalidInput {
+                    node,
+                    reason: "RNE range ideal-bound rescale overflow",
+                })?;
         let epsilon_ticks =
             contract
                 .epsilon_ticks
@@ -1797,10 +1800,7 @@ impl RneRangePlan {
         ))
     }
 
-    fn round_budget(
-        node: usize,
-        pre_round_bound: i64,
-    ) -> Result<(u32, i64), NumericError> {
+    fn round_budget(node: usize, pre_round_bound: i64) -> Result<(u32, i64), NumericError> {
         if pre_round_bound < 0 {
             return Err(NumericError::InvalidInput {
                 node,
@@ -1818,19 +1818,18 @@ impl RneRangePlan {
             node,
             reason: "RNE range ULP budget overflow",
         })?;
-        let limit = 8_388_608i128
-            .checked_mul(
-                1i128
-                    .checked_shl(max_shift + 1)
-                    .ok_or(NumericError::InvalidInput {
+        let limit =
+            8_388_608i128
+                .checked_mul(1i128.checked_shl(max_shift + 1).ok_or(
+                    NumericError::InvalidInput {
                         node,
                         reason: "RNE range shift limit overflow",
-                    })?,
-            )
-            .ok_or(NumericError::InvalidInput {
-                node,
-                reason: "RNE range shift limit overflow",
-            })?;
+                    },
+                )?)
+                .ok_or(NumericError::InvalidInput {
+                    node,
+                    reason: "RNE range shift limit overflow",
+                })?;
         if i128::from(pre_round_bound) >= limit {
             return Err(NumericError::InvalidInput {
                 node,
@@ -1890,13 +1889,12 @@ impl RneRangePlan {
         left: RneErrorContract,
         right: RneErrorContract,
     ) -> Result<(RneErrorContract, u32), NumericError> {
-        let fraction_bits = left
-            .fraction_bits
-            .checked_add(right.fraction_bits)
-            .ok_or(NumericError::InvalidInput {
+        let fraction_bits = left.fraction_bits.checked_add(right.fraction_bits).ok_or(
+            NumericError::InvalidInput {
                 node,
                 reason: "RNE range product fractional-width overflow",
-            })?;
+            },
+        )?;
         if fraction_bits > 60 {
             return Err(NumericError::InvalidInput {
                 node,
@@ -2017,10 +2015,12 @@ impl RneRangePlan {
         let output = self.contracts[&index];
         let left_factor = binary32_step_i64(left_shift).expect("validated range scale");
         let right_factor = binary32_step_i64(right_shift).expect("validated range scale");
-        let left_scaled =
-            Self::scale_contract(index, left, output.fraction_bits).expect("validated range scale").0;
-        let right_scaled =
-            Self::scale_contract(index, right, output.fraction_bits).expect("validated range scale").0;
+        let left_scaled = Self::scale_contract(index, left, output.fraction_bits)
+            .expect("validated range scale")
+            .0;
+        let right_scaled = Self::scale_contract(index, right, output.fraction_bits)
+            .expect("validated range scale")
+            .0;
         format!(
             "theorem node_{index}_range_rule\n    \
              {{idealA actualA idealB actualB rounded : Int}} {{shift : Nat}}\n    \

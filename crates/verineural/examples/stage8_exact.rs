@@ -405,10 +405,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if range_modules.len() != 1 || range_modules[0].name() != "residual_ffn" {
         return Err(io::Error::other("missing Stage 8 ResidualFfn range contract").into());
     }
-    write_checked_lean(
-        &root.join("numeric_range.lean"),
-        &range_plan.lean_source()?,
-    )?;
+    write_checked_lean(&root.join("numeric_range.lean"), &range_plan.lean_source()?)?;
     fs::write(
         root.join("range_contract.txt"),
         format!(

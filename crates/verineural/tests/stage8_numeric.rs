@@ -1,6 +1,6 @@
 use verineural::{
-    Domain, ExactFp32Plan, NeuralGraph, NumericError, ResidualFfn, RneFp32Plan, RneRangePlan, Shape,
-    Tensor,
+    Domain, ExactFp32Plan, NeuralGraph, NumericError, ResidualFfn, RneFp32Plan, RneRangePlan,
+    Shape, Tensor,
 };
 
 fn plan() -> (NeuralGraph, verineural::NodeId, [verineural::NodeId; 3]) {
