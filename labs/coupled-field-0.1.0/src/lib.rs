@@ -354,7 +354,7 @@ mod tests {
         assert!(!snapshot.dot.contains("module-input-port"));
         assert!(snapshot.dot.contains(r#"vn_input_port_0="n0""#));
         assert!(snapshot.dot.contains("rank=same; n0; n1; n2; n3; n4;"));
-        assert!(snapshot.dot.contains(r#"fillcolor="#FFF1DB""#));
+        assert!(snapshot.dot.contains("fillcolor=\"#FFF1DB\""));
         assert!(snapshot.dot.contains(r#"style="rounded,filled""#));
         assert!(snapshot.dot.contains("dpi=180"));
         assert!(snapshot.dot.contains("vn_ir_sha256="));

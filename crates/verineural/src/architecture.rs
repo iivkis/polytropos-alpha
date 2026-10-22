@@ -695,7 +695,7 @@ mod tests {
         assert!(a.dot.contains("splines=ortho"));
         assert!(a.dot.contains("nodesep=0.65"));
         assert!(a.dot.contains("dpi=180"));
-        assert!(a.dot.contains(r#"fillcolor="#FFF1DB""#));
+        assert!(a.dot.contains("fillcolor=\"#FFF1DB\""));
         // Labels must be multi-line, not a literal printed backslash-n.
         assert!(a.dot.contains(r#"n0 [label="INPUT  ·  n0\n[2]""#));
         assert!(!a.dot.contains(r#"INPUT  ·  n0\\n[2]"#));
