@@ -2475,10 +2475,7 @@ impl RneRangePlan {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if output_proofs.len() == 1 {
-                    source.push_str(&format!(
-                        "  have {} := {nested_result}\n",
-                        output_proofs[0]
-                    ));
+                    source.push_str(&format!("  have {} := {nested_result}\n", output_proofs[0]));
                 } else {
                     source.push_str(&format!(
                         "  rcases {nested_result} with {}\n",

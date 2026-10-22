@@ -562,14 +562,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let dag_w2b = dag_graph.input(Shape::new(vec![2, 2])?, Domain::Finite);
     let dag_b2b = dag_graph.input(Shape::new(vec![2])?, Domain::Finite);
     let dag_block = ResidualFfn::new(1, 2, 2)?;
-    let dag_left = dag_graph.apply_module(
-        &dag_block,
-        &[dag_x, dag_w1a, dag_b1a, dag_w2a, dag_b2a],
-    )?;
-    let dag_right = dag_graph.apply_module(
-        &dag_block,
-        &[dag_x, dag_w1b, dag_b1b, dag_w2b, dag_b2b],
-    )?;
+    let dag_left =
+        dag_graph.apply_module(&dag_block, &[dag_x, dag_w1a, dag_b1a, dag_w2a, dag_b2a])?;
+    let dag_right =
+        dag_graph.apply_module(&dag_block, &[dag_x, dag_w1b, dag_b1b, dag_w2b, dag_b2b])?;
     let dag_join = ResidualAdd::new(Shape::new(vec![1, 2])?);
     let dag_output = dag_graph.apply_module(&dag_join, &[dag_left, dag_right])?;
     let dag_plan = RneRangePlan::compile(&dag_graph, dag_output, 10, 16)?;
@@ -581,9 +577,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(io::Error::other("unexpected Stage 8 architecture DAG contract").into());
     }
     let dag_source = dag_plan.lean_source()?;
-    if !dag_source.contains(
-        "-- Architecture-level numerical composition over the reachable module DAG.",
-    ) || !dag_source.contains("have arch_module_0 := module_0_global_contract")
+    if !dag_source
+        .contains("-- Architecture-level numerical composition over the reachable module DAG.")
+        || !dag_source.contains("have arch_module_0 := module_0_global_contract")
         || !dag_source.contains("have arch_module_1 := module_1_global_contract")
         || !dag_source.contains("have arch_module_2 := module_2_global_contract")
     {
@@ -623,15 +619,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let nested_output = nested_graph.apply_module(
         &nested_module,
         &[
-            nested_x,
-            nested_w1a,
-            nested_b1a,
-            nested_w2a,
-            nested_b2a,
-            nested_w1b,
-            nested_b1b,
-            nested_w2b,
-            nested_b2b,
+            nested_x, nested_w1a, nested_b1a, nested_w2a, nested_b2a, nested_w1b, nested_b1b,
+            nested_w2b, nested_b2b,
         ],
     )?;
     let nested_plan = RneRangePlan::compile(&nested_graph, nested_output, 10, 16)?;

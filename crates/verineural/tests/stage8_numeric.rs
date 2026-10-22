@@ -643,9 +643,10 @@ fn stage8_architecture_range_theorem_composes_fork_and_fan_in_dag() {
     assert_eq!(contract.epsilon_ticks(), 348);
 
     let source = plan.lean_source().unwrap();
-    assert!(source.contains(
-        "-- Architecture-level numerical composition over the reachable module DAG."
-    ));
+    assert!(
+        source
+            .contains("-- Architecture-level numerical composition over the reachable module DAG.")
+    );
     assert!(source.contains("have arch_module_0 := module_0_global_contract"));
     assert!(source.contains("have arch_module_1 := module_1_global_contract"));
     assert!(source.contains("have arch_module_2 := module_2_global_contract"));
@@ -724,10 +725,7 @@ fn stage8_whole_module_theorem_composes_direct_nested_module_theorems() {
     let b2b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
     let nested = NestedResidualPair::new();
     let output = graph
-        .apply_module(
-            &nested,
-            &[x, w1a, b1a, w2a, b2a, w1b, b1b, w2b, b2b],
-        )
+        .apply_module(&nested, &[x, w1a, b1a, w2a, b2a, w1b, b1b, w2b, b2b])
         .unwrap();
 
     assert_eq!(graph.modules().len(), 3);
