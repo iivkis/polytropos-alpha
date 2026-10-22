@@ -1,5 +1,5 @@
-//! Pure Rust regression tests for the architecture-wide auto builder.
-//! External Lean/LLVM execution is covered by the consumer example task.
+//! Regression tests for the architecture-wide auto builder.
+//! The bundle round-trip exercises the Nix-provided Lean, LLVM and Graphviz.
 use verineural::{
     ArchitectureAutoCompiler, ArchitectureProofTask, AutoBuildError, ContractClaim, Domain,
     GpuRequirement, MathContract, MultiOutputContract, MultiOutputModule, NamedPortContract,
@@ -290,4 +290,62 @@ fn auto_build_refuses_successful_but_disconnected_property() {
         Err(AutoBuildError::InvalidConnection(message))
             if message.contains("not connected")
     ));
+}
+
+
+#[test]
+fn auto_build_creates_dot_and_png_before_manifest_and_replays_without_mutation() {
+    // The previous auto-build failed after Lean/PTX because SHA256SUMS listed
+    // architecture.dot even though only verify_bundle wrote it.
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(2), Domain::NonNegativeFinite);
+    let output = graph.relu(x).unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "verineural-auto-visual-regression-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id(),
+    ));
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    let auto = ArchitectureAutoCompiler::default();
+    let generated = auto
+        .build(&graph, &[output], &[], GpuRequirement::AllOutputs, &root)
+        .unwrap();
+    let folder = root.join("auto-build");
+    let saved_dot = std::fs::read_to_string(folder.join("architecture.dot")).unwrap();
+    let png = std::fs::read(folder.join("architecture.png")).unwrap();
+    assert!(saved_dot.contains("vn_ir_sha256="));
+    assert!(saved_dot.contains("vn_selected_output="));
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let manifest = std::fs::read_to_string(folder.join("SHA256SUMS")).unwrap();
+    assert!(manifest.contains("  architecture.dot\n"));
+    assert!(manifest.contains("  architecture.png\n"));
+    let replayed = auto
+        .verify_bundle(
+            &graph,
+            &[output],
+            &[],
+            GpuRequirement::AllOutputs,
+            &root,
+            Some(&generated.manifest_sha256),
+        )
+        .unwrap();
+    assert_eq!(generated.manifest_sha256, replayed.manifest_sha256);
+    assert_eq!(std::fs::read_to_string(folder.join("architecture.dot")).unwrap(), saved_dot);
+    assert_eq!(std::fs::read(folder.join("architecture.png")).unwrap(), png);
+
+    std::fs::write(folder.join("architecture.png"), b"tampered PNG").unwrap();
+    assert!(matches!(
+        auto.verify_bundle(
+            &graph,
+            &[output],
+            &[],
+            GpuRequirement::AllOutputs,
+            &root,
+            Some(&generated.manifest_sha256),
+        ),
+        Err(AutoBuildError::Integrity(_))
+    ));
+    std::fs::remove_dir_all(root).unwrap();
 }

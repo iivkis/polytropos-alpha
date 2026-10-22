@@ -515,6 +515,15 @@ impl ArchitectureAutoCompiler {
             lean_dir.join("audit.txt"),
             audit_text(&audit.lean_version, &axiom_dependencies),
         )?;
+        // DOT/PNG are mandatory bundle evidence: render them before
+        // report.txt and SHA256SUMS, never during the read-only replay path.
+        let ir_sha256 = auto_bundle::hash_file(&directory.join("semantic.ir"))?;
+        let dot = crate::architecture::auto_architecture_dot(graph, &plan, &ir_sha256)?;
+        fs::write(directory.join("architecture.dot"), dot)?;
+        crate::architecture::render_dot_png(
+            &directory.join("architecture.dot"),
+            &directory.join("architecture.png"),
+        )?;
         let mut report = AutoBuildReport {
             directory: directory.clone(),
             connectivity: plan.connectivity,
@@ -733,13 +742,6 @@ impl ArchitectureAutoCompiler {
                 }
             }
         }
-        let ir_sha256 = auto_bundle::hash_file(&directory.join("semantic.ir"))?;
-        let dot = crate::architecture::auto_architecture_dot(graph, &plan, &ir_sha256)?;
-        fs::write(directory.join("architecture.dot"), dot)?;
-        crate::architecture::render_dot_png(
-            &directory.join("architecture.dot"),
-            &directory.join("architecture.png"),
-        )?;
         let report = AutoBuildReport {
             directory: directory.clone(),
             connectivity: plan.connectivity,
