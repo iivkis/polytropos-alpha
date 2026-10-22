@@ -148,7 +148,10 @@ fn edge_head_port(operation: &Operation, input_port: usize) -> &'static str {
     }
 }
 
-fn edge_theme(role: &str, input_port: usize) -> (&'static str, &'static str, &'static str, &'static str) {
+fn edge_theme(
+    role: &str,
+    input_port: usize,
+) -> (&'static str, &'static str, &'static str, &'static str) {
     if role == "parameter" {
         ("#C58A3A", "1.35", "1", "2")
     } else {
@@ -658,8 +661,7 @@ pub fn snapshot_architecture(
                 .map(String::as_str)
                 .filter(|r| *r == "parameter")
                 .unwrap_or("data");
-            let (edge_color, edge_width, edge_weight, edge_minlen) =
-                edge_theme(role, port);
+            let (edge_color, edge_width, edge_weight, edge_minlen) = edge_theme(role, port);
             let tailport = edge_tail_port(role, port);
             let headport = edge_head_port(&node.operation, port);
             let data = [
