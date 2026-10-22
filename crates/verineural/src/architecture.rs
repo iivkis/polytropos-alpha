@@ -458,7 +458,10 @@ pub fn snapshot_architecture(
                 ("label", label),
                 ("fillcolor", fill.into()),
                 ("color", outline.into()),
-                ("tooltip", format!("node {index}: {}", node.operation.name())),
+                (
+                    "tooltip",
+                    format!("node {index}: {}", node.operation.name()),
+                ),
                 ("vn_id", format!("n{index}")),
                 ("vn_kind", kind.into()),
                 ("vn_op", node.operation.name().into()),
@@ -530,7 +533,10 @@ pub fn snapshot_architecture(
             writeln!(
                 dot,
                 "{inner}label={};",
-                quoted(&format!("{}  ·  m{i}", module.name.replace('_', " ").to_uppercase()))
+                quoted(&format!(
+                    "{}  ·  m{i}",
+                    module.name.replace('_', " ").to_uppercase()
+                ))
             )
             .expect("writing to string");
             for (key, value) in [
@@ -582,11 +588,18 @@ pub fn snapshot_architecture(
     render_scope(None, &context, 0, &mut dot);
     // Keep all source inputs and parameters aligned to the left, regardless
     // of the number of downstream consumers or nested module boundaries.
-    let sources = graph.nodes().iter().enumerate()
+    let sources = graph
+        .nodes()
+        .iter()
+        .enumerate()
         .filter_map(|(i, node)| matches!(node.operation, Operation::Input).then_some(i))
         .collect::<Vec<_>>();
     if !sources.is_empty() {
-        let positions = sources.iter().map(|i| format!("n{i};")).collect::<Vec<_>>().join(" ");
+        let positions = sources
+            .iter()
+            .map(|i| format!("n{i};"))
+            .collect::<Vec<_>>()
+            .join(" ");
         writeln!(dot, "  {{ rank=same; {positions} }}").expect("writing to string");
     }
     // Only real IR edges are drawn. Module ports are carried by vn_* attributes.
@@ -606,8 +619,19 @@ pub fn snapshot_architecture(
                 .filter(|r| *r == "parameter")
                 .unwrap_or("data");
             let data = [
-                ("color", if role == "parameter" { "#C69B5D" } else { "#8A98AD" }.into()),
-                ("penwidth", if role == "parameter" { "1.35" } else { "1.15" }.into()),
+                (
+                    "color",
+                    if role == "parameter" {
+                        "#C69B5D"
+                    } else {
+                        "#8A98AD"
+                    }
+                    .into(),
+                ),
+                (
+                    "penwidth",
+                    if role == "parameter" { "1.35" } else { "1.15" }.into(),
+                ),
                 ("vn_src_port", "output".into()),
                 ("vn_dst_port", format!("input_{port}")),
                 ("vn_role", role.into()),
