@@ -129,8 +129,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Independent reduction graph: MatMul -> Mul -> BiasAdd -> Relu.
     // A tighter bound proves even partial dot sums remain exactly representable.
     let mut mat_graph = NeuralGraph::default();
-    let lhs = Tensor::new(Shape::new(vec![2, 3])?, vec![2.0, -1.0, 3.0, 0.0, 4.0, -2.0])?;
-    let rhs = Tensor::new(Shape::new(vec![3, 2])?, vec![1.0, 2.0, -3.0, 1.0, 2.0, -1.0])?;
+    let lhs = Tensor::new(
+        Shape::new(vec![2, 3])?,
+        vec![2.0, -1.0, 3.0, 0.0, 4.0, -2.0],
+    )?;
+    let rhs = Tensor::new(
+        Shape::new(vec![3, 2])?,
+        vec![1.0, 2.0, -3.0, 1.0, 2.0, -1.0],
+    )?;
     let mask = Tensor::new(Shape::new(vec![2, 2])?, vec![2.0, 3.0, 2.0, 4.0])?;
     let mbias = Tensor::new(Shape::new(vec![2])?, vec![1.0, -2.0])?;
     let aid = mat_graph.input(lhs.shape().clone(), Domain::Finite);
@@ -146,10 +152,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mat_expected = mat_plan.integer_reference(&mat_inputs)?;
     fs::write(root.join("numeric_matmul.lean"), mat_plan.lean_source()?)?;
     LeanProofEngine::default().check_file(&root.join("numeric_matmul.lean"))?;
-    for (label, engine) in [
-        ("baseline_matmul", &baseline),
-        ("fused_matmul", &fused),
-    ] {
+    for (label, engine) in [("baseline_matmul", &baseline), ("fused_matmul", &fused)] {
         let plan = engine.compile(&mat_graph, mat_output)?;
         if label == "fused_matmul" && plan.removed_kernel_count() != 2 {
             return Err(io::Error::other("expected Mul/BiasAdd/Relu chain fusion").into());
@@ -168,15 +171,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|(id, tensor)| {
                 format!(
                     "node={} shape={:?} bits={:?}\n",
-                    id.index(), tensor.shape().dims(),
-                    tensor.values().iter().map(|x| format!("{:08x}", x.to_bits())).collect::<Vec<_>>()
+                    id.index(),
+                    tensor.shape().dims(),
+                    tensor
+                        .values()
+                        .iter()
+                        .map(|x| format!("{:08x}", x.to_bits()))
+                        .collect::<Vec<_>>()
                 )
             })
             .collect::<String>(),
     )?;
     fs::write(
         root.join("matmul_output.bits"),
-        mat_expected.values().iter().map(|x| format!("{:08x}\n", x.to_bits())).collect::<String>(),
+        mat_expected
+            .values()
+            .iter()
+            .map(|x| format!("{:08x}\n", x.to_bits()))
+            .collect::<String>(),
     )?;
 
     let input_snapshot = inputs

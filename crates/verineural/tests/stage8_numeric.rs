@@ -202,10 +202,30 @@ fn stage8_mul_matmul_range_proofs_and_i64_oracle_compose() {
     assert!(src.contains("1544"));
 
     let tensors = [
-        (a, Tensor::new(Shape::new(vec![2, 3]).unwrap(), vec![2.0, -1.0, 3.0, 0.0, 4.0, -2.0]).unwrap()),
-        (b, Tensor::new(Shape::new(vec![3, 2]).unwrap(), vec![1.0, 2.0, -3.0, 1.0, 2.0, -1.0]).unwrap()),
-        (scale, Tensor::new(Shape::new(vec![2, 2]).unwrap(), vec![2.0, 3.0, 2.0, 4.0]).unwrap()),
-        (bias, Tensor::new(Shape::new(vec![2]).unwrap(), vec![1.0, -2.0]).unwrap()),
+        (
+            a,
+            Tensor::new(
+                Shape::new(vec![2, 3]).unwrap(),
+                vec![2.0, -1.0, 3.0, 0.0, 4.0, -2.0],
+            )
+            .unwrap(),
+        ),
+        (
+            b,
+            Tensor::new(
+                Shape::new(vec![3, 2]).unwrap(),
+                vec![1.0, 2.0, -3.0, 1.0, 2.0, -1.0],
+            )
+            .unwrap(),
+        ),
+        (
+            scale,
+            Tensor::new(Shape::new(vec![2, 2]).unwrap(), vec![2.0, 3.0, 2.0, 4.0]).unwrap(),
+        ),
+        (
+            bias,
+            Tensor::new(Shape::new(vec![2]).unwrap(), vec![1.0, -2.0]).unwrap(),
+        ),
     ];
     let result = plan.integer_reference(&tensors).unwrap();
     assert_eq!(result.values(), &[23.0, 0.0, 0.0, 22.0]);
@@ -237,7 +257,8 @@ fn stage8_multiplication_reduction_fail_closed_when_not_exactly_bounded() {
     ));
     assert_eq!(
         ExactFp32Plan::compile_with_input_bound(&g, dot, 1024)
-            .unwrap().output_bound(),
+            .unwrap()
+            .output_bound(),
         16_777_216
     );
 }
