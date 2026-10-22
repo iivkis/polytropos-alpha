@@ -4,9 +4,11 @@
 use std::error::Error;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 
 use verineural::{
-    Domain, GpuEngine, GpuError, GpuLaunchConfig, NeuralGraph, NodeId, ReluFusion, Shape, Tensor,
+    Domain, GpuEngine, GpuError, GpuExecution, GpuLaunchConfig, NeuralGraph, NodeId, ReluFusion,
+    Shape, Tensor,
 };
 
 const COLUMNS: usize = 256;
@@ -77,6 +79,19 @@ fn summary(samples: &mut [f64]) -> (f64, f64, f64) {
     )
 }
 
+/// Wall-clock time for a full prepared execution with fresh H2D inputs and
+/// D2H output. CPU reference comparisons are performed *after* this interval.
+fn full_cycle(
+    exec: &mut GpuExecution,
+    inputs: &[(NodeId, Tensor<f32>)],
+) -> Result<(f64, Tensor<f32>), GpuError> {
+    let started = Instant::now();
+    exec.update_inputs(inputs)?;
+    exec.replay()?;
+    let result = exec.read_output()?;
+    Ok((started.elapsed().as_secs_f64() * 1_000_000.0, result))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let baseline =
         GpuEngine::default().with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Disabled)?);
@@ -114,8 +129,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         let first_inputs = inputs(ids, &first);
         let first_expected = reference(&first)?;
         let path = root.join(elements.to_string());
+        let start_a = Instant::now();
         let mut exec_a = baseline.prepare(&plan_a, &first_inputs, &path.join("baseline"))?;
+        let setup_a = start_a.elapsed();
+        let start_b = Instant::now();
         let mut exec_b = fused.prepare(&plan_b, &first_inputs, &path.join("fused"))?;
+        let setup_b = start_b.elapsed();
+        println!(
+            "setup {elements:8}: baseline {:.3} ms, fused {:.3} ms (includes llc, JIT, allocations, graph capture)",
+            setup_a.as_secs_f64() * 1_000.0,
+            setup_b.as_secs_f64() * 1_000.0,
+        );
 
         exec_a.replay()?;
         exec_b.replay()?;
@@ -187,6 +211,34 @@ fn main() -> Result<(), Box<dyn Error>> {
             "{elements:8} | {amin:7.3}/{amed:7.3}/{amax:7.3} | {bmin:7.3}/{bmed:7.3}/{bmax:7.3} | {ratio:.3}x",
             ratio = bmed / amed
         );
+
+        // Replay-only GPU-event timings above intentionally omit transfers.
+        // Contrast them with the actual host-observed input -> output cycle.
+        let mut full_a = Vec::with_capacity(SAMPLES);
+        let mut full_b = Vec::with_capacity(SAMPLES);
+        for trial in 0..SAMPLES {
+            if trial % 2 == 0 {
+                let (us, result) = full_cycle(&mut exec_a, &second_inputs)?;
+                full_a.push(us);
+                check_bits("full-cycle baseline", &result, &second_expected)?;
+                let (us, result) = full_cycle(&mut exec_b, &second_inputs)?;
+                full_b.push(us);
+                check_bits("full-cycle fused", &result, &second_expected)?;
+            } else {
+                let (us, result) = full_cycle(&mut exec_b, &second_inputs)?;
+                full_b.push(us);
+                check_bits("full-cycle fused", &result, &second_expected)?;
+                let (us, result) = full_cycle(&mut exec_a, &second_inputs)?;
+                full_a.push(us);
+                check_bits("full-cycle baseline", &result, &second_expected)?;
+            }
+        }
+        let (famin, famed, famax) = summary(&mut full_a);
+        let (fbmin, fbmed, fbmax) = summary(&mut full_b);
+        println!(
+            "full cycle:  {famin:7.3}/{famed:7.3}/{famax:7.3} | {fbmin:7.3}/{fbmed:7.3}/{fbmax:7.3} | {ratio:.3}x (H2D + graph + D2H + synchronization)",
+            ratio = fbmed / famed
+        );
     }
     println!(
         "Each size verified by bitwise CPU comparison before and after graph input replacement"
@@ -194,6 +246,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "Including signed zeros and minimum normal values does not prove general IEEE-754 equivalence"
     );
+    println!("Full-cycle wall time includes pinned staging reuse and synchronous result readback");
+    println!("Profilers perturb short CUDA Graph workloads; compare performance without nsys");
     println!("No FP32, PTX, machine code or GPU memory-safety proof is implied.");
     Ok(())
 }

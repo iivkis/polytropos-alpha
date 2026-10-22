@@ -71,8 +71,8 @@ mod platform {
     struct Functions {
         init: unsafe extern "C" fn(c_uint) -> ResultCode,
         device_get: unsafe extern "C" fn(*mut c_int, c_int) -> ResultCode,
-        context_create: unsafe extern "C" fn(*mut Handle, c_uint, c_int) -> ResultCode,
-        context_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
+        primary_retain: unsafe extern "C" fn(*mut Handle, c_int) -> ResultCode,
+        primary_release: unsafe extern "C" fn(c_int) -> ResultCode,
         context_push: unsafe extern "C" fn(Handle) -> ResultCode,
         context_pop: unsafe extern "C" fn(*mut Handle) -> ResultCode,
         module_load: unsafe extern "C" fn(*mut Handle, *const c_void) -> ResultCode,
@@ -118,8 +118,8 @@ mod platform {
             Ok(Self {
                 init: lib.function("cuInit")?,
                 device_get: lib.function("cuDeviceGet")?,
-                context_create: lib.function("cuCtxCreate_v2")?,
-                context_destroy: lib.function("cuCtxDestroy_v2")?,
+                primary_retain: lib.function("cuDevicePrimaryCtxRetain")?,
+                primary_release: lib.function("cuDevicePrimaryCtxRelease")?,
                 context_push: lib.function("cuCtxPushCurrent_v2")?,
                 context_pop: lib.function("cuCtxPopCurrent_v2")?,
                 module_load: lib.function("cuModuleLoadData")?,
@@ -175,14 +175,24 @@ mod platform {
         }
     }
 
-    /// Owns every device allocation, loaded PTX module and CUDA context.
+    // A pinned allocation can be reused only after its previous async
+    // transfer has completed on the session's explicit stream.
+    struct PinnedBuffer {
+        address: *mut c_void,
+        capacity: usize,
+    }
+
+    /// Owns the stream, PTX module, device allocations and a retained reference
+    /// to the shared primary CUDA context. Each session retains/releases once.
     /// The library is dropped last, after all CUDA handles are released.
     pub(crate) struct CudaSession {
         functions: Functions,
+        device: c_int,
         context: Handle,
         module: Handle,
         allocations: Vec<DevicePtr>,
-        pinned_buffers: Vec<*mut c_void>,
+        staging_pending: Vec<PinnedBuffer>,
+        staging_available: Vec<PinnedBuffer>,
         kernels: BTreeMap<String, Handle>,
         stream: Handle,
         graph: Handle,
@@ -227,17 +237,25 @@ mod platform {
             check("cuDeviceGet", unsafe {
                 (functions.device_get)(&mut device, 0)
             })?;
+            // The primary context is shared by all sessions on this device.
+            // Unlike cuCtxCreate, retain does not push it on this thread.
             let mut context = ptr::null_mut();
-            // SAFETY: context is a valid output pointer; CUDA owns the context.
-            check("cuCtxCreate_v2", unsafe {
-                (functions.context_create)(&mut context, 0, device)
+            check("cuDevicePrimaryCtxRetain", unsafe {
+                (functions.primary_retain)(&mut context, device)
             })?;
+            if context.is_null() {
+                // A successful retain must be balanced even for a bad handle.
+                unsafe { (functions.primary_release)(device) };
+                return Err(GpuError::Driver("CUDA returned a null primary context".into()));
+            }
             let mut session = Self {
                 functions,
+                device,
                 context,
                 module: ptr::null_mut(),
                 allocations: Vec::new(),
-                pinned_buffers: Vec::new(),
+                staging_pending: Vec::new(),
+                staging_available: Vec::new(),
                 kernels: BTreeMap::new(),
                 stream: ptr::null_mut(),
                 graph: ptr::null_mut(),
@@ -245,6 +263,8 @@ mod platform {
                 capturing: false,
                 _library: library,
             };
+            // This guard is dropped before session teardown on any error.
+            let _context = session.enter_context()?;
             let bytes = CString::new(ptx)
                 .map_err(|_| GpuError::Driver("PTX contains interior NUL byte".into()))?;
             // SAFETY: PTX has an extra terminating NUL and lives through the call.
@@ -265,9 +285,8 @@ mod platform {
                 ));
             }
 
-            // cuCtxCreate makes the new context current. Detach it before
-            // returning so multiple prepared executions can coexist safely.
-            session.pop_context()?;
+            // _context pops the retained primary context after setup. Sessions
+            // share a device context but never share stream/module ownership.
             Ok(session)
         }
 
@@ -285,8 +304,34 @@ mod platform {
             Ok(address)
         }
 
+        // Find the smallest completed allocation that fits, or allocate one.
+        // Never recycle in-flight buffers: async CUDA copies still read them.
+        fn staging_buffer(&mut self, bytes: usize) -> Result<PinnedBuffer, GpuError> {
+            let best = self
+                .staging_available
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.capacity >= bytes)
+                .min_by_key(|(_, entry)| entry.capacity)
+                .map(|(index, _)| index);
+            if let Some(index) = best {
+                return Ok(self.staging_available.swap_remove(index));
+            }
+            let mut address = ptr::null_mut();
+            check("cuMemAllocHost_v2", unsafe {
+                (self.functions.pinned_allocate)(&mut address, bytes)
+            })?;
+            if address.is_null() {
+                return Err(GpuError::Driver("CUDA returned null pinned allocation".into()));
+            }
+            Ok(PinnedBuffer {
+                address,
+                capacity: bytes,
+            })
+        }
+
         /// Stage input bytes in page-locked memory and enqueue on our explicit
-        /// non-blocking stream. Pinned buffers stay owned until session teardown.
+        /// non-blocking stream. No buffer is recycled before synchronization.
         pub fn copy_to_device(
             &mut self,
             address: DevicePtr,
@@ -294,17 +339,19 @@ mod platform {
         ) -> Result<(), GpuError> {
             let _context = self.enter_context()?;
             let bytes = std::mem::size_of_val(values);
-            let mut pinned = ptr::null_mut();
-            // SAFETY: pinned is a writable output pointer for CUDA's host allocation.
-            check("cuMemAllocHost_v2", unsafe {
-                (self.functions.pinned_allocate)(&mut pinned, bytes)
-            })?;
-            self.pinned_buffers.push(pinned);
-            // SAFETY: the pinned allocation has capacity for values.len() f32s.
+            let staging = self.staging_buffer(bytes)?;
+            // SAFETY: staging has capacity for values.len() f32s.
             unsafe {
-                ptr::copy_nonoverlapping(values.as_ptr(), pinned.cast::<f32>(), values.len())
+                ptr::copy_nonoverlapping(
+                    values.as_ptr(),
+                    staging.address.cast::<f32>(),
+                    values.len(),
+                )
             };
-            // SAFETY: pinned is kept alive through graph execution and synchronization.
+            // Keep the staging allocation alive even if enqueueing fails:
+            // CUDA may have observed it before returning an error.
+            let pinned = staging.address;
+            self.staging_pending.push(staging);
             check("cuMemcpyHtoDAsync_v2", unsafe {
                 (self.functions.host_to_device)(address, pinned, bytes, self.stream)
             })
@@ -317,12 +364,9 @@ mod platform {
         ) -> Result<(), GpuError> {
             let _context = self.enter_context()?;
             let bytes = std::mem::size_of_val(out);
-            let mut pinned = ptr::null_mut();
-            // SAFETY: the CUDA allocation is valid and owned by this session.
-            check("cuMemAllocHost_v2", unsafe {
-                (self.functions.pinned_allocate)(&mut pinned, bytes)
-            })?;
-            self.pinned_buffers.push(pinned);
+            let staging = self.staging_buffer(bytes)?;
+            let pinned = staging.address;
+            self.staging_pending.push(staging);
             // SAFETY: destination remains valid through synchronization.
             check("cuMemcpyDtoHAsync_v2", unsafe {
                 (self.functions.device_to_host)(pinned, address, bytes, self.stream)
@@ -330,24 +374,20 @@ mod platform {
             self.synchronize()?;
             // SAFETY: the async transfer completed; Rust out is valid for out.len() f32s.
             unsafe { ptr::copy_nonoverlapping(pinned.cast::<f32>(), out.as_mut_ptr(), out.len()) };
-            self.release_completed_staging()
+            self.release_completed_staging();
+            Ok(())
         }
 
-        // Only release pinned staging memory after the owned stream has finished.
-        // This avoids an unbounded host allocation per input update or readback.
-        fn release_completed_staging(&mut self) -> Result<(), GpuError> {
-            let _context = self.enter_context()?;
-            for host in self.pinned_buffers.drain(..) {
-                check("cuMemFreeHost", unsafe {
-                    (self.functions.pinned_free)(host)
-                })?;
-            }
-            Ok(())
+        // Reuse completed staging buffers instead of allocating/freeing pinned
+        // memory on every update_inputs/read_output. The session owns both lists.
+        fn release_completed_staging(&mut self) {
+            self.staging_available.append(&mut self.staging_pending);
         }
 
         pub fn flush_input_copies(&mut self) -> Result<(), GpuError> {
             self.synchronize()?;
-            self.release_completed_staging()
+            self.release_completed_staging();
+            Ok(())
         }
 
         /// Begin capturing only kernel launches to a CUDA Graph. No allocations,
@@ -637,8 +677,8 @@ mod platform {
             for address in self.allocations.drain(..).rev() {
                 unsafe { (self.functions.mem_free)(address) };
             }
-            for host in self.pinned_buffers.drain(..).rev() {
-                unsafe { (self.functions.pinned_free)(host) };
+            for host in self.staging_pending.drain(..).chain(self.staging_available.drain(..)) {
+                unsafe { (self.functions.pinned_free)(host.address) };
             }
             if !self.module.is_null() {
                 unsafe { (self.functions.module_unload)(self.module) };
@@ -651,8 +691,10 @@ mod platform {
                 unsafe { (self.functions.context_pop)(&mut popped) };
                 debug_assert_eq!(popped, self.context);
             }
+            // Release exactly one primary-context reference *after* destroying
+            // every per-session CUDA object and popping the current context.
             if !self.context.is_null() {
-                unsafe { (self.functions.context_destroy)(self.context) };
+                unsafe { (self.functions.primary_release)(self.device) };
             }
         }
     }

@@ -62,6 +62,26 @@ fn cuda_sessions_rebind_their_owned_context() {
     assert!(source.contains("fn enter_context"));
     assert!(source.matches("self.enter_context()?;").count() >= 7);
     assert!(source.contains("Keep this session context current for the entire capture sequence."));
+    // Sessions retain the one primary context per device, but own distinct
+    // explicit non-blocking streams and release their own retain references.
+    assert!(source.contains("cuDevicePrimaryCtxRetain"));
+    assert!(source.contains("cuDevicePrimaryCtxRelease"));
+    assert!(!source.contains("cuCtxCreate_v2"));
+    assert!(!source.contains("cuCtxDestroy_v2"));
+}
+
+#[test]
+fn staging_buffers_are_recycled_only_after_stream_sync() {
+    let source = include_str!("../src/cuda.rs");
+    assert!(source.contains("staging_pending: Vec<PinnedBuffer>"));
+    assert!(source.contains("staging_available: Vec<PinnedBuffer>"));
+    assert!(source.contains("self.staging_available.append(&mut self.staging_pending)"));
+    let start = source.find("pub fn flush_input_copies").unwrap();
+    let end = source[start..].find("/// Begin capturing").unwrap() + start;
+    let flush = &source[start..end];
+    assert!(flush.find("self.synchronize()?").unwrap() < flush.find("self.release_completed_staging()").unwrap());
+    assert!(source.contains("self.stream,"));
+    assert!(source.contains("CU_STREAM_NON_BLOCKING"));
 }
 
 #[test]
