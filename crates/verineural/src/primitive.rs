@@ -156,15 +156,25 @@ impl PointwiseExpr {
         Self::Mul(Box::new(self), Box::new(rhs))
     }
 
-    pub fn sub(self, rhs: Self) -> Self { Self::Sub(Box::new(self), Box::new(rhs)) }
-    pub fn div(self, rhs: Self) -> Self { Self::Div(Box::new(self), Box::new(rhs)) }
-    pub fn exp(self) -> Self { Self::Exp(Box::new(self)) }
-    pub fn relu(self) -> Self { Self::Relu(Box::new(self)) }
+    pub fn sub(self, rhs: Self) -> Self {
+        Self::Sub(Box::new(self), Box::new(rhs))
+    }
+    pub fn div(self, rhs: Self) -> Self {
+        Self::Div(Box::new(self), Box::new(rhs))
+    }
+    pub fn exp(self) -> Self {
+        Self::Exp(Box::new(self))
+    }
+    pub fn relu(self) -> Self {
+        Self::Relu(Box::new(self))
+    }
 
     pub(crate) fn has_ideal_int_semantics(&self) -> bool {
         match self {
             Self::Input(_) => true,
-            Self::Add(a, b) | Self::Mul(a, b) => a.has_ideal_int_semantics() && b.has_ideal_int_semantics(),
+            Self::Add(a, b) | Self::Mul(a, b) => {
+                a.has_ideal_int_semantics() && b.has_ideal_int_semantics()
+            }
             Self::Relu(a) => a.has_ideal_int_semantics(),
             Self::Sub(..) | Self::Div(..) | Self::Exp(..) => false,
         }
@@ -209,7 +219,9 @@ impl PointwiseExpr {
             }
             Self::Relu(a) => format!("(VeriNeural.relu {})", a.lean(input)),
             Self::Sub(..) | Self::Div(..) | Self::Exp(..) => {
-                unreachable!("unsupported pointwise expression must be rejected before Lean generation")
+                unreachable!(
+                    "unsupported pointwise expression must be rejected before Lean generation"
+                )
             }
         }
     }

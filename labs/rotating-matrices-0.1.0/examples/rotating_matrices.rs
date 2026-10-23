@@ -1,8 +1,7 @@
 //! Run with `task lab-rotating` or `task train-lab-rotating -- <updates>`.
 use rotating_matrices_lab::{
-    ACTIONS, Dataset, Dictionary, OP_COUNT, Parameters, Rng, Runner,
-    TrainingConfig, architecture_model, constant_baseline, evaluate, evaluate_with_route,
-    operation, train,
+    ACTIONS, Dataset, Dictionary, OP_COUNT, Parameters, Rng, Runner, TrainingConfig,
+    architecture_model, constant_baseline, evaluate, evaluate_with_route, operation, train,
 };
 use std::error::Error;
 use std::fs;

@@ -78,7 +78,11 @@ impl GpuEngine {
 }
 
 impl ModelExecution<'_> {
-    fn named_source(&self, name: &str, expected: SourceRole) -> Result<NodeId, ModelExecutionError> {
+    fn named_source(
+        &self,
+        name: &str,
+        expected: SourceRole,
+    ) -> Result<NodeId, ModelExecutionError> {
         match self.model.source(name) {
             Some((node, role)) if role == expected => Ok(node),
             Some((_, actual)) => Err(ModelExecutionError::Invalid(format!(
@@ -153,9 +157,9 @@ impl ModelExecution<'_> {
             .read_outputs()?
             .into_iter()
             .find_map(|(node, tensor)| (node == id).then_some(tensor))
-            .ok_or_else(|| ModelExecutionError::Invalid(format!(
-                "unavailable compiled output: {name}"
-            )))
+            .ok_or_else(|| {
+                ModelExecutionError::Invalid(format!("unavailable compiled output: {name}"))
+            })
     }
 
     /// Read the current state input, including the feedback of the last step.
@@ -174,8 +178,12 @@ mod tests {
     fn named_transition_and_multi_block_keep_one_ir_and_explicit_roles() {
         let mut builder = crate::ModelBuilder::new("temporal", "1");
         let state = builder.state("state", [2], Domain::Any).unwrap();
-        let input = builder.input("token", [2], Domain::NonNegativeFinite).unwrap();
-        let weight = builder.parameter("weight", [2], Domain::NonNegativeFinite).unwrap();
+        let input = builder
+            .input("token", [2], Domain::NonNegativeFinite)
+            .unwrap();
+        let weight = builder
+            .parameter("weight", [2], Domain::NonNegativeFinite)
+            .unwrap();
         let ports = builder
             .block_multi(
                 "transition",
@@ -201,20 +209,32 @@ mod tests {
         assert_eq!(model.state_links()["state"], next);
         assert_eq!(model.graph().multi_modules().len(), 1);
         assert_eq!(model.execution_roots().len(), 2);
-        assert_eq!(model.metadata("architecture_global_nonnegative").input_roles[&state.index()], "state");
+        assert_eq!(
+            model
+                .metadata("architecture_global_nonnegative")
+                .input_roles[&state.index()],
+            "state"
+        );
         // Compiling before CUDA launch validates that all executable roots
         // are reachable from one graph.
-        assert!(GpuEngine::default()
-            .compile_outputs(model.graph(), &model.execution_roots())
-            .is_ok());
+        assert!(
+            GpuEngine::default()
+                .compile_outputs(model.graph(), &model.execution_roots())
+                .is_ok()
+        );
     }
 
     #[test]
     fn invalid_temporal_connections_and_capture_leave_builder_consistent() {
         let mut builder = crate::ModelBuilder::new("bad_temporal", "1");
-        let state = builder.state("state", [2], Domain::NonNegativeFinite).unwrap();
+        let state = builder
+            .state("state", [2], Domain::NonNegativeFinite)
+            .unwrap();
         let input = builder.input("input", [2], Domain::Finite).unwrap();
-        let bad = builder.graph_mut().reshape(input, Shape::new(vec![1, 2]).unwrap()).unwrap();
+        let bad = builder
+            .graph_mut()
+            .reshape(input, Shape::new(vec![1, 2]).unwrap())
+            .unwrap();
         assert!(matches!(
             builder.next_state("state", bad),
             Err(ModelError::Neural(NeuralError::ShapeMismatch { .. }))

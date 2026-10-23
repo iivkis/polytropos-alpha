@@ -1,8 +1,8 @@
 //! P2 arithmetic primitives and ergonomic tensor construction.
- //! Numeric host references are not Lean proofs or CUDA certification.
+//! Numeric host references are not Lean proofs or CUDA certification.
 use verineural::{
-    Domain, GpuEngine, GpuError, LeanProofEngine, NeuralError, NeuralGraph,
-    ProofError, Shape, Tensor,
+    Domain, GpuEngine, GpuError, LeanProofEngine, NeuralError, NeuralGraph, ProofError, Shape,
+    Tensor,
 };
 
 #[test]
@@ -40,7 +40,14 @@ fn host_broadcast_max_and_arithmetic_are_row_major() {
     let b = Tensor::<f32>::from_vec([2], vec![2.0, 4.0]).unwrap();
     assert_eq!(a.sub(&b).unwrap().values(), &[3.0, 4.0]);
     assert_eq!(a.div(&b).unwrap().values(), &[2.5, 2.0]);
-    assert_eq!(Tensor::<f32>::from_vec([1], vec![0.0]).unwrap().exp().unwrap().values(), &[1.0]);
+    assert_eq!(
+        Tensor::<f32>::from_vec([1], vec![0.0])
+            .unwrap()
+            .exp()
+            .unwrap()
+            .values(),
+        &[1.0]
+    );
     let nan = Tensor::<f32>::from_vec([2], vec![5.0, f32::NAN]).unwrap();
     assert!(nan.reduce_max(0).unwrap().values()[0].is_nan());
 }
@@ -50,7 +57,9 @@ fn softmax_composes_in_one_ir_and_unsupported_backends_fail_closed() {
     let mut g = NeuralGraph::default();
     let input = g.input(Shape::new([2, 3]).unwrap(), Domain::Finite);
     let maximum = g.reduce_max(input, 1).unwrap();
-    let maximum = g.broadcast_to(maximum, Shape::new([2, 3]).unwrap()).unwrap();
+    let maximum = g
+        .broadcast_to(maximum, Shape::new([2, 3]).unwrap())
+        .unwrap();
     let centered = g.sub(input, maximum).unwrap();
     let exponentials = g.exp(centered).unwrap();
     let sums = g.reduce_sum(exponentials, 1).unwrap();

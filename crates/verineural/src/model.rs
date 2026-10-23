@@ -224,10 +224,16 @@ impl ModelBuilder {
             || inputs.iter().any(|(port, _)| !valid_name(port))
             || output_names.iter().any(|port| !valid_name(port))
         {
-            return Err(ModelError::Invalid(format!("invalid multi-block name: {name}")));
+            return Err(ModelError::Invalid(format!(
+                "invalid multi-block name: {name}"
+            )));
         }
         let ids = self.graph.compose_multi_inferred(
-            name, "model-multi-block-v1", inputs, output_names, build,
+            name,
+            "model-multi-block-v1",
+            inputs,
+            output_names,
+            build,
         )?;
         Ok(output_names
             .iter()

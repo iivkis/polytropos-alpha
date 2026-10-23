@@ -205,7 +205,11 @@ impl Operation {
             Self::Input => 0,
             Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd => 2,
             Self::SelectPositive => 3,
-            Self::Relu | Self::PositiveMask | Self::Sqrt | Self::Reshape(_) | Self::BroadcastTo(_) => 1,
+            Self::Relu
+            | Self::PositiveMask
+            | Self::Sqrt
+            | Self::Reshape(_)
+            | Self::BroadcastTo(_) => 1,
             Self::Pointwise(spec) => spec.arity(),
             Self::ReduceSum { .. }
             | Self::ReduceMax { .. }
@@ -299,7 +303,11 @@ impl Operation {
             Self::BroadcastTo(output) => {
                 let input = &inputs[0];
                 if input.rank() > output.rank()
-                    || input.dims().iter().rev().zip(output.dims().iter().rev())
+                    || input
+                        .dims()
+                        .iter()
+                        .rev()
+                        .zip(output.dims().iter().rev())
                         .any(|(&source, &target)| source != 1 && source != target)
                 {
                     return Err(NeuralError::ShapeMismatch {
@@ -478,8 +486,11 @@ impl Operation {
                     Domain::Any
                 }
             }
-            Self::Reshape(_) | Self::BroadcastTo(_) | Self::ReduceMax { .. }
-            | Self::Permute { .. } | Self::ReverseAxis { .. } => inputs[0],
+            Self::Reshape(_)
+            | Self::BroadcastTo(_)
+            | Self::ReduceMax { .. }
+            | Self::Permute { .. }
+            | Self::ReverseAxis { .. } => inputs[0],
             Self::Concat { .. } => {
                 if inputs
                     .iter()
@@ -1072,7 +1083,9 @@ impl NeuralGraph {
     /// Elementwise subtraction defined as a versioned pointwise AST.
     pub fn sub(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, NeuralError> {
         let spec = PointwiseSpec::new(
-            "verineural.sub", "1", 2,
+            "verineural.sub",
+            "1",
+            2,
             PointwiseExpr::input(0).sub(PointwiseExpr::input(1)),
         )?;
         spec.apply(self, &[a, b])
@@ -1081,7 +1094,9 @@ impl NeuralGraph {
     /// Elementwise division: IEEE f32 host reference, ideal-Int proof unsupported.
     pub fn div(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, NeuralError> {
         let spec = PointwiseSpec::new(
-            "verineural.div", "1", 2,
+            "verineural.div",
+            "1",
+            2,
             PointwiseExpr::input(0).div(PointwiseExpr::input(1)),
         )?;
         spec.apply(self, &[a, b])
@@ -1089,9 +1104,7 @@ impl NeuralGraph {
 
     /// Elementwise natural exponential: host reference only, GPU/proof unsupported.
     pub fn exp(&mut self, input: NodeId) -> Result<NodeId, NeuralError> {
-        let spec = PointwiseSpec::new(
-            "verineural.exp", "1", 1, PointwiseExpr::input(0).exp(),
-        )?;
+        let spec = PointwiseSpec::new("verineural.exp", "1", 1, PointwiseExpr::input(0).exp())?;
         spec.apply(self, &[input])
     }
 
@@ -1456,7 +1469,10 @@ impl NeuralGraph {
             output_names.to_vec(),
         ] {
             let mut seen = BTreeSet::new();
-            if names.iter().any(|label| label.is_empty() || !seen.insert(*label)) {
+            if names
+                .iter()
+                .any(|label| label.is_empty() || !seen.insert(*label))
+            {
                 return Err(NeuralError::ContractViolation {
                     module: name,
                     detail: "empty or duplicate inferred multi-port name",
@@ -1493,7 +1509,11 @@ impl NeuralGraph {
             &outputs,
             name,
         )?;
-        if outputs.iter().map(|id| id.index()).collect::<BTreeSet<_>>().len()
+        if outputs
+            .iter()
+            .map(|id| id.index())
+            .collect::<BTreeSet<_>>()
+            .len()
             != outputs.len()
         {
             return Err(NeuralError::ContractViolation {
@@ -1522,7 +1542,9 @@ impl NeuralGraph {
             outputs: outputs.clone(),
             contract: MultiOutputContract::new(requires, ensures),
         });
-        candidate.module_order.push(ModuleInstanceKey::Multi(module_index));
+        candidate
+            .module_order
+            .push(ModuleInstanceKey::Multi(module_index));
         *self = candidate;
         Ok(outputs)
     }

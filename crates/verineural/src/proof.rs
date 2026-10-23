@@ -278,9 +278,7 @@ impl LeanProofEngine {
         for &index in &used {
             let node = &graph.nodes()[index];
             match node.operation {
-                Operation::Pointwise(ref spec)
-                    if !spec.expression().has_ideal_int_semantics() =>
-                {
+                Operation::Pointwise(ref spec) if !spec.expression().has_ideal_int_semantics() => {
                     return Err(ProofError::UnsupportedOperation {
                         node: index,
                         operation: node.operation.name(),

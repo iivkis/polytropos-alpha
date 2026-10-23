@@ -580,7 +580,9 @@ pub fn snapshot_architecture(
                 (
                     "vn_reduction_axis",
                     match node.operation {
-                        Operation::ReduceSum { axis } | Operation::ReduceMax { axis } => axis.to_string(),
+                        Operation::ReduceSum { axis } | Operation::ReduceMax { axis } => {
+                            axis.to_string()
+                        }
                         _ => String::new(),
                     },
                 ),
@@ -996,7 +998,9 @@ pub(crate) fn auto_architecture_dot(
                 (
                     "vn_reduction_axis",
                     match node.operation {
-                        Operation::ReduceSum { axis } | Operation::ReduceMax { axis } => axis.to_string(),
+                        Operation::ReduceSum { axis } | Operation::ReduceMax { axis } => {
+                            axis.to_string()
+                        }
                         _ => String::new(),
                     },
                 ),

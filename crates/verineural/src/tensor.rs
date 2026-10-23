@@ -140,9 +140,17 @@ impl<T: Clone> Tensor<T> {
         let mut values = Vec::with_capacity(shape.element_count());
         for index in 0..shape.element_count() {
             let out = unravel_index(index, shape.dims());
-            let coords = self.shape.dims().iter().enumerate().map(|(axis, &width)| {
-                if width == 1 { 0 } else { out[offset + axis] }
-            }).collect::<Vec<_>>();
+            let coords = self
+                .shape
+                .dims()
+                .iter()
+                .enumerate()
+                .map(
+                    |(axis, &width)| {
+                        if width == 1 { 0 } else { out[offset + axis] }
+                    },
+                )
+                .collect::<Vec<_>>();
             values.push(self.values[ravel_index(&coords, self.shape.dims())].clone());
         }
         Self::new(shape, values)
@@ -258,18 +266,35 @@ impl Tensor<f32> {
     /// Elementwise subtraction, without implicit broadcasting.
     pub fn sub(&self, rhs: &Self) -> Result<Self, NeuralError> {
         let shape = Operation::Add.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
-        Self::new(shape, self.values.iter().zip(&rhs.values).map(|(&a, &b)| a - b).collect())
+        Self::new(
+            shape,
+            self.values
+                .iter()
+                .zip(&rhs.values)
+                .map(|(&a, &b)| a - b)
+                .collect(),
+        )
     }
 
     /// Elementwise division (including IEEE NaN/inf on zero denominator).
     pub fn div(&self, rhs: &Self) -> Result<Self, NeuralError> {
         let shape = Operation::Mul.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
-        Self::new(shape, self.values.iter().zip(&rhs.values).map(|(&a, &b)| a / b).collect())
+        Self::new(
+            shape,
+            self.values
+                .iter()
+                .zip(&rhs.values)
+                .map(|(&a, &b)| a / b)
+                .collect(),
+        )
     }
 
     /// Elementwise exponential. Host f32 reference, not certified.
     pub fn exp(&self) -> Result<Self, NeuralError> {
-        Self::new(self.shape.clone(), self.values.iter().map(|x| x.exp()).collect())
+        Self::new(
+            self.shape.clone(),
+            self.values.iter().map(|x| x.exp()).collect(),
+        )
     }
 
     /// Add one rank-1 bias vector to every matrix row.
@@ -418,8 +443,8 @@ impl Tensor<f32> {
     /// Deterministic maximum, preserving NaN and taking the first maximum
     /// on ties. f32 semantics are reference-only until a backend is audited.
     pub fn reduce_max(&self, axis: usize) -> Result<Self, NeuralError> {
-        let output_shape = Operation::ReduceMax { axis }
-            .infer_shape(std::slice::from_ref(&self.shape))?;
+        let output_shape =
+            Operation::ReduceMax { axis }.infer_shape(std::slice::from_ref(&self.shape))?;
         let width = self.shape.dims()[axis];
         let inner = self.shape.dims()[axis + 1..].iter().product::<usize>();
         let mut values = Vec::with_capacity(output_shape.element_count());

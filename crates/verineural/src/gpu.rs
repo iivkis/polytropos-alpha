@@ -725,12 +725,13 @@ impl GpuExecution {
                     actual: new.domain,
                 }));
             }
-            let &dest = self.input_addresses.get(&state.index()).ok_or(
-                GpuError::InvalidInput {
+            let &dest = self
+                .input_addresses
+                .get(&state.index())
+                .ok_or(GpuError::InvalidInput {
                     node: state.index(),
                     reason: "feedback destination is not a live source",
-                },
-            )?;
+                })?;
             let src = self
                 .output_addresses
                 .iter()
@@ -746,7 +747,9 @@ impl GpuExecution {
         // aliases a different source. Otherwise reject instead of silently
         // changing the meaning of simultaneous multi-state assignment.
         if copies.iter().any(|(dst, _, _)| {
-            copies.iter().any(|(other_dst, src, _)| dst == src && dst != other_dst)
+            copies
+                .iter()
+                .any(|(other_dst, src, _)| dst == src && dst != other_dst)
         }) {
             return Err(GpuError::InvalidInput {
                 node: 0,
@@ -764,12 +767,14 @@ impl GpuExecution {
     /// Read a current source (for state inspection) without another replay.
     pub fn read_source(&mut self, id: NodeId) -> Result<Tensor<f32>, GpuError> {
         let node = self.program.graph.node(id)?;
-        let address = self.input_addresses.get(&id.index()).copied().ok_or(
-            GpuError::InvalidInput {
-                node: id.index(),
-                reason: "source is outside the compiled output slice",
-            },
-        )?;
+        let address =
+            self.input_addresses
+                .get(&id.index())
+                .copied()
+                .ok_or(GpuError::InvalidInput {
+                    node: id.index(),
+                    reason: "source is outside the compiled output slice",
+                })?;
         let mut values = vec![0.0f32; node.shape.element_count()];
         self.session.copy_to_host(&mut values, address)?;
         Ok(Tensor::new(node.shape.clone(), values)?)

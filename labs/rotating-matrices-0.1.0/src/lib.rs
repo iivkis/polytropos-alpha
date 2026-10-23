@@ -344,11 +344,7 @@ pub fn head_model() -> Result<Model, ModelError> {
     m.finish()
 }
 
-fn rotating_bank(
-    g: &mut NeuralGraph,
-    core0: NodeId,
-    core1: NodeId,
-) -> Result<NodeId, NeuralError> {
+fn rotating_bank(g: &mut NeuralGraph, core0: NodeId, core1: NodeId) -> Result<NodeId, NeuralError> {
     fn rotations(g: &mut NeuralGraph, core: NodeId) -> Result<[NodeId; TURNS], NeuralError> {
         let transposed = g.permute(core, &[1, 0])?;
         let r90 = g.reverse_axis(transposed, 1)?;
@@ -393,9 +389,7 @@ pub fn architecture_model() -> Result<Model, ModelError> {
         &[dictionary, state, router_weights, router_bias],
         routing_logits,
     )?;
-    let action = m
-        .graph_mut()
-        .argmax(logits, 1, ArgMaxTieBreak::First)?;
+    let action = m.graph_mut().argmax(logits, 1, ArgMaxTieBreak::First)?;
     let bank = rotating_bank(m.graph_mut(), core0, core1)?;
     let selected_weight = m.graph_mut().take(bank, action, 0)?;
     let next_state = m.block(
@@ -521,7 +515,10 @@ impl Runner {
             &models.core.bind([
                 ("state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
                 ("token_bits", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
-                ("rotated_weight", Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?),
+                (
+                    "rotated_weight",
+                    Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?,
+                ),
                 ("bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
             ])?,
             &workspace.path().join("core"),
@@ -529,7 +526,10 @@ impl Runner {
         let router = gpu.prepare(
             &router_program,
             &models.router.bind([
-                ("dictionary_state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
+                (
+                    "dictionary_state",
+                    Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
+                ),
                 ("state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
                 ("weights", Tensor::from_slice([WIDTH, ACTIONS], &p.router)?),
                 ("bias", Tensor::from_slice([ACTIONS], &p.router_bias)?),
@@ -539,7 +539,10 @@ impl Runner {
         let head = gpu.prepare(
             &head_program,
             &models.head.bind([
-                ("final_state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
+                (
+                    "final_state",
+                    Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
+                ),
                 ("weights", Tensor::from_slice([WIDTH, 1], &p.head)?),
                 ("bias", Tensor::from_slice([1], &[p.head_bias])?),
             ])?,
@@ -586,8 +589,14 @@ impl Runner {
         let rotated = rotate(&p.cores[core], turn)?;
         let values = self.models.core.bind([
             ("state", Tensor::from_slice([1, WIDTH], state)?),
-            ("token_bits", Tensor::from_slice([1, WIDTH], &Dictionary::bits(token))?),
-            ("rotated_weight", Tensor::from_slice([WIDTH, WIDTH], &rotated)?),
+            (
+                "token_bits",
+                Tensor::from_slice([1, WIDTH], &Dictionary::bits(token))?,
+            ),
+            (
+                "rotated_weight",
+                Tensor::from_slice([WIDTH, WIDTH], &rotated)?,
+            ),
             ("bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
         ])?;
         self.core.update_inputs(&values)?;
