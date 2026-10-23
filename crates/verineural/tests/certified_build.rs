@@ -54,6 +54,45 @@ fn certified_build_replays_and_detects_modification() {
 }
 
 #[test]
+#[ignore = "requires pinned Lean, llc, sha256sum, dot; exercises Linux atomic reissue"]
+fn certified_reissue_preserves_manifest_and_rejects_wrong_external_pin() {
+    let root = temp_root("reissue");
+    let _ = fs::remove_dir_all(&root);
+    let architecture = model("reissue");
+    let config = CertifiedBuildConfig::new(&root);
+    let first = architecture.certify(config.clone()).unwrap();
+    let first_digest = first.manifest_sha256;
+    let first_manifest = fs::read(root.join("auto-build/SHA256SUMS")).unwrap();
+
+    // A real second build executes the Linux renameat2 swap, unlike first publish.
+    let second = architecture.certify(config.clone()).unwrap();
+    assert_eq!(second.manifest_sha256, first_digest);
+    assert_eq!(
+        fs::read(root.join("auto-build/SHA256SUMS")).unwrap(),
+        first_manifest
+    );
+    assert!(root.join("architecture.lean").is_file());
+    assert!(root.join("architecture.png").is_file());
+    assert_eq!(
+        architecture
+            .verify_certified(config.clone(), Some(&first_digest))
+            .unwrap()
+            .manifest_sha256,
+        first_digest
+    );
+    assert!(matches!(
+        architecture.verify_certified(config, Some(&"0".repeat(64))),
+        Err(AutoBuildError::Integrity(_))
+    ));
+    assert!(
+        fs::read_dir(&root)
+            .unwrap()
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".auto-build.staging-"))
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[ignore = "requires pinned Lean, llc, sha256sum and dot"]
 fn foreign_identity_cannot_replace_published_bundle() {
     let root = temp_root("foreign");
