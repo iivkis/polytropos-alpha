@@ -111,6 +111,17 @@ impl ComponentBinder<'_> {
                 }),
             ));
         }
+        if actual.dtype != required.dtype {
+            return Err(self.failed(
+                name,
+                "input dtype",
+                Some(NeuralError::DTypeMismatch {
+                    operation: "component_input",
+                    expected: required.dtype,
+                    actual: actual.dtype,
+                }),
+            ));
+        }
         if !actual.domain.satisfies(required.domain) {
             return Err(self.failed(
                 name,

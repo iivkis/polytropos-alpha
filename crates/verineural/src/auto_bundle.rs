@@ -155,7 +155,7 @@ mod tests {
         let (g2, _) = graph();
         let ir1 = g1.canonical_ir();
         assert_eq!(ir1, g2.canonical_ir());
-        assert!(ir1.starts_with("verineural-semantic-ir-v2\n"));
+        assert!(ir1.starts_with("verineural-semantic-ir-v3\n"));
         assert!(!ir1.contains("MathContract {"));
         assert!(!ir1.contains("FP32Policy {"));
 

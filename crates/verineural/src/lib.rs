@@ -65,7 +65,8 @@ pub use gpu::{
     GpuMemoryContract, GpuMemoryPattern, GpuProgram, ReluFusion, audit_fp32_ptx,
 };
 pub use ir::{
-    ContractClaim, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics, MathContract,
+    ArgMaxTieBreak, ContractClaim, DType, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics,
+    MathContract,
     ModuleInstanceRef, ModuleInvocation, MultiModuleInvocation, MultiOutputContract,
     MultiOutputModule, NamedPortContract, NeuralGraph, NeuralModule, Node, NodeId, Operation,
     OperationSemantics, PortContract, Predicate, ReductionOrder, RoundingMode, SubnormalMode,

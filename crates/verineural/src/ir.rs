@@ -14,6 +14,37 @@ pub enum Domain {
     NonNegativeFinite,
 }
 
+/// Semantic element type carried by a graph node. Source tensors are currently
+/// binary32; index tensors are produced by indexing primitives such as argmax.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DType {
+    F32,
+    Index,
+}
+
+impl DType {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "binary32",
+            Self::Index => "index",
+        }
+    }
+}
+
+/// Deterministic tie handling for argmax. The first maximal lane wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgMaxTieBreak {
+    First,
+}
+
+impl ArgMaxTieBreak {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::First => "first",
+        }
+    }
+}
+
 impl Domain {
     pub const fn name(self) -> &'static str {
         match self {
@@ -114,6 +145,28 @@ pub enum Operation {
     ReduceSum {
         axis: usize,
     },
+    /// Reorder tensor axes. `axes[output_axis] = input_axis`.
+    Permute {
+        axes: Vec<usize>,
+    },
+    /// Reverse one tensor axis without changing its shape.
+    ReverseAxis {
+        axis: usize,
+    },
+    /// Concatenate two same-rank tensors along one axis.
+    Concat {
+        axis: usize,
+    },
+    /// Reduce one axis to deterministic index values. F32 NaN/tie behavior is
+    /// fixed by the selected policy instead of delegated to a backend accident.
+    ArgMax {
+        axis: usize,
+        tie_break: ArgMaxTieBreak,
+    },
+    /// Select one lane from `data` using a one-element Index tensor.
+    Take {
+        axis: usize,
+    },
 }
 
 impl Operation {
@@ -131,6 +184,11 @@ impl Operation {
             Self::Reshape(_) => "reshape",
             Self::Pointwise(_) => "pointwise",
             Self::ReduceSum { .. } => "reduce_sum",
+            Self::Permute { .. } => "permute",
+            Self::ReverseAxis { .. } => "reverse_axis",
+            Self::Concat { .. } => "concat",
+            Self::ArgMax { .. } => "argmax",
+            Self::Take { .. } => "take",
         }
     }
 
@@ -141,7 +199,11 @@ impl Operation {
             Self::SelectPositive => 3,
             Self::Relu | Self::PositiveMask | Self::Sqrt | Self::Reshape(_) => 1,
             Self::Pointwise(spec) => spec.arity(),
-            Self::ReduceSum { .. } => 1,
+            Self::ReduceSum { .. }
+            | Self::Permute { .. }
+            | Self::ReverseAxis { .. }
+            | Self::ArgMax { .. } => 1,
+            Self::Concat { .. } | Self::Take { .. } => 2,
         }
     }
 
@@ -225,6 +287,96 @@ impl Operation {
                 dims.remove(*axis);
                 Shape::new(dims)
             }
+            Self::Permute { axes } => {
+                let input = &inputs[0];
+                if axes.len() != input.rank() {
+                    return Err(NeuralError::InvalidPermutation {
+                        rank: input.rank(),
+                        axes: axes.clone(),
+                    });
+                }
+                let mut seen = vec![false; input.rank()];
+                for &axis in axes {
+                    if axis >= input.rank() || seen[axis] {
+                        return Err(NeuralError::InvalidPermutation {
+                            rank: input.rank(),
+                            axes: axes.clone(),
+                        });
+                    }
+                    seen[axis] = true;
+                }
+                Shape::new(axes.iter().map(|&axis| input.dims()[axis]).collect::<Vec<_>>())
+            }
+            Self::ReverseAxis { axis } => {
+                if *axis >= inputs[0].rank() {
+                    return Err(NeuralError::InvalidAxis {
+                        axis: *axis,
+                        rank: inputs[0].rank(),
+                    });
+                }
+                Ok(inputs[0].clone())
+            }
+            Self::Concat { axis } => {
+                let left = &inputs[0];
+                let right = &inputs[1];
+                if left.rank() != right.rank() {
+                    return Err(NeuralError::RankMismatch {
+                        operation: self.name(),
+                        expected: left.rank(),
+                        actual: right.rank(),
+                    });
+                }
+                if *axis >= left.rank() {
+                    return Err(NeuralError::InvalidAxis {
+                        axis: *axis,
+                        rank: left.rank(),
+                    });
+                }
+                for dim in 0..left.rank() {
+                    if dim != *axis && left.dims()[dim] != right.dims()[dim] {
+                        return Err(NeuralError::ShapeMismatch {
+                            expected: left.clone(),
+                            actual: right.clone(),
+                        });
+                    }
+                }
+                let mut dims = left.dims().to_vec();
+                dims[*axis] = dims[*axis]
+                    .checked_add(right.dims()[*axis])
+                    .ok_or(NeuralError::ElementCountOverflow)?;
+                Shape::new(dims)
+            }
+            Self::ArgMax { axis, .. } => {
+                let input = &inputs[0];
+                if *axis >= input.rank() {
+                    return Err(NeuralError::InvalidAxis {
+                        axis: *axis,
+                        rank: input.rank(),
+                    });
+                }
+                let mut dims = input.dims().to_vec();
+                dims.remove(*axis);
+                Shape::new(dims)
+            }
+            Self::Take { axis } => {
+                let data = &inputs[0];
+                let index = &inputs[1];
+                if *axis >= data.rank() {
+                    return Err(NeuralError::InvalidAxis {
+                        axis: *axis,
+                        rank: data.rank(),
+                    });
+                }
+                if index.element_count() != 1 {
+                    return Err(NeuralError::IndexElementCountMismatch {
+                        expected: 1,
+                        actual: index.element_count(),
+                    });
+                }
+                let mut dims = data.dims().to_vec();
+                dims.remove(*axis);
+                Shape::new(dims)
+            }
             Self::Reshape(output) => {
                 if inputs[0].element_count() != output.element_count() {
                     return Err(NeuralError::ElementCountMismatch {
@@ -239,10 +391,41 @@ impl Operation {
     }
 
     fn required_domain(&self) -> Domain {
-        if matches!(self, Self::Sqrt) {
-            Domain::NonNegativeFinite
-        } else {
-            Domain::Any
+        match self {
+            Self::Sqrt => Domain::NonNegativeFinite,
+            _ => Domain::Any,
+        }
+    }
+
+    fn infer_dtype(&self, inputs: &[DType]) -> Result<DType, NeuralError> {
+        let require = |position: usize, expected: DType| -> Result<(), NeuralError> {
+            let actual = inputs[position];
+            if actual != expected {
+                return Err(NeuralError::DTypeMismatch {
+                    operation: self.name(),
+                    expected,
+                    actual,
+                });
+            }
+            Ok(())
+        };
+        match self {
+            Self::Input => Err(NeuralError::InputCannotBeApplied),
+            Self::Take { .. } => {
+                require(0, DType::F32)?;
+                require(1, DType::Index)?;
+                Ok(DType::F32)
+            }
+            Self::ArgMax { .. } => {
+                require(0, DType::F32)?;
+                Ok(DType::Index)
+            }
+            _ => {
+                for position in 0..inputs.len() {
+                    require(position, DType::F32)?;
+                }
+                Ok(DType::F32)
+            }
         }
     }
 
@@ -269,7 +452,18 @@ impl Operation {
                     Domain::Any
                 }
             }
-            Self::Reshape(_) => inputs[0],
+            Self::Reshape(_) | Self::Permute { .. } | Self::ReverseAxis { .. } => inputs[0],
+            Self::Concat { .. } => {
+                if inputs.iter().all(|domain| domain.satisfies(Domain::NonNegativeFinite)) {
+                    Domain::NonNegativeFinite
+                } else if inputs.iter().all(|domain| domain.satisfies(Domain::Finite)) {
+                    Domain::Finite
+                } else {
+                    Domain::Any
+                }
+            }
+            Self::Take { .. } => inputs[0],
+            Self::ArgMax { .. } => Domain::Any,
             Self::Input
             | Self::Add
             | Self::Mul
@@ -285,12 +479,29 @@ impl Operation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortContract {
     pub shape: Shape,
+    pub dtype: DType,
     pub domain: Domain,
 }
 
 impl PortContract {
     pub fn new(shape: Shape, domain: Domain) -> Self {
-        Self { shape, domain }
+        Self {
+            shape,
+            dtype: DType::F32,
+            domain,
+        }
+    }
+
+    pub fn index(shape: Shape) -> Self {
+        Self {
+            shape,
+            dtype: DType::Index,
+            domain: Domain::Any,
+        }
+    }
+
+    fn typed(shape: Shape, dtype: DType, domain: Domain) -> Self {
+        Self { shape, dtype, domain }
     }
 
     pub fn any(shape: Shape) -> Self {
@@ -417,6 +628,7 @@ pub struct Node {
     pub operation: Operation,
     pub inputs: Vec<NodeId>,
     pub shape: Shape,
+    pub dtype: DType,
     pub domain: Domain,
     pub contract: MathContract,
     pub semantics: OperationSemantics,
@@ -713,6 +925,7 @@ impl NeuralGraph {
             operation: Operation::Input,
             inputs: Vec::new(),
             shape: shape.clone(),
+            dtype: DType::F32,
             domain,
             contract: MathContract::new(Vec::new(), PortContract::new(shape, domain)),
             semantics: OperationSemantics {
@@ -745,7 +958,34 @@ impl NeuralGraph {
             .map(|n| n.shape.clone())
             .collect::<Vec<_>>();
         let domains = source_nodes.iter().map(|n| n.domain).collect::<Vec<_>>();
+        let dtypes = source_nodes.iter().map(|n| n.dtype).collect::<Vec<_>>();
         let shape = op.infer_shape(&shapes)?;
+        let dtype = op.infer_dtype(&dtypes)?;
+        if let Operation::Take { axis } = &op {
+            let axis = *axis;
+            let index_node = source_nodes[1];
+            let upper_bound = match index_node.operation {
+                Operation::ArgMax {
+                    axis: source_axis, ..
+                } => {
+                    let argmax_input = self.node(index_node.inputs[0])?;
+                    argmax_input.shape.dims()[source_axis]
+                }
+                _ => {
+                    return Err(NeuralError::IndexRangeUnknown {
+                        node: index_node.id.index(),
+                    });
+                }
+            };
+            let extent = source_nodes[0].shape.dims()[axis];
+            if upper_bound > extent {
+                return Err(NeuralError::IndexRangeExceedsAxis {
+                    upper_bound,
+                    axis,
+                    extent,
+                });
+            }
+        }
         let required = op.required_domain();
         for &actual in &domains {
             if !actual.satisfies(required) {
@@ -755,9 +995,10 @@ impl NeuralGraph {
         let contract = MathContract::new(
             shapes
                 .into_iter()
-                .map(|shape| PortContract::new(shape, required))
+                .zip(dtypes)
+                .map(|(shape, dtype)| PortContract::typed(shape, dtype, required))
                 .collect(),
-            PortContract::new(shape.clone(), op.infer_domain(&domains)),
+            PortContract::typed(shape.clone(), dtype, op.infer_domain(&domains)),
         );
         let id = NodeId {
             graph: self.identity,
@@ -768,6 +1009,7 @@ impl NeuralGraph {
             operation: op.clone(),
             inputs: inputs.to_vec(),
             shape,
+            dtype,
             domain: contract.ensures.domain,
             contract,
             semantics: OperationSemantics {
@@ -783,6 +1025,52 @@ impl NeuralGraph {
     /// reassociated: both the host reference and ideal Lean semantics fold left.
     pub fn reduce_sum(&mut self, input: NodeId, axis: usize) -> Result<NodeId, NeuralError> {
         self.apply(Operation::ReduceSum { axis }, &[input])
+    }
+
+    pub fn permute(&mut self, input: NodeId, axes: &[usize]) -> Result<NodeId, NeuralError> {
+        self.apply(
+            Operation::Permute {
+                axes: axes.to_vec(),
+            },
+            &[input],
+        )
+    }
+
+    pub fn reverse_axis(&mut self, input: NodeId, axis: usize) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::ReverseAxis { axis }, &[input])
+    }
+
+    /// Concatenate one or more tensors by lowering the public variadic API to
+    /// the binary semantic primitive. This keeps the core operation minimal.
+    pub fn concat(&mut self, axis: usize, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        let (&first, rest) = inputs
+            .split_first()
+            .ok_or(NeuralError::EmptyConcat)?;
+        let first_node = self.node(first)?;
+        if axis >= first_node.shape.rank() {
+            return Err(NeuralError::InvalidAxis {
+                axis,
+                rank: first_node.shape.rank(),
+            });
+        }
+        let mut current = first;
+        for &next in rest {
+            current = self.apply(Operation::Concat { axis }, &[current, next])?;
+        }
+        Ok(current)
+    }
+
+    pub fn argmax(
+        &mut self,
+        input: NodeId,
+        axis: usize,
+        tie_break: ArgMaxTieBreak,
+    ) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::ArgMax { axis, tie_break }, &[input])
+    }
+
+    pub fn take(&mut self, data: NodeId, index: NodeId, axis: usize) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::Take { axis }, &[data, index])
     }
 
     pub fn add(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, NeuralError> {
@@ -946,6 +1234,13 @@ impl NeuralGraph {
                     actual: actual.shape.clone(),
                 });
             }
+            if actual.dtype != required.dtype {
+                return Err(NeuralError::DTypeMismatch {
+                    operation: "module_input",
+                    expected: required.dtype,
+                    actual: actual.dtype,
+                });
+            }
             if !actual.domain.satisfies(required.domain) {
                 return Err(NeuralError::DomainNotEstablished {
                     required: required.domain,
@@ -972,6 +1267,13 @@ impl NeuralGraph {
             return Err(NeuralError::ShapeMismatch {
                 expected: contract.ensures.shape.clone(),
                 actual: actual.shape.clone(),
+            });
+        }
+        if actual.dtype != contract.ensures.dtype {
+            return Err(NeuralError::DTypeMismatch {
+                operation: "module_output",
+                expected: contract.ensures.dtype,
+                actual: actual.dtype,
             });
         }
         if !actual.domain.satisfies(contract.ensures.domain) {
@@ -1015,7 +1317,11 @@ impl NeuralGraph {
             .iter()
             .map(|&id| {
                 let node = self.node(id)?;
-                Ok(PortContract::new(node.shape.clone(), node.domain))
+                Ok(PortContract::typed(
+                    node.shape.clone(),
+                    node.dtype,
+                    node.domain,
+                ))
             })
             .collect::<Result<Vec<_>, NeuralError>>()?;
         let body_start = self.nodes.len();
@@ -1034,7 +1340,7 @@ impl NeuralGraph {
         let result = candidate.node(output)?;
         let contract = MathContract::new(
             requires,
-            PortContract::new(result.shape.clone(), result.domain),
+            PortContract::typed(result.shape.clone(), result.dtype, result.domain),
         );
         let module_index = candidate.modules.len();
         let body_end = candidate.nodes.len();
@@ -1090,6 +1396,7 @@ impl NeuralGraph {
             });
         }
         if contract.inputs[0].port.shape != contract.outputs[0].port.shape
+            || contract.inputs[0].port.dtype != contract.outputs[0].port.dtype
             || !contract.outputs[0]
                 .port
                 .domain
@@ -1196,6 +1503,13 @@ impl NeuralGraph {
                     actual: node.shape.clone(),
                 });
             }
+            if node.dtype != port.port.dtype {
+                return Err(NeuralError::DTypeMismatch {
+                    operation: "multi_module_input",
+                    expected: port.port.dtype,
+                    actual: node.dtype,
+                });
+            }
             if !node.domain.satisfies(port.port.domain) {
                 return Err(NeuralError::DomainNotEstablished {
                     required: port.port.domain,
@@ -1240,6 +1554,13 @@ impl NeuralGraph {
                 return Err(NeuralError::ShapeMismatch {
                     expected: port.port.shape.clone(),
                     actual: node.shape.clone(),
+                });
+            }
+            if node.dtype != port.port.dtype {
+                return Err(NeuralError::DTypeMismatch {
+                    operation: "multi_module_output",
+                    expected: port.port.dtype,
+                    actual: node.dtype,
                 });
             }
             if !node.domain.satisfies(port.port.domain) {

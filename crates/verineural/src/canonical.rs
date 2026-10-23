@@ -11,7 +11,7 @@ use crate::{
     Predicate, ReductionOrder, RoundingMode, Shape, SubnormalMode, ValueRef,
 };
 
-const FORMAT_VERSION: &str = "verineural-semantic-ir-v2";
+const FORMAT_VERSION: &str = "verineural-semantic-ir-v3";
 
 fn escaped(value: &str) -> String {
     let mut out = String::new();
@@ -52,6 +52,16 @@ fn operation(operation: &Operation) -> String {
             spec.expression().canonical()
         ),
         Operation::ReduceSum { axis } => format!("reduce_sum_axis:{axis}"),
+        Operation::Permute { axes } => format!(
+            "permute_axes:{}",
+            axes.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
+        ),
+        Operation::ReverseAxis { axis } => format!("reverse_axis:{axis}"),
+        Operation::Concat { axis } => format!("concat_axis:{axis}"),
+        Operation::ArgMax { axis, tie_break } => {
+            format!("argmax_axis:{axis}:tie={}", tie_break.name())
+        }
+        Operation::Take { axis } => format!("take_axis:{axis}"),
         other => other.name().to_owned(),
     }
 }
@@ -87,7 +97,12 @@ fn nodes(ids: impl IntoIterator<Item = usize>) -> String {
 }
 
 fn port(port: &PortContract) -> String {
-    format!("{}@{}", shape(&port.shape), port.domain.name())
+    format!(
+        "{}@{}@{}",
+        shape(&port.shape),
+        port.dtype.name(),
+        port.domain.name()
+    )
 }
 
 fn value_ref(value: &ValueRef) -> String {
@@ -146,10 +161,11 @@ pub(crate) fn graph_ir(graph: &NeuralGraph) -> String {
     for (index, node) in graph.nodes().iter().enumerate() {
         writeln!(
             text,
-            "node={index};op={};inputs={};shape={};domain={};requires={};ensures={};claims={};ideal={};gpu={}",
+            "node={index};op={};inputs={};shape={};dtype={};domain={};requires={};ensures={};claims={};ideal={};gpu={}",
             operation(&node.operation),
             nodes(node.inputs.iter().map(|id| id.index())),
             shape(&node.shape),
+            node.dtype.name(),
             node.domain.name(),
             ports(node.contract.requires.iter().map(port)),
             port(&node.contract.ensures),

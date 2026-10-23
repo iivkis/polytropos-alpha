@@ -304,8 +304,9 @@ pub fn core_model() -> Result<Model, ModelError> {
     m.finish()
 }
 
-/// Learned logits for 2 cores x 4 orientations. Sampling/argmax are discrete
-/// *laboratory policy* decisions, not CUDA/Lean-certified neural primitives.
+/// Learned logits for 2 cores x 4 orientations. This executable runtime still
+/// resolves sampling/argmax on the host because the new semantic ArgMax/Take
+/// slice does not yet have GPU lowering. Sampling remains laboratory policy.
 pub fn router_model() -> Result<Model, ModelError> {
     let mut m = ModelBuilder::new("rotating_router", "0.1.0");
     let dictionary = m.input("dictionary_state", [1, WIDTH], Domain::NonNegativeFinite)?;
@@ -335,10 +336,11 @@ pub fn head_model() -> Result<Model, ModelError> {
 /// One evidence model for the whole laboratory architecture.
 ///
 /// Router, recurrent transition and terminal readout share ONE Semantic Neural IR.
-/// `selected_rotated_weight` is an explicit trust boundary: converting router
-/// logits into (core_id, rotate), rotating a canonical matrix and feeding that
-/// selected view into the step are currently host-orchestrated rather than
-/// falsely represented as proved Semantic Neural IR.
+/// `selected_rotated_weight` remains an explicit GPU-certification boundary in
+/// this executable evidence model. VeriNeural can now represent deterministic
+/// argmax, selection and rotation composition in Semantic IR/Lean, but those
+/// operations deliberately fail closed in the GPU backend until lowering is
+/// implemented and audited.
 pub fn architecture_model() -> Result<Model, ModelError> {
     let mut m = ModelBuilder::new("rotating-matrices", "0.1.0");
     let dictionary = m.input("dictionary_state", [1, WIDTH], Domain::NonNegativeFinite)?;

@@ -16,6 +16,10 @@ def shapeSize (dims : List Nat) : Nat :=
 /-- A flat tensor with exactly n addressable elements. -/
 abbrev Tensor (n : Nat) := Fin n → Int
 
+/-- A flat tensor of structural indices. This is deliberately distinct from
+    floating-point/data tensors instead of encoding indices as numbers. -/
+abbrev IndexTensor (n : Nat) := Fin n → Nat
+
 def add {n : Nat} (a b : Tensor n) : Tensor n :=
   fun i => a i + b i
 
@@ -41,6 +45,63 @@ def reshape {n : Nat} (a : Tensor n) : Tensor n := a
     lie in range; proving that correspondence is a separate obligation. -/
 def flatGet {n : Nat} (a : Tensor n) (index : Nat) : Int :=
   if h : index < n then a ⟨index, h⟩ else 0
+
+/-- Total access to an index tensor. -/
+def indexGet {n : Nat} (a : IndexTensor n) (index : Nat) : Nat :=
+  if h : index < n then a ⟨index, h⟩ else 0
+
+/-- Rank-2 row-major transpose, the first supported nontrivial permutation. -/
+def transpose2D {rows cols : Nat} (a : Tensor (rows * cols)) : Tensor (cols * rows) :=
+  fun i => flatGet a ((i.val % rows) * cols + i.val / rows)
+
+/-- Reverse one row-major axis encoded as prefix/width/suffix extents. -/
+def reverseAxis {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) : Tensor (outer * width * inner) :=
+  fun i =>
+    let outerIndex := i.val / (width * inner)
+    let lane := (i.val / inner) % width
+    let suffix := i.val % inner
+    flatGet a ((outerIndex * width + (width - 1 - lane)) * inner + suffix)
+
+/-- Concatenate two row-major tensors along one axis. -/
+def concatAxis {outer leftWidth rightWidth inner : Nat}
+    (a : Tensor (outer * leftWidth * inner))
+    (b : Tensor (outer * rightWidth * inner)) :
+    Tensor (outer * (leftWidth + rightWidth) * inner) :=
+  fun i =>
+    let totalWidth := leftWidth + rightWidth
+    let outerIndex := i.val / (totalWidth * inner)
+    let lane := (i.val / inner) % totalWidth
+    let suffix := i.val % inner
+    if lane < leftWidth then
+      flatGet a ((outerIndex * leftWidth + lane) * inner + suffix)
+    else
+      flatGet b ((outerIndex * rightWidth + (lane - leftWidth)) * inner + suffix)
+
+/-- Deterministic argmax along one axis. Strict `>` keeps the first lane on ties. -/
+def argMaxFirstAxis {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) : IndexTensor (outer * inner) :=
+  fun i =>
+    let outerIndex := i.val / inner
+    let suffix := i.val % inner
+    (List.range width).foldl
+      (fun best lane =>
+        if flatGet a ((outerIndex * width + best) * inner + suffix) <
+            flatGet a ((outerIndex * width + lane) * inner + suffix) then
+          lane
+        else
+          best)
+      0
+
+/-- Select one lane using a one-element index tensor. Out-of-range indices map
+    to zero in the total Lean model; Rust construction currently exposes no
+    arbitrary Index source and `argMaxFirstAxis` always returns an in-range lane. -/
+def takeAxis {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) (selected : IndexTensor 1) :
+    Tensor (outer * inner) :=
+  fun i =>
+    let lane := indexGet selected 0
+    flatGet a ((i.val / inner) * width * inner + lane * inner + i.val % inner)
 
 /-- Row-major sum across an arbitrary axis, encoded by prefix, width and
     suffix element counts. The sum is a left fold starting at zero. -/
@@ -131,6 +192,35 @@ theorem flatGet_nonnegative {n : Nat} (a : Tensor n)
   · rename_i h
     exact ha ⟨index, h⟩
   · decide
+
+theorem transpose2D_nonnegative {rows cols : Nat} (a : Tensor (rows * cols))
+    (ha : Nonnegative a) : Nonnegative (transpose2D a) := by
+  intro i
+  exact flatGet_nonnegative a ha _
+
+theorem reverseAxis_nonnegative {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) (ha : Nonnegative a) :
+    Nonnegative (reverseAxis a) := by
+  intro i
+  exact flatGet_nonnegative a ha _
+
+theorem concatAxis_nonnegative {outer leftWidth rightWidth inner : Nat}
+    (a : Tensor (outer * leftWidth * inner))
+    (b : Tensor (outer * rightWidth * inner))
+    (ha : Nonnegative a) (hb : Nonnegative b) :
+    Nonnegative (concatAxis a b) := by
+  intro i
+  unfold concatAxis
+  dsimp
+  split
+  · exact flatGet_nonnegative a ha _
+  · exact flatGet_nonnegative b hb _
+
+theorem takeAxis_nonnegative {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) (selected : IndexTensor 1)
+    (ha : Nonnegative a) : Nonnegative (takeAxis a selected) := by
+  intro i
+  exact flatGet_nonnegative a ha _
 
 /-- Every intermediate accumulator stays nonnegative when the input is
     nonnegative; unlike a post-hoc range assertion, this is kernel checked. -/

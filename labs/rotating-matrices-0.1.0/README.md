@@ -100,13 +100,16 @@ artifacts/
 Runtime может исполнять части раздельно для последовательного CUDA Graph replay,
 но это не превращает их в три разные архитектуры.
 
-Текущая честная граница: `selected_rotated_weight` в общем IR является явным
-параметром. Преобразование router logits → `(core_id, rotate)`, поворот одной
-из двух канонических 64×64 матриц и повторение recurrent transition по
-произвольной длине строки пока выполняются host-кодом и не объявляются
-Lean/GPU-сертифицированной частью общей архитектуры. Для закрытия этой границы
-VeriNeural нужны архитектурно-нейтральные IR-примитивы argmax/selection и
-permutation/rotation с GPU+Lean lowering.
+Текущая честная граница: `selected_rotated_weight` в GPU-сертифицируемой
+evidence-модели всё ещё является явным параметром. VeriNeural уже умеет
+представлять детерминированные `argmax`/`take` и rotation как композицию
+`permute + reverse_axis`, включая canonical IR и ideal-Int Lean semantics.
+Но GPU/numeric lowering нового structural/indexing slice пока намеренно
+`unsupported`, а `Model::certify` требует GPU lowering всех outputs. Поэтому
+исполняемая лаборатория пока оставляет выбор/rotation на host вместо того,
+чтобы выдавать неподдерживаемый CUDA путь за сертифицированный. Следующий шаг
+здесь — backend lowering и после него миграция unified evidence graph без
+`selected_rotated_weight`.
 
 Для публикации реальных результатов после запуска:
 
@@ -137,10 +140,12 @@ git push origin dev
 * `architecture.lean` kernel-check'ит определения, формы и локальную семантику
   объединённого поддерживаемого графа. Глобальная теорема корректности
   маршрутизации и произвольного recurrent loop пока не заявлена.
-* Дискретный `argmax`/sampling маршрутизатора и поворот базовой матрицы
-  выполняются на host как **неверифицированные** преобразования привязанных
-  данных. Последовательное состояние передаётся между запусками CUDA Graph;
-  полный цикл и его свойство не доказаны. CUDA/IEEE-754/SASS не заверены.
+* В текущем executable path дискретный `argmax`/sampling маршрутизатора и
+  поворот базовой матрицы выполняются на host. Для deterministic argmax/selection
+  и permutation уже есть Semantic IR + ideal-Int Lean model, но этот runtime их
+  ещё не использует из-за отсутствующего GPU lowering. Последовательное состояние
+  передаётся между запусками CUDA Graph; полный цикл и его свойство не доказаны.
+  CUDA/IEEE-754/SASS не заверены.
 * Обучение действительно меняет router weights (REINFORCE с baseline),
   scalar head (онлайн SGD) и обе базовые матрицы (SPSA с фиксированным
   маршрутом). Это исследовательский стохастический метод, **не обещание
@@ -151,8 +156,10 @@ git push origin dev
 
 ## Требующие отдельного развития
 
-Полная сертификация `rotate` и selection должна опираться на универсальные
-IR-примитивы permutation / transpose / gather и selection со строгим GPU + Lean
-lowering. Верификация рекуррентного цикла требует инварианта состояния и
+Полная сертификация `rotate` и selection теперь упирается не в отсутствие
+универсального IR, а в GPU/numeric lowering существующих `permute`,
+`reverse_axis`, `argmax`, `take` и `concat`, после чего unified evidence model
+можно перевести на эти primitives без `selected_rotated_weight`. GPU lowering и его
+translation evidence остаются отдельной обязательной работой. Верификация рекуррентного цикла требует инварианта состояния и
 доказанной композиции по времени. Отдельно стоит добавить ablation:
 фиксированный маршрут против обучаемого, один core против двух, без вращений.

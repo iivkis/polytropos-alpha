@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Domain, Shape};
+use crate::{DType, Domain, Shape};
 
 /// A construction, shape, domain, or module-composition error.
 ///
@@ -43,6 +43,33 @@ pub enum NeuralError {
     InvalidAxis {
         axis: usize,
         rank: usize,
+    },
+    InvalidPermutation {
+        rank: usize,
+        axes: Vec<usize>,
+    },
+    EmptyConcat,
+    IndexElementCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    IndexOutOfBounds {
+        axis: usize,
+        index: usize,
+        bound: usize,
+    },
+    IndexRangeExceedsAxis {
+        upper_bound: usize,
+        axis: usize,
+        extent: usize,
+    },
+    IndexRangeUnknown {
+        node: usize,
+    },
+    DTypeMismatch {
+        operation: &'static str,
+        expected: DType,
+        actual: DType,
     },
     InputCannotBeApplied,
     DomainNotEstablished {
@@ -106,6 +133,37 @@ impl fmt::Display for NeuralError {
             Self::InvalidAxis { axis, rank } => {
                 write!(f, "tensor axis {axis} is outside rank {rank}")
             }
+            Self::InvalidPermutation { rank, axes } => {
+                write!(f, "invalid rank-{rank} axis permutation {axes:?}")
+            }
+            Self::EmptyConcat => write!(f, "concat requires at least one tensor"),
+            Self::IndexElementCountMismatch { expected, actual } => write!(
+                f,
+                "index tensor needs {expected} elements, received {actual}"
+            ),
+            Self::IndexOutOfBounds { axis, index, bound } => write!(
+                f,
+                "index {index} is outside axis {axis} with extent {bound}"
+            ),
+            Self::IndexRangeExceedsAxis {
+                upper_bound,
+                axis,
+                extent,
+            } => write!(
+                f,
+                "index producer may return [0,{upper_bound}), but axis {axis} has extent {extent}"
+            ),
+            Self::IndexRangeUnknown { node } => {
+                write!(f, "index range is not established for node {node}")
+            }
+            Self::DTypeMismatch {
+                operation,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{operation} expects {expected:?}, received {actual:?}"
+            ),
             Self::InputCannotBeApplied => write!(f, "create source nodes with graph.input()"),
             Self::DomainNotEstablished { required, actual } => write!(
                 f,

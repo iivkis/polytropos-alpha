@@ -116,6 +116,11 @@ fn operation_title(operation: &Operation) -> &'static str {
         Operation::Reshape(_) => "Reshape",
         Operation::Pointwise(_) => "User-defined pointwise",
         Operation::ReduceSum { .. } => "Reduce sum",
+        Operation::Permute { .. } => "Permute",
+        Operation::ReverseAxis { .. } => "Reverse axis",
+        Operation::Concat { .. } => "Concat",
+        Operation::ArgMax { .. } => "Argmax",
+        Operation::Take { .. } => "Take",
     }
 }
 
@@ -576,6 +581,31 @@ pub fn snapshot_architecture(
                     },
                 ),
                 (
+                    "vn_axis",
+                    match node.operation {
+                        Operation::ReduceSum { axis }
+                        | Operation::ReverseAxis { axis }
+                        | Operation::Concat { axis }
+                        | Operation::ArgMax { axis, .. }
+                        | Operation::Take { axis } => axis.to_string(),
+                        _ => String::new(),
+                    },
+                ),
+                (
+                    "vn_permutation",
+                    match &node.operation {
+                        Operation::Permute { axes } => format!("{axes:?}"),
+                        _ => String::new(),
+                    },
+                ),
+                (
+                    "vn_tie_break",
+                    match node.operation {
+                        Operation::ArgMax { tie_break, .. } => tie_break.name().to_owned(),
+                        _ => String::new(),
+                    },
+                ),
+                (
                     "vn_custom_semantics",
                     match &node.operation {
                         Operation::Pointwise(spec) => format!(
@@ -599,7 +629,7 @@ pub fn snapshot_architecture(
                     ),
                 ),
                 ("vn_shape", dims),
-                ("vn_dtype", "binary32".into()),
+                ("vn_dtype", node.dtype.name().into()),
                 ("vn_layout", "row-major".into()),
                 ("vn_domain", format!("{:?}", node.domain)),
                 ("vn_semantics", format!("{:?}", node.semantics)),
@@ -741,6 +771,12 @@ pub fn snapshot_architecture(
             let transform = match node.operation {
                 Operation::BiasAdd if port == 1 => "row-wise-broadcast",
                 Operation::Reshape(_) => "zero-copy-reshape",
+                Operation::Permute { .. } => "axis-permutation",
+                Operation::ReverseAxis { .. } => "axis-reversal",
+                Operation::Concat { .. } => "axis-concatenation",
+                Operation::ArgMax { .. } => "argmax-indexing",
+                Operation::Take { .. } if port == 1 => "index-selection",
+                Operation::Take { .. } => "axis-selection",
                 Operation::MatMul => "matrix-product-indexing",
                 _ => "identity",
             };
@@ -814,7 +850,7 @@ pub fn snapshot_architecture(
                 ("vn_visual_src", format!("n{}", source.index())),
                 ("vn_role", role.into()),
                 ("vn_shape", format!("{:?}", from.shape.dims())),
-                ("vn_dtype", "binary32".into()),
+                ("vn_dtype", from.dtype.name().into()),
                 ("vn_transform", transform.into()),
                 ("vn_order", port.to_string()),
                 ("vn_constraint", "source-shape-checked".into()),
@@ -906,7 +942,7 @@ pub(crate) fn auto_architecture_dot(
         ("vn_connectivity", "Rust-structural-validation".into()),
         (
             "vn_unmodeled",
-            "arbitrary-dtype;implicit-broadcast;machine-equivalence".into(),
+            "general-dtype;implicit-broadcast;machine-equivalence".into(),
         ),
     ] {
         writeln!(dot, "  {key}={};", quoted(&value)).expect("writing DOT");
@@ -958,6 +994,31 @@ pub(crate) fn auto_architecture_dot(
                     },
                 ),
                 (
+                    "vn_axis",
+                    match node.operation {
+                        Operation::ReduceSum { axis }
+                        | Operation::ReverseAxis { axis }
+                        | Operation::Concat { axis }
+                        | Operation::ArgMax { axis, .. }
+                        | Operation::Take { axis } => axis.to_string(),
+                        _ => String::new(),
+                    },
+                ),
+                (
+                    "vn_permutation",
+                    match &node.operation {
+                        Operation::Permute { axes } => format!("{axes:?}"),
+                        _ => String::new(),
+                    },
+                ),
+                (
+                    "vn_tie_break",
+                    match node.operation {
+                        Operation::ArgMax { tie_break, .. } => tie_break.name().to_owned(),
+                        _ => String::new(),
+                    },
+                ),
+                (
                     "vn_custom_semantics",
                     match &node.operation {
                         Operation::Pointwise(spec) => format!(
@@ -981,7 +1042,7 @@ pub(crate) fn auto_architecture_dot(
                     ),
                 ),
                 ("vn_shape", format!("{:?}", node.shape.dims())),
-                ("vn_dtype", "binary32".into()),
+                ("vn_dtype", node.dtype.name().into()),
                 ("vn_layout", "row-major".into()),
                 ("vn_domain", format!("{:?}", node.domain)),
                 ("vn_contract", format!("{:?}", node.contract)),
@@ -1098,6 +1159,12 @@ pub(crate) fn auto_architecture_dot(
             let transform = match node.operation {
                 Operation::BiasAdd if port == 1 => "row-wise-broadcast",
                 Operation::Reshape(_) => "zero-copy-reshape",
+                Operation::Permute { .. } => "axis-permutation",
+                Operation::ReverseAxis { .. } => "axis-reversal",
+                Operation::Concat { .. } => "axis-concatenation",
+                Operation::ArgMax { .. } => "argmax-indexing",
+                Operation::Take { .. } if port == 1 => "index-selection",
+                Operation::Take { .. } => "axis-selection",
                 Operation::MatMul => "matrix-product-indexing",
                 _ => "identity",
             };
@@ -1139,7 +1206,7 @@ pub(crate) fn auto_architecture_dot(
                 ("vn_visual_src", format!("n{}", input.index())),
                 ("vn_order", port.to_string()),
                 ("vn_shape", format!("{:?}", source.shape.dims())),
-                ("vn_dtype", "binary32".into()),
+                ("vn_dtype", source.dtype.name().into()),
                 ("vn_role", "data".into()),
                 ("vn_transform", transform.into()),
                 ("vn_constraint", "source-shape-checked".into()),

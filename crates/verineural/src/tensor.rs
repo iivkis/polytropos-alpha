@@ -1,4 +1,4 @@
-use crate::{Domain, NeuralError, Operation};
+use crate::{ArgMaxTieBreak, Domain, NeuralError, Operation};
 
 /// Validated, immutable tensor dimensions. An empty dimension list is a scalar.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -48,6 +48,22 @@ pub struct Tensor<T, S: TensorShape = Shape> {
     values: Vec<T>,
 }
 
+fn unravel_index(mut index: usize, dims: &[usize]) -> Vec<usize> {
+    let mut coords = vec![0; dims.len()];
+    for axis in (0..dims.len()).rev() {
+        coords[axis] = index % dims[axis];
+        index /= dims[axis];
+    }
+    coords
+}
+
+fn ravel_index(coords: &[usize], dims: &[usize]) -> usize {
+    coords
+        .iter()
+        .zip(dims)
+        .fold(0usize, |flat, (&coord, &dim)| flat * dim + coord)
+}
+
 impl<T, S: TensorShape> Tensor<T, S> {
     pub fn new(shape: S, values: Vec<T>) -> Result<Self, NeuralError> {
         let checked = Shape::new(shape.dims().to_vec())?;
@@ -70,6 +86,89 @@ impl<T, S: TensorShape> Tensor<T, S> {
 
     pub fn into_values(self) -> Vec<T> {
         self.values
+    }
+}
+
+impl<T: Clone> Tensor<T> {
+    /// Reorder axes in row-major order. `axes[output_axis] = input_axis`.
+    pub fn permute(&self, axes: &[usize]) -> Result<Self, NeuralError> {
+        let operation = Operation::Permute {
+            axes: axes.to_vec(),
+        };
+        let shape = operation.infer_shape(std::slice::from_ref(&self.shape))?;
+        let mut values = Vec::with_capacity(self.values.len());
+        for output_index in 0..shape.element_count() {
+            let output_coords = unravel_index(output_index, shape.dims());
+            let mut input_coords = vec![0; self.shape.rank()];
+            for (output_axis, &input_axis) in axes.iter().enumerate() {
+                input_coords[input_axis] = output_coords[output_axis];
+            }
+            values.push(self.values[ravel_index(&input_coords, self.shape.dims())].clone());
+        }
+        Self::new(shape, values)
+    }
+
+    /// Reverse one row-major axis without changing shape.
+    pub fn reverse_axis(&self, axis: usize) -> Result<Self, NeuralError> {
+        let operation = Operation::ReverseAxis { axis };
+        let shape = operation.infer_shape(std::slice::from_ref(&self.shape))?;
+        let mut values = Vec::with_capacity(self.values.len());
+        for output_index in 0..shape.element_count() {
+            let mut input_coords = unravel_index(output_index, shape.dims());
+            input_coords[axis] = shape.dims()[axis] - 1 - input_coords[axis];
+            values.push(self.values[ravel_index(&input_coords, self.shape.dims())].clone());
+        }
+        Self::new(shape, values)
+    }
+
+    /// Concatenate two tensors along one axis.
+    pub fn concat(&self, rhs: &Self, axis: usize) -> Result<Self, NeuralError> {
+        let operation = Operation::Concat { axis };
+        let shape = operation.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
+        let left_width = self.shape.dims()[axis];
+        let mut values = Vec::with_capacity(shape.element_count());
+        for output_index in 0..shape.element_count() {
+            let output_coords = unravel_index(output_index, shape.dims());
+            if output_coords[axis] < left_width {
+                values.push(self.values[ravel_index(&output_coords, self.shape.dims())].clone());
+            } else {
+                let mut right_coords = output_coords;
+                right_coords[axis] -= left_width;
+                values.push(rhs.values[ravel_index(&right_coords, rhs.shape.dims())].clone());
+            }
+        }
+        Self::new(shape, values)
+    }
+
+    /// Select one lane from an axis using a one-element host index tensor.
+    pub fn take(&self, index: &Tensor<usize>, axis: usize) -> Result<Self, NeuralError> {
+        let operation = Operation::Take { axis };
+        let shape = operation.infer_shape(&[self.shape.clone(), index.shape.clone()])?;
+        let selected = index.values[0];
+        let bound = self.shape.dims()[axis];
+        if selected >= bound {
+            return Err(NeuralError::IndexOutOfBounds {
+                axis,
+                index: selected,
+                bound,
+            });
+        }
+        let mut values = Vec::with_capacity(shape.element_count());
+        for output_index in 0..shape.element_count() {
+            let output_coords = unravel_index(output_index, shape.dims());
+            let mut input_coords = Vec::with_capacity(self.shape.rank());
+            let mut output_axis = 0;
+            for input_axis in 0..self.shape.rank() {
+                if input_axis == axis {
+                    input_coords.push(selected);
+                } else {
+                    input_coords.push(output_coords[output_axis]);
+                    output_axis += 1;
+                }
+            }
+            values.push(self.values[ravel_index(&input_coords, self.shape.dims())].clone());
+        }
+        Self::new(shape, values)
     }
 }
 
@@ -203,6 +302,40 @@ impl Tensor<f32> {
             self.shape.clone(),
             self.values.iter().map(|v| v.sqrt()).collect(),
         )
+    }
+
+    /// Deterministic row-major argmax. Equal maxima keep the first lane. NaN
+    /// never replaces a numeric best; an initial NaN is replaced by the first
+    /// numeric lane. If every lane is NaN, the first lane wins.
+    pub fn argmax(
+        &self,
+        axis: usize,
+        tie_break: ArgMaxTieBreak,
+    ) -> Result<Tensor<usize>, NeuralError> {
+        let operation = Operation::ArgMax { axis, tie_break };
+        let shape = operation.infer_shape(std::slice::from_ref(&self.shape))?;
+        let width = self.shape.dims()[axis];
+        let inner = self.shape.dims()[axis + 1..].iter().product::<usize>();
+        let mut values = Vec::with_capacity(shape.element_count());
+        for output_index in 0..shape.element_count() {
+            let outer = output_index / inner;
+            let suffix = output_index % inner;
+            let mut best = 0usize;
+            let mut best_value = self.values[(outer * width) * inner + suffix];
+            for lane in 1..width {
+                let candidate = self.values[(outer * width + lane) * inner + suffix];
+                match tie_break {
+                    ArgMaxTieBreak::First => {
+                        if !candidate.is_nan() && (best_value.is_nan() || candidate > best_value) {
+                            best = lane;
+                            best_value = candidate;
+                        }
+                    }
+                }
+            }
+            values.push(best);
+        }
+        Tensor::new(shape, values)
     }
 
     /// Row-major sum over any axis, with an explicit left-to-right f32 fold.

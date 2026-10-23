@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{
-    ContractClaim, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation, Predicate,
+    ContractClaim, DType, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation, Predicate,
     Shape, ValueRef,
 };
 
@@ -288,7 +288,22 @@ impl LeanProofEngine {
                 | Operation::SelectPositive
                 | Operation::Reshape(_)
                 | Operation::Pointwise(_)
-                | Operation::ReduceSum { .. } => {}
+                | Operation::ReduceSum { .. }
+                | Operation::ReverseAxis { .. }
+                | Operation::Concat { .. }
+                | Operation::ArgMax { .. }
+                | Operation::Take { .. } => {}
+                Operation::Permute { ref axes } => {
+                    let input = graph.node(node.inputs[0])?;
+                    let identity = axes.iter().copied().eq(0..axes.len());
+                    let transpose_2d = input.shape.rank() == 2 && axes.as_slice() == [1, 0];
+                    if !identity && !transpose_2d {
+                        return Err(ProofError::UnsupportedOperation {
+                            node: index,
+                            operation: node.operation.name(),
+                        });
+                    }
+                }
                 _ => {
                     return Err(ProofError::UnsupportedOperation {
                         node: index,
@@ -316,8 +331,11 @@ impl LeanProofEngine {
             .iter()
             .map(|&i| {
                 format!(
-                    "(x_{i} : VeriNeural.Tensor {})",
-                    graph.nodes()[i].shape.element_count()
+                    "(x_{i} : {})",
+                    lean_value_type(
+                        graph.nodes()[i].dtype,
+                        graph.nodes()[i].shape.element_count()
+                    )
                 )
             })
             .collect::<Vec<_>>()
@@ -419,14 +437,65 @@ impl LeanProofEngine {
                     .lean(&|port| call(node.inputs[port].index())),
                 Operation::ReduceSum { axis } => {
                     let input = graph.node(node.inputs[0])?;
-                    let dims = input.shape.dims();
-                    let outer = dims[..*axis].iter().product::<usize>();
-                    let width = dims[*axis];
-                    let inner = dims[*axis + 1..].iter().product::<usize>();
+                    let (outer, width, inner) = axis_factors(&input.shape, *axis);
                     format!(
                         "VeriNeural.reduceSumAxis (outer := {outer}) (width := {width}) \
                          (inner := {inner}) {}",
                         call(node.inputs[0].index())
+                    )
+                }
+                Operation::Permute { axes } => {
+                    let input = graph.node(node.inputs[0])?;
+                    if axes.iter().copied().eq(0..axes.len()) {
+                        format!("VeriNeural.reshape {}", call(node.inputs[0].index()))
+                    } else {
+                        let dims = input.shape.dims();
+                        format!(
+                            "VeriNeural.transpose2D (rows := {}) (cols := {}) {}",
+                            dims[0],
+                            dims[1],
+                            call(node.inputs[0].index())
+                        )
+                    }
+                }
+                Operation::ReverseAxis { axis } => {
+                    let input = graph.node(node.inputs[0])?;
+                    let (outer, width, inner) = axis_factors(&input.shape, *axis);
+                    format!(
+                        "VeriNeural.reverseAxis (outer := {outer}) (width := {width}) \
+                         (inner := {inner}) {}",
+                        call(node.inputs[0].index())
+                    )
+                }
+                Operation::Concat { axis } => {
+                    let left = graph.node(node.inputs[0])?;
+                    let right = graph.node(node.inputs[1])?;
+                    let (outer, left_width, inner) = axis_factors(&left.shape, *axis);
+                    let (_, right_width, _) = axis_factors(&right.shape, *axis);
+                    format!(
+                        "VeriNeural.concatAxis (outer := {outer}) (leftWidth := {left_width}) \
+                         (rightWidth := {right_width}) (inner := {inner}) {} {}",
+                        call(node.inputs[0].index()),
+                        call(node.inputs[1].index())
+                    )
+                }
+                Operation::ArgMax { axis, .. } => {
+                    let input = graph.node(node.inputs[0])?;
+                    let (outer, width, inner) = axis_factors(&input.shape, *axis);
+                    format!(
+                        "VeriNeural.argMaxFirstAxis (outer := {outer}) (width := {width}) \
+                         (inner := {inner}) {}",
+                        call(node.inputs[0].index())
+                    )
+                }
+                Operation::Take { axis } => {
+                    let data = graph.node(node.inputs[0])?;
+                    let (outer, width, inner) = axis_factors(&data.shape, *axis);
+                    format!(
+                        "VeriNeural.takeAxis (outer := {outer}) (width := {width}) \
+                         (inner := {inner}) {} {}",
+                        call(node.inputs[0].index()),
+                        call(node.inputs[1].index())
                     )
                 }
                 _ => unreachable!("checked while collecting ancestors"),
@@ -445,8 +514,11 @@ impl LeanProofEngine {
                             format!("_x_{source_index}")
                         };
                         format!(
-                            "({binder} : VeriNeural.Tensor {})",
-                            graph.nodes()[source_index].shape.element_count()
+                            "({binder} : {})",
+                            lean_value_type(
+                                graph.nodes()[source_index].dtype,
+                                graph.nodes()[source_index].shape.element_count()
+                            )
                         )
                     })
                     .collect::<Vec<_>>()
@@ -454,8 +526,9 @@ impl LeanProofEngine {
             } else {
                 params.clone()
             };
+            let value_type = lean_value_type(node.dtype, count);
             source.push_str(&format!(
-                "def node_{index} {definition_params} : VeriNeural.Tensor {count} :=\n  {rhs}\n\n"
+                "def node_{index} {definition_params} : {value_type} :=\n  {rhs}\n\n"
             ));
 
             let name = format!("node_{index}_shape");
@@ -488,6 +561,46 @@ impl LeanProofEngine {
                         "VeriNeural.shapeSize {} = {outer} * {width} * {inner}",
                         shape_expr(&predecessor.shape)
                     )
+                } else if matches!(node.operation, Operation::Permute { .. }) {
+                    format!(
+                        "VeriNeural.shapeSize {} = VeriNeural.shapeSize {}",
+                        shape_expr(&predecessor.shape),
+                        shape_expr(&node.shape)
+                    )
+                } else if matches!(node.operation, Operation::Concat { .. }) {
+                    let axis = match &node.operation {
+                        Operation::Concat { axis } => *axis,
+                        _ => unreachable!(),
+                    };
+                    let (outer, width, inner) = axis_factors(&predecessor.shape, axis);
+                    format!(
+                        "VeriNeural.shapeSize {} = {outer} * {width} * {inner}",
+                        shape_expr(&predecessor.shape)
+                    )
+                } else if matches!(node.operation, Operation::ArgMax { .. }) {
+                    let axis = match &node.operation {
+                        Operation::ArgMax { axis, .. } => *axis,
+                        _ => unreachable!(),
+                    };
+                    let (outer, width, inner) = axis_factors(&predecessor.shape, axis);
+                    format!(
+                        "VeriNeural.shapeSize {} = {outer} * {width} * {inner}",
+                        shape_expr(&predecessor.shape)
+                    )
+                } else if matches!(node.operation, Operation::Take { .. }) {
+                    if port == 0 {
+                        let axis = match &node.operation {
+                            Operation::Take { axis } => *axis,
+                            _ => unreachable!(),
+                        };
+                        let (outer, width, inner) = axis_factors(&predecessor.shape, axis);
+                        format!(
+                            "VeriNeural.shapeSize {} = {outer} * {width} * {inner}",
+                            shape_expr(&predecessor.shape)
+                        )
+                    } else {
+                        format!("VeriNeural.shapeSize {} = 1", shape_expr(&predecessor.shape))
+                    }
                 } else if matches!(node.operation, Operation::Reshape(_)) {
                     format!(
                         "VeriNeural.shapeSize {} = VeriNeural.shapeSize {}",
@@ -543,6 +656,65 @@ impl LeanProofEngine {
                             "VeriNeural.reshape_nonnegative {} ({})",
                             call(prev),
                             proof_call(prev)
+                        )
+                    }
+                    Operation::Permute { ref axes } => {
+                        let prev = node.inputs[0].index();
+                        if axes.iter().copied().eq(0..axes.len()) {
+                            format!(
+                                "VeriNeural.reshape_nonnegative {} ({})",
+                                call(prev),
+                                proof_call(prev)
+                            )
+                        } else {
+                            let dims = graph.nodes()[prev].shape.dims();
+                            format!(
+                                "VeriNeural.transpose2D_nonnegative (rows := {}) (cols := {}) {} ({})",
+                                dims[0],
+                                dims[1],
+                                call(prev),
+                                proof_call(prev)
+                            )
+                        }
+                    }
+                    Operation::ReverseAxis { axis } => {
+                        let prev = node.inputs[0].index();
+                        let (outer, width, inner) = axis_factors(&graph.nodes()[prev].shape, axis);
+                        format!(
+                            "VeriNeural.reverseAxis_nonnegative (outer := {outer}) \
+                             (width := {width}) (inner := {inner}) {} ({})",
+                            call(prev),
+                            proof_call(prev)
+                        )
+                    }
+                    Operation::Concat { axis } => {
+                        let left = node.inputs[0].index();
+                        let right = node.inputs[1].index();
+                        let (outer, left_width, inner) =
+                            axis_factors(&graph.nodes()[left].shape, axis);
+                        let (_, right_width, _) =
+                            axis_factors(&graph.nodes()[right].shape, axis);
+                        format!(
+                            "VeriNeural.concatAxis_nonnegative (outer := {outer}) \
+                             (leftWidth := {left_width}) (rightWidth := {right_width}) \
+                             (inner := {inner}) {} {} ({}) ({})",
+                            call(left),
+                            call(right),
+                            proof_call(left),
+                            proof_call(right)
+                        )
+                    }
+                    Operation::Take { axis } => {
+                        let data = node.inputs[0].index();
+                        let selected = node.inputs[1].index();
+                        let (outer, width, inner) =
+                            axis_factors(&graph.nodes()[data].shape, axis);
+                        format!(
+                            "VeriNeural.takeAxis_nonnegative (outer := {outer}) \
+                             (width := {width}) (inner := {inner}) {} {} ({})",
+                            call(data),
+                            call(selected),
+                            proof_call(data)
                         )
                     }
                     _ => return Err(ProofError::UnsupportedGuarantee { node: index }),
@@ -667,7 +839,8 @@ impl LeanProofEngine {
                                 node: module.output.index(),
                             });
                         };
-                        if actual.shape != graph.node(input)?.shape {
+                        let input_node = graph.node(input)?;
+                        if actual.shape != input_node.shape || actual.dtype != input_node.dtype {
                             return Err(ProofError::UnsupportedGuarantee {
                                 node: module.output.index(),
                             });
@@ -790,7 +963,8 @@ impl LeanProofEngine {
                                     node: output.index(),
                                 });
                             };
-                            if actual.shape != graph.node(input)?.shape {
+                            let input_node = graph.node(input)?;
+                            if actual.shape != input_node.shape || actual.dtype != input_node.dtype {
                                 return Err(ProofError::UnsupportedGuarantee {
                                     node: output.index(),
                                 });
@@ -1134,9 +1308,14 @@ impl LeanProofEngine {
                         let left = resolve(a)?;
                         let right = resolve(b)?;
                         let used = collect_used_nodes(graph, goal.output)?;
+                        let left_node = graph.node(left)?;
+                        let right_node = graph.node(right)?;
                         if !used.contains(&left.index())
                             || !used.contains(&right.index())
-                            || graph.node(left)?.shape != graph.node(right)?.shape
+                            || left_node.shape != right_node.shape
+                            || left_node.dtype != right_node.dtype
+                            || (matches!(predicate, Predicate::PointwiseLe(_, _))
+                                && left_node.dtype != DType::F32)
                         {
                             return Err(ProofError::UnsupportedGuarantee {
                                 node: goal.output.index(),
@@ -1703,6 +1882,101 @@ fn prove_module_node_nonnegative(
                 call(input)
             )
         }
+        Operation::Permute { ref axes } => {
+            let input = node.inputs[0].index();
+            let input_proof = prove_module_node_nonnegative(
+                graph,
+                module_index,
+                input,
+                arguments,
+                boundary,
+                traversal,
+                module_proofs,
+            )?;
+            if axes.iter().copied().eq(0..axes.len()) {
+                format!(
+                    "VeriNeural.reshape_nonnegative {} ({input_proof})",
+                    call(input)
+                )
+            } else {
+                let dims = graph.nodes()[input].shape.dims();
+                format!(
+                    "VeriNeural.transpose2D_nonnegative (rows := {}) (cols := {}) {} ({input_proof})",
+                    dims[0],
+                    dims[1],
+                    call(input)
+                )
+            }
+        }
+        Operation::ReverseAxis { axis } => {
+            let input = node.inputs[0].index();
+            let (outer, width, inner) = axis_factors(&graph.nodes()[input].shape, axis);
+            let input_proof = prove_module_node_nonnegative(
+                graph,
+                module_index,
+                input,
+                arguments,
+                boundary,
+                traversal,
+                module_proofs,
+            )?;
+            format!(
+                "VeriNeural.reverseAxis_nonnegative (outer := {outer}) \
+                 (width := {width}) (inner := {inner}) {} ({input_proof})",
+                call(input)
+            )
+        }
+        Operation::Concat { axis } => {
+            let left = node.inputs[0].index();
+            let right = node.inputs[1].index();
+            let (outer, left_width, inner) = axis_factors(&graph.nodes()[left].shape, axis);
+            let (_, right_width, _) = axis_factors(&graph.nodes()[right].shape, axis);
+            let left_proof = prove_module_node_nonnegative(
+                graph,
+                module_index,
+                left,
+                arguments,
+                boundary,
+                traversal,
+                module_proofs,
+            )?;
+            let right_proof = prove_module_node_nonnegative(
+                graph,
+                module_index,
+                right,
+                arguments,
+                boundary,
+                traversal,
+                module_proofs,
+            )?;
+            format!(
+                "VeriNeural.concatAxis_nonnegative (outer := {outer}) \
+                 (leftWidth := {left_width}) (rightWidth := {right_width}) \
+                 (inner := {inner}) {} {} ({left_proof}) ({right_proof})",
+                call(left),
+                call(right)
+            )
+        }
+        Operation::Take { axis } => {
+            let data = node.inputs[0].index();
+            let selected = node.inputs[1].index();
+            let (outer, width, inner) = axis_factors(&graph.nodes()[data].shape, axis);
+            let data_proof = prove_module_node_nonnegative(
+                graph,
+                module_index,
+                data,
+                arguments,
+                boundary,
+                traversal,
+                module_proofs,
+            )?;
+            format!(
+                "VeriNeural.takeAxis_nonnegative (outer := {outer}) \
+                 (width := {width}) (inner := {inner}) {} {} ({data_proof})",
+                call(data),
+                call(selected)
+            )
+        }
         Operation::Pointwise(ref spec) => spec
             .expression()
             .nonnegative_lean(&|port| call(node.inputs[port].index()))
@@ -1780,6 +2054,58 @@ fn prove_ideal_nonnegative(
             let input = node.inputs[0];
             let h = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;
             format!("VeriNeural.reshape_nonnegative {} ({h})", call(input))
+        }
+        Operation::Permute { ref axes } => {
+            let input = node.inputs[0];
+            let h = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;
+            if axes.iter().copied().eq(0..axes.len()) {
+                format!("VeriNeural.reshape_nonnegative {} ({h})", call(input))
+            } else {
+                let dims = graph.node(input)?.shape.dims();
+                format!(
+                    "VeriNeural.transpose2D_nonnegative (rows := {}) (cols := {}) {} ({h})",
+                    dims[0],
+                    dims[1],
+                    call(input)
+                )
+            }
+        }
+        Operation::ReverseAxis { axis } => {
+            let input = node.inputs[0];
+            let (outer, width, inner) = axis_factors(&graph.node(input)?.shape, axis);
+            let h = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;
+            format!(
+                "VeriNeural.reverseAxis_nonnegative (outer := {outer}) \
+                 (width := {width}) (inner := {inner}) {} ({h})",
+                call(input)
+            )
+        }
+        Operation::Concat { axis } => {
+            let left = node.inputs[0];
+            let right = node.inputs[1];
+            let (outer, left_width, inner) = axis_factors(&graph.node(left)?.shape, axis);
+            let (_, right_width, _) = axis_factors(&graph.node(right)?.shape, axis);
+            let hl = prove_ideal_nonnegative(graph, left, arguments, source_hypotheses, cache)?;
+            let hr = prove_ideal_nonnegative(graph, right, arguments, source_hypotheses, cache)?;
+            format!(
+                "VeriNeural.concatAxis_nonnegative (outer := {outer}) \
+                 (leftWidth := {left_width}) (rightWidth := {right_width}) \
+                 (inner := {inner}) {} {} ({hl}) ({hr})",
+                call(left),
+                call(right)
+            )
+        }
+        Operation::Take { axis } => {
+            let data = node.inputs[0];
+            let selected = node.inputs[1];
+            let (outer, width, inner) = axis_factors(&graph.node(data)?.shape, axis);
+            let h = prove_ideal_nonnegative(graph, data, arguments, source_hypotheses, cache)?;
+            format!(
+                "VeriNeural.takeAxis_nonnegative (outer := {outer}) \
+                 (width := {width}) (inner := {inner}) {} {} ({h})",
+                call(data),
+                call(selected)
+            )
         }
         Operation::Pointwise(ref spec) => spec
             .expression()
@@ -1878,7 +2204,13 @@ fn emit_module_predicate(
         Predicate::Equal(a, b) | Predicate::PointwiseLe(a, b) => {
             let left = resolve_module_value(graph, a, inputs, output)?;
             let right = resolve_module_value(graph, b, inputs, output)?;
-            if graph.node(left)?.shape != graph.node(right)?.shape {
+            let left_node = graph.node(left)?;
+            let right_node = graph.node(right)?;
+            if left_node.shape != right_node.shape
+                || left_node.dtype != right_node.dtype
+                || (matches!(predicate, Predicate::PointwiseLe(_, _))
+                    && left_node.dtype != DType::F32)
+            {
                 return Err(ProofError::UnsupportedGuarantee {
                     node: output.index(),
                 });
@@ -1960,6 +2292,22 @@ fn shape_expr(shape: &Shape) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("([{dims}] : List Nat)")
+}
+
+fn lean_value_type(dtype: DType, count: usize) -> String {
+    match dtype {
+        DType::F32 => format!("VeriNeural.Tensor {count}"),
+        DType::Index => format!("VeriNeural.IndexTensor {count}"),
+    }
+}
+
+fn axis_factors(shape: &Shape, axis: usize) -> (usize, usize, usize) {
+    let dims = shape.dims();
+    (
+        dims[..axis].iter().product(),
+        dims[axis],
+        dims[axis + 1..].iter().product(),
+    )
 }
 
 fn emit_decidable(
