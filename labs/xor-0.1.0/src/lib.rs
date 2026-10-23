@@ -19,21 +19,12 @@ fn affine(graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralEr
 /// The hidden affine/ReLU and the output affine/ReLU are nested inferred blocks.
 /// For Boolean x and y, ReLU(x+y)-2*ReLU(x+y-1) is XOR.
 fn xor_body(graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
-    let hidden = graph.compose_inferred(
-        "xor_activated_affine",
-        "1.0",
-        &inputs[..3],
-        |g, p| {
-            let z = g.compose_inferred("xor_affine", "1.0", p, affine)?;
-            g.relu(z)
-        },
-    )?;
-    let logits = graph.compose_inferred(
-        "xor_affine",
-        "1.0",
-        &[hidden, inputs[3], inputs[4]],
-        affine,
-    )?;
+    let hidden = graph.compose_inferred("xor_activated_affine", "1.0", &inputs[..3], |g, p| {
+        let z = g.compose_inferred("xor_affine", "1.0", p, affine)?;
+        g.relu(z)
+    })?;
+    let logits =
+        graph.compose_inferred("xor_affine", "1.0", &[hidden, inputs[3], inputs[4]], affine)?;
     graph.relu(logits)
 }
 
@@ -72,10 +63,7 @@ pub fn build() -> Result<Lab, Box<dyn Error>> {
             Tensor::new(Shape::new(vec![2, 2])?, vec![1.0, 1.0, 1.0, 1.0])?,
         ),
         ("b1", Tensor::new(Shape::new(vec![2])?, vec![0.0, -1.0])?),
-        (
-            "w2",
-            Tensor::new(Shape::new(vec![2, 1])?, vec![1.0, -2.0])?,
-        ),
+        ("w2", Tensor::new(Shape::new(vec![2, 1])?, vec![1.0, -2.0])?),
         ("b2", Tensor::new(Shape::new(vec![1])?, vec![0.0])?),
     ])?;
     inputs.sort_by_key(|(id, _)| id.index());
@@ -118,7 +106,11 @@ impl Lab {
         let roles = self.metadata().input_roles;
         self.inputs
             .iter()
-            .filter(|(id, _)| roles.get(&id.index()).is_some_and(|value| value == role.as_str()))
+            .filter(|(id, _)| {
+                roles
+                    .get(&id.index())
+                    .is_some_and(|value| value == role.as_str())
+            })
             .map(|(id, tensor)| {
                 format!(
                     "node={} shape={:?} bits={}\n",
@@ -147,7 +139,9 @@ impl Lab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verineural::{ArchitectureAutoCompiler, GpuEngine, GpuRequirement, LeanProofEngine, NeuralError};
+    use verineural::{
+        ArchitectureAutoCompiler, GpuEngine, GpuRequirement, LeanProofEngine, NeuralError,
+    };
 
     #[test]
     fn xor_truth_table_and_named_fixed_parameters() {
@@ -166,18 +160,21 @@ mod tests {
     #[test]
     fn model_plans_named_goal_and_generates_global_proof_gpu_plan() {
         let lab = build().unwrap();
-        let compiler = ArchitectureAutoCompiler::new(
-            LeanProofEngine::default(),
-            GpuEngine::default(),
-        );
-        let plan = lab.model.plan(&compiler, GpuRequirement::AllOutputs).unwrap();
+        let compiler =
+            ArchitectureAutoCompiler::new(LeanProofEngine::default(), GpuEngine::default());
+        let plan = lab
+            .model
+            .plan(&compiler, GpuRequirement::AllOutputs)
+            .unwrap();
         assert_eq!(plan.outputs, vec![lab.output()]);
         assert_eq!(plan.goals.len(), 1);
         assert_eq!(plan.goals[0].0, "xor_output_nonnegative");
-        assert!(plan.goals[0]
-            .1
-            .source()
-            .contains("theorem architecture_property_xor_output_nonnegative"));
+        assert!(
+            plan.goals[0]
+                .1
+                .source()
+                .contains("theorem architecture_property_xor_output_nonnegative")
+        );
 
         let gpu = GpuEngine::default()
             .compile(lab.graph(), lab.output())
@@ -185,7 +182,8 @@ mod tests {
         assert!(!gpu.translation_plan().unwrap().kernels.is_empty());
 
         let snapshot =
-            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &lab.metadata()).unwrap();
+            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &lab.metadata())
+                .unwrap();
         assert!(
             snapshot
                 .dot
@@ -204,7 +202,8 @@ mod tests {
         let mut invalid_meta = lab.metadata().clone();
         invalid_meta.global_property = "xor_output_nonnegative".into();
         assert!(
-            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &invalid_meta).is_err()
+            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &invalid_meta)
+                .is_err()
         );
     }
 
@@ -218,7 +217,9 @@ mod tests {
         let b2 = model.parameter("b2", [1], Domain::Finite).unwrap();
         assert!(matches!(
             model.block("xor_mlp", &[wrong, w1, b1, w2, b2], xor_body),
-            Err(ModelError::Neural(NeuralError::InnerDimensionMismatch { .. }))
+            Err(ModelError::Neural(
+                NeuralError::InnerDimensionMismatch { .. }
+            ))
         ));
         assert_eq!(model.graph_mut().modules().len(), 0);
         assert_eq!(model.graph_mut().nodes().len(), 5);
