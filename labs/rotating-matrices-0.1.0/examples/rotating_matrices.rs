@@ -182,7 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Some(raw) => raw.parse::<usize>()?,
                 None => TrainingConfig::default().updates,
             };
-            let mut parameters = Parameters::new(0x51A7_E5);
+            let mut parameters = Parameters::new(0x0051_A7E5);
             let mut runner = Runner::new(&parameters)?;
             let baseline = evaluate(
                 &mut runner,
@@ -213,8 +213,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 constant.mae(),
                 constant.rmse()
             );
-            let mut config = TrainingConfig::default();
-            config.updates = updates;
+            let config = TrainingConfig {
+                updates,
+                ..TrainingConfig::default()
+            };
             train(
                 &mut runner,
                 &mut parameters,
