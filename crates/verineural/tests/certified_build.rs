@@ -84,11 +84,13 @@ fn certified_reissue_preserves_manifest_and_rejects_wrong_external_pin() {
         architecture.verify_certified(config, Some(&"0".repeat(64))),
         Err(AutoBuildError::Integrity(_))
     ));
-    assert!(
-        fs::read_dir(&root)
+    assert!(fs::read_dir(&root).unwrap().all(|entry| {
+        !entry
             .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".auto-build.staging-"))
-    );
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".auto-build.staging-")
+    }));
     fs::remove_dir_all(root).unwrap();
 }
 
