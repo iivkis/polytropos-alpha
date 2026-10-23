@@ -1,0 +1,15 @@
+verineural-certified-model-v1
+id=rotating-matrices
+version=0.1.0
+source=core_bias;node=6;role=parameter;shape=[64];domain=Finite
+source=dictionary_state;node=0;role=input;shape=[1, 64];domain=NonNegativeFinite
+source=head_bias;node=8;role=parameter;shape=[1];domain=Finite
+source=head_weights;node=7;role=parameter;shape=[64, 1];domain=Finite
+source=recurrent_state;node=1;role=input;shape=[1, 64];domain=NonNegativeFinite
+source=router_bias;node=4;role=parameter;shape=[8];domain=Finite
+source=router_weights;node=3;role=parameter;shape=[64, 8];domain=Finite
+source=selected_rotated_weight;node=5;role=parameter;shape=[64, 64];domain=Finite
+source=token_bits;node=2;role=input;shape=[1, 64];domain=NonNegativeFinite
+output=next_state;node=15
+output=normalized_result;node=17
+output=router_logits;node=11

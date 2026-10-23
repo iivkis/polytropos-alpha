@@ -264,10 +264,7 @@ pub fn route_parts(action: usize) -> Result<(usize, usize), LabError> {
     Ok((action / TURNS, action % TURNS))
 }
 
-fn recurrent_transition(
-    g: &mut NeuralGraph,
-    x: &[NodeId],
-) -> Result<NodeId, NeuralError> {
+fn recurrent_transition(g: &mut NeuralGraph, x: &[NodeId]) -> Result<NodeId, NeuralError> {
     let combined = g.add(x[0], x[1])?;
     let mixed = g.matmul(combined, x[2])?;
     let shifted = g.bias_add(mixed, x[3])?;
@@ -330,11 +327,7 @@ pub fn head_model() -> Result<Model, ModelError> {
     let state = m.input("final_state", [1, WIDTH], Domain::NonNegativeFinite)?;
     let weights = m.parameter("weights", [WIDTH, 1], Domain::Finite)?;
     let bias = m.parameter("bias", [1], Domain::Finite)?;
-    let scalar = m.block(
-        "scalar_readout",
-        &[state, weights, bias],
-        scalar_readout,
-    )?;
+    let scalar = m.block("scalar_readout", &[state, weights, bias], scalar_readout)?;
     m.output("normalized_result", scalar)?;
     m.finish()
 }
@@ -348,22 +341,13 @@ pub fn head_model() -> Result<Model, ModelError> {
 /// falsely represented as proved Semantic Neural IR.
 pub fn architecture_model() -> Result<Model, ModelError> {
     let mut m = ModelBuilder::new("rotating-matrices", "0.1.0");
-    let dictionary = m.input(
-        "dictionary_state",
-        [1, WIDTH],
-        Domain::NonNegativeFinite,
-    )?;
-    let state = m.input(
-        "recurrent_state",
-        [1, WIDTH],
-        Domain::NonNegativeFinite,
-    )?;
+    let dictionary = m.input("dictionary_state", [1, WIDTH], Domain::NonNegativeFinite)?;
+    let state = m.input("recurrent_state", [1, WIDTH], Domain::NonNegativeFinite)?;
     let token = m.input("token_bits", [1, WIDTH], Domain::NonNegativeFinite)?;
 
     let router_weights = m.parameter("router_weights", [WIDTH, ACTIONS], Domain::Finite)?;
     let router_bias = m.parameter("router_bias", [ACTIONS], Domain::Finite)?;
-    let selected_weight =
-        m.parameter("selected_rotated_weight", [WIDTH, WIDTH], Domain::Finite)?;
+    let selected_weight = m.parameter("selected_rotated_weight", [WIDTH, WIDTH], Domain::Finite)?;
     let core_bias = m.parameter("core_bias", [WIDTH], Domain::Finite)?;
     let head_weights = m.parameter("head_weights", [WIDTH, 1], Domain::Finite)?;
     let head_bias = m.parameter("head_bias", [1], Domain::Finite)?;

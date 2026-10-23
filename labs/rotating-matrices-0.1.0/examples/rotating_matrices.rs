@@ -87,7 +87,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 architecture.graph().modules().len(),
                 architecture.outputs().len()
             ));
-            fs::write(root.join("semantic.ir"), architecture.graph().canonical_ir())?;
+            fs::write(
+                root.join("semantic.ir"),
+                architecture.graph().canonical_ir(),
+            )?;
             for &(op, a, b) in &[(0, 10, 9), (3, 1, 0)] {
                 let case = operation(op, a, b)?;
                 println!("x={:?} y={}", case.text, case.target);
@@ -148,8 +151,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     || name.starts_with("head.")
                     || matches!(
                         name.as_ref(),
-                        "core" | "router" | "head" | "gpu" | "certified-core"
-                            | "certified-router" | "certified-head"
+                        "core"
+                            | "router"
+                            | "head"
+                            | "gpu"
+                            | "certified-core"
+                            | "certified-router"
+                            | "certified-head"
                     )
                 {
                     let path = entry.path();
