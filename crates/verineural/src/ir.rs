@@ -998,7 +998,6 @@ impl NeuralGraph {
         Ok(output)
     }
 
-
     /// Structural composition without a caller-written duplicate MathContract.
     /// Only shapes and conservative domains are inferred, never mathematical
     /// claims or Lean certification. Failed bodies leave this graph unchanged.
@@ -1024,7 +1023,14 @@ impl NeuralGraph {
         let multi_start = self.multi_modules.len();
         let mut candidate = self.clone();
         let output = build(&mut candidate, inputs)?;
-        candidate.validate_body(body_start, module_start, multi_start, inputs, &[output], name)?;
+        candidate.validate_body(
+            body_start,
+            module_start,
+            multi_start,
+            inputs,
+            &[output],
+            name,
+        )?;
         let result = candidate.node(output)?;
         let contract = MathContract::new(
             requires,

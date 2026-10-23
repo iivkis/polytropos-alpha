@@ -1,13 +1,13 @@
 //! Named, architecture-neutral façade over the single Semantic Neural IR.
 //! Role labels are metadata, not new IR operations or runtime mutability.
+use crate::{
+    ArchitectureAutoCompiler, ArchitectureMetadata, ArchitectureProofTask, AutoBuildError,
+    AutoBuildPlan, Domain, FP32Policy, GpuRequirement, NeuralError, NeuralGraph, NodeId, Operation,
+    ProofGoal, Shape, Tensor,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use crate::{
-    ArchitectureAutoCompiler, ArchitectureMetadata, ArchitectureProofTask,
-    AutoBuildError, AutoBuildPlan, Domain, FP32Policy, GpuRequirement,
-    NeuralError, NeuralGraph, NodeId, Operation, ProofGoal, Shape, Tensor,
-};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceRole {
@@ -61,7 +61,10 @@ fn valid_name(name: &str) -> bool {
 }
 
 fn valid_identity(name: &str) -> bool {
-    !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._".contains(&c))
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-._".contains(&c))
 }
 
 /// Consumer model declaration; all tensor operations use NeuralGraph.
@@ -102,8 +105,13 @@ impl ModelBuilder {
         role: SourceRole,
     ) -> Result<NodeId, ModelError> {
         let name = name.into();
-        if !valid_name(&name) || self.sources.contains_key(&name) || self.outputs.contains_key(&name) {
-            return Err(ModelError::Invalid(format!("bad or duplicate source name: {name}")));
+        if !valid_name(&name)
+            || self.sources.contains_key(&name)
+            || self.outputs.contains_key(&name)
+        {
+            return Err(ModelError::Invalid(format!(
+                "bad or duplicate source name: {name}"
+            )));
         }
         let shape = Shape::new(dims)?;
         let node = self.graph.input(shape, domain);
@@ -113,14 +121,20 @@ impl ModelBuilder {
 
     /// Input domains are hypotheses checked against actual bound values.
     pub fn input(
-        &mut self, name: impl Into<String>, dims: impl Into<Vec<usize>>, domain: Domain,
+        &mut self,
+        name: impl Into<String>,
+        dims: impl Into<Vec<usize>>,
+        domain: Domain,
     ) -> Result<NodeId, ModelError> {
         self.insert_source(name, dims, domain, SourceRole::Input)
     }
 
     /// Parameters are named IR sources; updates and optimizers are not implied.
     pub fn parameter(
-        &mut self, name: impl Into<String>, dims: impl Into<Vec<usize>>, domain: Domain,
+        &mut self,
+        name: impl Into<String>,
+        dims: impl Into<Vec<usize>>,
+        domain: Domain,
     ) -> Result<NodeId, ModelError> {
         self.insert_source(name, dims, domain, SourceRole::Parameter)
     }
@@ -128,7 +142,10 @@ impl ModelBuilder {
     /// Atomic, capture-checked block; output contract inferred from the IR.
     /// Independent mathematical properties must use explicit proof goals.
     pub fn block<F>(
-        &mut self, name: &'static str, inputs: &[NodeId], build: F,
+        &mut self,
+        name: &'static str,
+        inputs: &[NodeId],
+        build: F,
     ) -> Result<NodeId, ModelError>
     where
         F: FnOnce(&mut NeuralGraph, &[NodeId]) -> Result<NodeId, NeuralError>,
@@ -136,13 +153,20 @@ impl ModelBuilder {
         if !valid_name(name) {
             return Err(ModelError::Invalid(format!("invalid block name: {name}")));
         }
-        Ok(self.graph.compose_inferred(name, "model-block-v1", inputs, build)?)
+        Ok(self
+            .graph
+            .compose_inferred(name, "model-block-v1", inputs, build)?)
     }
 
     pub fn output(&mut self, name: impl Into<String>, id: NodeId) -> Result<(), ModelError> {
         let name = name.into();
-        if !valid_name(&name) || self.sources.contains_key(&name) || self.outputs.contains_key(&name) {
-            return Err(ModelError::Invalid(format!("bad or duplicate output name: {name}")));
+        if !valid_name(&name)
+            || self.sources.contains_key(&name)
+            || self.outputs.contains_key(&name)
+        {
+            return Err(ModelError::Invalid(format!(
+                "bad or duplicate output name: {name}"
+            )));
         }
         self.graph.node(id)?;
         self.outputs.insert(name, id);
@@ -152,7 +176,10 @@ impl ModelBuilder {
     /// Registers an obligation, not a proven conclusion.
     pub fn proof_goal(&mut self, goal: ProofGoal) -> Result<(), ModelError> {
         if !valid_name(&goal.name) || self.goals.contains_key(&goal.name) {
-            return Err(ModelError::Invalid(format!("bad or duplicate goal: {}", goal.name)));
+            return Err(ModelError::Invalid(format!(
+                "bad or duplicate goal: {}",
+                goal.name
+            )));
         }
         self.graph.node(goal.output)?;
         self.goals.insert(goal.name.clone(), goal);
@@ -165,17 +192,18 @@ impl ModelBuilder {
 
     pub fn finish(self) -> Result<Model, ModelError> {
         if !valid_identity(&self.id) || !valid_identity(&self.version) {
-            return Err(ModelError::Invalid("id/version must use ASCII alphanumeric, - . _".into()));
+            return Err(ModelError::Invalid(
+                "id/version must use ASCII alphanumeric, - . _".into(),
+            ));
         }
         if self.outputs.is_empty() {
-            return Err(ModelError::Invalid("at least one output is required".into()));
+            return Err(ModelError::Invalid(
+                "at least one output is required".into(),
+            ));
         }
-        let registered: BTreeSet<_> = self.sources.values()
-            .map(|(id, _)| id.index())
-            .collect();
+        let registered: BTreeSet<_> = self.sources.values().map(|(id, _)| id.index()).collect();
         if self.graph.nodes().iter().any(|node| {
-            matches!(node.operation, Operation::Input)
-                && !registered.contains(&node.id.index())
+            matches!(node.operation, Operation::Input) && !registered.contains(&node.id.index())
         }) {
             return Err(ModelError::Invalid(
                 "all graph source inputs must have a registered model name".into(),
@@ -185,7 +213,10 @@ impl ModelBuilder {
         let scope = self.graph.dependency_scope(&roots)?;
         for goal in self.goals.values() {
             if !scope.contains(&goal.output.index()) {
-                return Err(ModelError::Invalid(format!("disconnected proof goal: {}", goal.name)));
+                return Err(ModelError::Invalid(format!(
+                    "disconnected proof goal: {}",
+                    goal.name
+                )));
             }
         }
         Ok(Model {
@@ -236,9 +267,11 @@ impl Model {
         ArchitectureMetadata {
             id: self.id.clone(),
             version: self.version.clone(),
-            input_roles: self.sources.values().map(|(node, role)| {
-                (node.index(), role.as_str().to_owned())
-            }).collect(),
+            input_roles: self
+                .sources
+                .values()
+                .map(|(node, role)| (node.index(), role.as_str().to_owned()))
+                .collect(),
             global_property: global_property.into(),
         }
     }
@@ -246,22 +279,25 @@ impl Model {
     /// Match every named source exactly once, checking shape and declared domain.
     /// Returns ordinary NodeId/Tensor bindings for existing execution APIs.
     pub fn bind<K: Into<String>>(
-        &self, values: impl IntoIterator<Item = (K, Tensor<f32>)>,
+        &self,
+        values: impl IntoIterator<Item = (K, Tensor<f32>)>,
     ) -> Result<Vec<(NodeId, Tensor<f32>)>, ModelError> {
         let mut supplied = BTreeMap::new();
         let mut seen = BTreeSet::new();
         for (name, tensor) in values {
             let name = name.into();
             if !self.sources.contains_key(&name) || !seen.insert(name.clone()) {
-                return Err(ModelError::Invalid(format!("unknown or repeated binding: {name}")));
+                return Err(ModelError::Invalid(format!(
+                    "unknown or repeated binding: {name}"
+                )));
             }
             supplied.insert(name, tensor);
         }
         let mut ordered = Vec::with_capacity(self.sources.len());
         for (name, (id, _)) in &self.sources {
-            let tensor = supplied.remove(name).ok_or_else(|| {
-                ModelError::Invalid(format!("missing source binding: {name}"))
-            })?;
+            let tensor = supplied
+                .remove(name)
+                .ok_or_else(|| ModelError::Invalid(format!("missing source binding: {name}")))?;
             let node = self.graph.node(*id)?;
             if tensor.shape() != &node.shape {
                 return Err(ModelError::Neural(NeuralError::ShapeMismatch {
@@ -277,10 +313,17 @@ impl Model {
 
     /// Reuse ArchitectureAutoCompiler; planned Lean goals are not certified.
     pub fn plan(
-        &self, compiler: &ArchitectureAutoCompiler, gpu_requirement: GpuRequirement,
+        &self,
+        compiler: &ArchitectureAutoCompiler,
+        gpu_requirement: GpuRequirement,
     ) -> Result<AutoBuildPlan, AutoBuildError> {
         let outputs: Vec<_> = self.outputs.values().copied().collect();
-        let tasks: Vec<_> = self.goals.values().cloned().map(ArchitectureProofTask::Goal).collect();
+        let tasks: Vec<_> = self
+            .goals
+            .values()
+            .cloned()
+            .map(ArchitectureProofTask::Goal)
+            .collect();
         compiler.plan(&self.graph, &outputs, &tasks, gpu_requirement)
     }
 }
@@ -293,26 +336,48 @@ mod tests {
     fn named_dense_block_infers_shape_roles_and_bindings() {
         let mut builder = ModelBuilder::new("dense", "0.1.0");
         let x = builder.input("x", [4, 2], Domain::Finite).unwrap();
-        let w = builder.parameter("weights", [2, 3], Domain::Finite).unwrap();
+        let w = builder
+            .parameter("weights", [2, 3], Domain::Finite)
+            .unwrap();
         let b = builder.parameter("bias", [3], Domain::Finite).unwrap();
-        let y = builder.block("dense_layer", &[x, w, b], |g, p| {
-            let product = g.matmul(p[0], p[1])?;
-            let shifted = g.bias_add(product, p[2])?;
-            g.relu(shifted)
-        }).unwrap();
+        let y = builder
+            .block("dense_layer", &[x, w, b], |g, p| {
+                let product = g.matmul(p[0], p[1])?;
+                let shifted = g.bias_add(product, p[2])?;
+                g.relu(shifted)
+            })
+            .unwrap();
         builder.output("prediction", y).unwrap();
-        builder.proof_goal(ProofGoal::nonnegative("positive", y, vec![])).unwrap();
+        builder
+            .proof_goal(ProofGoal::nonnegative("positive", y, vec![]))
+            .unwrap();
         let model = builder.finish().unwrap();
         assert_eq!(model.graph().node(y).unwrap().shape.dims(), &[4, 3]);
         // A finite-input MatMul may overflow FP32; ReLU cannot promise finite output.
         assert_eq!(model.graph().node(y).unwrap().domain, Domain::Any);
         assert_eq!(model.graph().modules().len(), 1);
-        assert_eq!(model.metadata("architecture_global_nonnegative").input_roles[&w.index()], "parameter");
-        let bound = model.bind([
-            ("bias", Tensor::new(Shape::new(vec![3]).unwrap(), vec![0.0; 3]).unwrap()),
-            ("weights", Tensor::new(Shape::new(vec![2, 3]).unwrap(), vec![1.0; 6]).unwrap()),
-            ("x", Tensor::new(Shape::new(vec![4, 2]).unwrap(), vec![1.0; 8]).unwrap()),
-        ]).unwrap();
+        assert_eq!(
+            model
+                .metadata("architecture_global_nonnegative")
+                .input_roles[&w.index()],
+            "parameter"
+        );
+        let bound = model
+            .bind([
+                (
+                    "bias",
+                    Tensor::new(Shape::new(vec![3]).unwrap(), vec![0.0; 3]).unwrap(),
+                ),
+                (
+                    "weights",
+                    Tensor::new(Shape::new(vec![2, 3]).unwrap(), vec![1.0; 6]).unwrap(),
+                ),
+                (
+                    "x",
+                    Tensor::new(Shape::new(vec![4, 2]).unwrap(), vec![1.0; 8]).unwrap(),
+                ),
+            ])
+            .unwrap();
         assert_eq!(bound.len(), 3);
     }
 
@@ -335,9 +400,9 @@ mod tests {
     fn graph_mut_cannot_sneak_unnamed_sources_past_binding_checks() {
         let mut builder = ModelBuilder::new("source_registry", "1");
         builder.input("x", [1], Domain::Finite).unwrap();
-        let rogue = builder.graph_mut().input(
-            Shape::new(vec![1]).unwrap(), Domain::Finite
-        );
+        let rogue = builder
+            .graph_mut()
+            .input(Shape::new(vec![1]).unwrap(), Domain::Finite);
         builder.output("out", rogue).unwrap();
         assert!(matches!(builder.finish(), Err(ModelError::Invalid(_))));
     }
@@ -346,12 +411,21 @@ mod tests {
     fn rejects_duplicate_source_and_missing_or_invalid_bindings() {
         let mut builder = ModelBuilder::new("checked", "1");
         let x = builder.input("x", [1], Domain::NonNegativeFinite).unwrap();
-        assert!(matches!(builder.parameter("x", [1], Domain::Finite), Err(ModelError::Invalid(_))));
+        assert!(matches!(
+            builder.parameter("x", [1], Domain::Finite),
+            Err(ModelError::Invalid(_))
+        ));
         builder.output("out", x).unwrap();
         let model = builder.finish().unwrap();
-        assert!(matches!(model.bind([] as [(&str, Tensor<f32>); 0]), Err(ModelError::Invalid(_))));
         assert!(matches!(
-            model.bind([("x", Tensor::new(Shape::new(vec![1]).unwrap(), vec![-1.0]).unwrap())]),
+            model.bind([] as [(&str, Tensor<f32>); 0]),
+            Err(ModelError::Invalid(_))
+        ));
+        assert!(matches!(
+            model.bind([(
+                "x",
+                Tensor::new(Shape::new(vec![1]).unwrap(), vec![-1.0]).unwrap()
+            )]),
             Err(ModelError::Neural(NeuralError::ValueOutsideDomain { .. }))
         ));
     }
