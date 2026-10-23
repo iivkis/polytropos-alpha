@@ -70,7 +70,8 @@ pub(super) fn check_existing_identity(dir: &Path, expected: &str) -> Result<(), 
     }
     if !dir.is_dir() {
         return Err(AutoBuildError::Integrity(format!(
-            "certified output is not a directory: {}", dir.display()
+            "certified output is not a directory: {}",
+            dir.display()
         )));
     }
     let saved = fs::read_to_string(dir.join("identity.txt")).map_err(|_| {

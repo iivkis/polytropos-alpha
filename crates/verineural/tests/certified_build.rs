@@ -9,7 +9,9 @@ use verineural::{
 fn model(id: &str) -> Model {
     let mut builder = ModelBuilder::new(id, "0.1.0");
     let x = builder.input("x", [2], Domain::NonNegativeFinite).unwrap();
-    let y = builder.block("positive", &[x], |g, p| g.relu(p[0])).unwrap();
+    let y = builder
+        .block("positive", &[x], |g, p| g.relu(p[0]))
+        .unwrap();
     builder.output("y", y).unwrap();
     builder
         .proof_goal(ProofGoal::nonnegative("y_nonnegative", y, vec![]))
@@ -65,7 +67,10 @@ fn foreign_identity_cannot_replace_published_bundle() {
         Err(AutoBuildError::Integrity(_))
     ));
     assert_eq!(
-        first.verify_certified(config, Some(&digest)).unwrap().manifest_sha256,
+        first
+            .verify_certified(config, Some(&digest))
+            .unwrap()
+            .manifest_sha256,
         digest
     );
     fs::remove_dir_all(root).unwrap();

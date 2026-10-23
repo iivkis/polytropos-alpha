@@ -14,7 +14,10 @@ pub struct CertifiedBuildConfig {
 
 impl CertifiedBuildConfig {
     pub fn new(package_root: impl Into<PathBuf>) -> Self {
-        Self { package_root: package_root.into(), artifact_root: None }
+        Self {
+            package_root: package_root.into(),
+            artifact_root: None,
+        }
     }
 
     pub fn artifact_root(mut self, root: impl Into<PathBuf>) -> Self {
@@ -23,10 +26,14 @@ impl CertifiedBuildConfig {
     }
 
     /// Proof goals are always mandatory. There is no weaker certified mode.
-    pub fn require_all_proofs(self) -> Self { self }
+    pub fn require_all_proofs(self) -> Self {
+        self
+    }
 
     /// GPU support is required for every declared output in certified builds.
-    pub fn require_gpu_lowering(self) -> Self { self }
+    pub fn require_gpu_lowering(self) -> Self {
+        self
+    }
 
     pub fn resolved_root(&self) -> PathBuf {
         match &self.artifact_root {
@@ -36,7 +43,9 @@ impl CertifiedBuildConfig {
         }
     }
 
-    pub fn package_root(&self) -> &Path { &self.package_root }
+    pub fn package_root(&self) -> &Path {
+        &self.package_root
+    }
 }
 
 #[cfg(test)]
@@ -48,11 +57,15 @@ mod tests {
         let package = Path::new("labs/model-0.1.0");
         assert_eq!(CertifiedBuildConfig::new(package).resolved_root(), package);
         assert_eq!(
-            CertifiedBuildConfig::new(package).artifact_root("generated/run1").resolved_root(),
+            CertifiedBuildConfig::new(package)
+                .artifact_root("generated/run1")
+                .resolved_root(),
             package.join("generated/run1")
         );
         assert_eq!(
-            CertifiedBuildConfig::new(package).artifact_root("/tmp/model-run1").resolved_root(),
+            CertifiedBuildConfig::new(package)
+                .artifact_root("/tmp/model-run1")
+                .resolved_root(),
             Path::new("/tmp/model-run1")
         );
     }
@@ -75,7 +88,9 @@ fn root_identity(identity: &str) -> Result<(&str, &str), crate::AutoBuildError> 
     let version = identity.lines().find_map(|s| s.strip_prefix("version="));
     match (id, version) {
         (Some(id), Some(version)) => Ok((id, version)),
-        _ => Err(crate::AutoBuildError::Integrity("model identity lacks id/version".into())),
+        _ => Err(crate::AutoBuildError::Integrity(
+            "model identity lacks id/version".into(),
+        )),
     }
 }
 
@@ -93,7 +108,8 @@ pub(crate) fn preflight_root(root: &Path, identity: &str) -> Result<(), crate::A
             Ok(meta) if meta.file_type().is_symlink() => {
                 if std::fs::read_link(&path)? != Path::new(target) {
                     return Err(crate::AutoBuildError::Integrity(format!(
-                        "unexpected external artifact symlink: {}", path.display()
+                        "unexpected external artifact symlink: {}",
+                        path.display()
                     )));
                 }
             }
@@ -112,9 +128,12 @@ pub(crate) fn preflight_root(root: &Path, identity: &str) -> Result<(), crate::A
                     )));
                 }
             }
-            Ok(_) => return Err(crate::AutoBuildError::Integrity(format!(
-                "refusing to replace unowned artifact: {}", path.display()
-            ))),
+            Ok(_) => {
+                return Err(crate::AutoBuildError::Integrity(format!(
+                    "refusing to replace unowned artifact: {}",
+                    path.display()
+                )));
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(err.into()),
         }
@@ -132,12 +151,15 @@ pub(crate) fn publish_root(root: &Path, identity: &str) -> Result<(), crate::Aut
     for (name, target) in ROOT_LINKS {
         let path = root.join(name);
         if let Ok(meta) = std::fs::symlink_metadata(&path) {
-            if meta.file_type().is_symlink() { continue; }
+            if meta.file_type().is_symlink() {
+                continue;
+            }
             std::fs::create_dir_all(&backup)?;
             let destination = backup.join(name);
             if destination.exists() {
                 return Err(crate::AutoBuildError::Integrity(format!(
-                    "cannot back up existing artifact: {}", destination.display()
+                    "cannot back up existing artifact: {}",
+                    destination.display()
                 )));
             }
             std::fs::rename(&path, destination)?;
@@ -160,7 +182,8 @@ pub(crate) fn verify_root(root: &Path, identity: &str) -> Result<(), crate::Auto
         let path = root.join(name);
         if std::fs::read_link(&path).ok().as_deref() != Some(Path::new(target)) {
             return Err(crate::AutoBuildError::Integrity(format!(
-                "missing or replaced certified root link: {}", path.display()
+                "missing or replaced certified root link: {}",
+                path.display()
             )));
         }
     }
@@ -212,7 +235,11 @@ pub fn certified_example_main(
     };
     println!(
         "{}",
-        if verify { "Certified replay passed" } else { "Certified build published" }
+        if verify {
+            "Certified replay passed"
+        } else {
+            "Certified build published"
+        }
     );
     println!("Evidence: {}", report.directory.display());
     println!("Lean checker: {}", report.lean_version);
@@ -246,9 +273,13 @@ mod root_tests {
         std::fs::write(root.join("architecture.dot"), "legacy dot").unwrap();
         let identity = "verineural-certified-model-v1\nid=lab\nversion=1\n";
         preflight_root(&root, identity).unwrap();
-        assert!(preflight_root(
-            &root, "verineural-certified-model-v1\nid=foreign\nversion=1\n"
-        ).is_err());
+        assert!(
+            preflight_root(
+                &root,
+                "verineural-certified-model-v1\nid=foreign\nversion=1\n"
+            )
+            .is_err()
+        );
         publish_root(&root, identity).unwrap();
         assert_eq!(
             std::fs::read_link(root.join("architecture.dot")).unwrap(),
@@ -270,10 +301,17 @@ mod root_tests {
         std::fs::write(root.join("architecture.identity"), "id=lab\nversion=1\n").unwrap();
         std::fs::write(root.join("architecture.dot"), "original").unwrap();
         std::fs::write(root.join("architecture.png"), "original png").unwrap();
-        std::fs::write(root.join(".verineural-pre-stage10/architecture.png"), "previous").unwrap();
+        std::fs::write(
+            root.join(".verineural-pre-stage10/architecture.png"),
+            "previous",
+        )
+        .unwrap();
         let identity = "verineural-certified-model-v1\nid=lab\nversion=1\n";
         assert!(publish_root(&root, identity).is_err());
-        assert_eq!(std::fs::read_to_string(root.join("architecture.dot")).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(root.join("architecture.dot")).unwrap(),
+            "original"
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("architecture.png")).unwrap(),
             "original png"

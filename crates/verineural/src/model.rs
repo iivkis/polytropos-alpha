@@ -2,8 +2,8 @@
 //! Role labels are metadata, not new IR operations or runtime mutability.
 use crate::{
     ArchitectureAutoCompiler, ArchitectureMetadata, ArchitectureProofTask, AutoBuildError,
-    AutoBuildPlan, AutoBuildReport, CertifiedBuildConfig, Domain, FP32Policy, GpuRequirement, NeuralError, NeuralGraph, NodeId, Operation,
-    ProofGoal, Shape, Tensor,
+    AutoBuildPlan, AutoBuildReport, CertifiedBuildConfig, Domain, FP32Policy, GpuRequirement,
+    NeuralError, NeuralGraph, NodeId, Operation, ProofGoal, Shape, Tensor,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -319,10 +319,16 @@ impl Model {
             self.id, self.version
         );
         for (name, (node, role)) in &self.sources {
-            let source = self.graph.node(*node).expect("finished model source exists");
+            let source = self
+                .graph
+                .node(*node)
+                .expect("finished model source exists");
             identity.push_str(&format!(
                 "source={name};node={};role={};shape={:?};domain={:?}\n",
-                node.index(), role.as_str(), source.shape.dims(), source.domain
+                node.index(),
+                role.as_str(),
+                source.shape.dims(),
+                source.domain
             ));
         }
         for (name, output) in &self.outputs {
@@ -330,7 +336,9 @@ impl Model {
         }
         for (name, goal) in &self.goals {
             identity.push_str(&format!(
-                "goal={name};node={};kind={:?}\n", goal.output.index(), goal.kind
+                "goal={name};node={};kind={:?}\n",
+                goal.output.index(),
+                goal.kind
             ));
         }
         identity
@@ -339,10 +347,7 @@ impl Model {
     /// Fail closed: certify every declared goal with Lean kernel + axiom audit,
     /// require GPU lowering for every output, then atomically publish evidence.
     /// The result explicitly does not certify CUDA/IEEE-754 machine semantics.
-    pub fn certify(
-        &self,
-        config: CertifiedBuildConfig,
-    ) -> Result<AutoBuildReport, AutoBuildError> {
+    pub fn certify(&self, config: CertifiedBuildConfig) -> Result<AutoBuildReport, AutoBuildError> {
         self.certify_with(&ArchitectureAutoCompiler::default(), config)
     }
 
@@ -352,7 +357,12 @@ impl Model {
         config: CertifiedBuildConfig,
     ) -> Result<AutoBuildReport, AutoBuildError> {
         let outputs: Vec<_> = self.outputs.values().copied().collect();
-        let tasks: Vec<_> = self.goals.values().cloned().map(ArchitectureProofTask::Goal).collect();
+        let tasks: Vec<_> = self
+            .goals
+            .values()
+            .cloned()
+            .map(ArchitectureProofTask::Goal)
+            .collect();
         let root = config.resolved_root();
         let identity = self.certified_identity();
         crate::certified::preflight_root(&root, &identity)?;
@@ -379,11 +389,21 @@ impl Model {
         pinned_sha256: Option<&str>,
     ) -> Result<AutoBuildReport, AutoBuildError> {
         let outputs: Vec<_> = self.outputs.values().copied().collect();
-        let tasks: Vec<_> = self.goals.values().cloned().map(ArchitectureProofTask::Goal).collect();
+        let tasks: Vec<_> = self
+            .goals
+            .values()
+            .cloned()
+            .map(ArchitectureProofTask::Goal)
+            .collect();
         let root = config.resolved_root();
         let identity = self.certified_identity();
         let report = compiler.verify_identified(
-            &self.graph, &outputs, &tasks, &root, pinned_sha256, &identity
+            &self.graph,
+            &outputs,
+            &tasks,
+            &root,
+            pinned_sha256,
+            &identity,
         )?;
         crate::certified::verify_root(&root, &identity)?;
         Ok(report)
@@ -462,10 +482,16 @@ mod tests {
     #[test]
     fn certificate_identity_tracks_named_contracts_not_absolute_paths() {
         let mut builder = ModelBuilder::new("ident", "0.1.0");
-        let x = builder.input("input", [2], Domain::NonNegativeFinite).unwrap();
-        let y = builder.block("nonnegative", &[x], |g, p| g.relu(p[0])).unwrap();
+        let x = builder
+            .input("input", [2], Domain::NonNegativeFinite)
+            .unwrap();
+        let y = builder
+            .block("nonnegative", &[x], |g, p| g.relu(p[0]))
+            .unwrap();
         builder.output("value", y).unwrap();
-        builder.proof_goal(ProofGoal::nonnegative("nonnegative_goal", y, vec![])).unwrap();
+        builder
+            .proof_goal(ProofGoal::nonnegative("nonnegative_goal", y, vec![]))
+            .unwrap();
         let model = builder.finish().unwrap();
         let declaration = model.certified_identity();
         assert!(declaration.contains("id=ident\nversion=0.1.0"));
@@ -482,7 +508,10 @@ mod tests {
         builder.output("y", y).unwrap();
         let model = builder.finish().unwrap();
         assert!(matches!(
-            model.plan(&ArchitectureAutoCompiler::default(), GpuRequirement::AllOutputs),
+            model.plan(
+                &ArchitectureAutoCompiler::default(),
+                GpuRequirement::AllOutputs
+            ),
             Err(AutoBuildError::Gpu(_)) | Err(AutoBuildError::Proof(_))
         ));
     }

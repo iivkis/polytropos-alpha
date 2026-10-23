@@ -377,9 +377,19 @@ fn atomic_exchange_dirs(old: &Path, new: &Path) -> io::Result<()> {
     let new = CString::new(new.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in new path"))?;
     let code = unsafe {
-        renameat2(AT_FDCWD, old.as_ptr(), AT_FDCWD, new.as_ptr(), RENAME_EXCHANGE)
+        renameat2(
+            AT_FDCWD,
+            old.as_ptr(),
+            AT_FDCWD,
+            new.as_ptr(),
+            RENAME_EXCHANGE,
+        )
     };
-    if code == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -398,7 +408,12 @@ impl StagedBuild {
             let suffix = format!("{}-{id}", std::process::id());
             let directory = root.join(format!(".auto-build.staging-{suffix}"));
             match fs::create_dir(&directory) {
-                Ok(()) => return Ok(Self { directory, published: false }),
+                Ok(()) => {
+                    return Ok(Self {
+                        directory,
+                        published: false,
+                    });
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error.into()),
             }
@@ -562,7 +577,14 @@ impl ArchitectureAutoCompiler {
         root: &Path,
         identity: &str,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        self.build_with_identity(graph, outputs, tasks, GpuRequirement::AllOutputs, root, Some(identity))
+        self.build_with_identity(
+            graph,
+            outputs,
+            tasks,
+            GpuRequirement::AllOutputs,
+            root,
+            Some(identity),
+        )
     }
 
     fn build_with_identity(
@@ -767,7 +789,15 @@ impl ArchitectureAutoCompiler {
         root: &Path,
         pinned_sha256: Option<&str>,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        self.verify_with_identity(graph, outputs, tasks, gpu_requirement, root, pinned_sha256, None)
+        self.verify_with_identity(
+            graph,
+            outputs,
+            tasks,
+            gpu_requirement,
+            root,
+            pinned_sha256,
+            None,
+        )
     }
 
     /// Offline replay of an identified certified build, without a GPU.
@@ -780,7 +810,15 @@ impl ArchitectureAutoCompiler {
         pinned_sha256: Option<&str>,
         identity: &str,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        self.verify_with_identity(graph, outputs, tasks, GpuRequirement::AllOutputs, root, pinned_sha256, Some(identity))
+        self.verify_with_identity(
+            graph,
+            outputs,
+            tasks,
+            GpuRequirement::AllOutputs,
+            root,
+            pinned_sha256,
+            Some(identity),
+        )
     }
 
     fn verify_with_identity(
@@ -1016,14 +1054,20 @@ mod staged_build_tests {
         let mut staged = StagedBuild::create(&root).unwrap();
         fs::write(staged.directory.join("report.txt"), "initial").unwrap();
         staged.publish(&final_dir).unwrap();
-        assert_eq!(fs::read_to_string(final_dir.join("report.txt")).unwrap(), "initial");
+        assert_eq!(
+            fs::read_to_string(final_dir.join("report.txt")).unwrap(),
+            "initial"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
             fs::rename(&final_dir, root.join("owned")).unwrap();
             symlink("owned", &final_dir).unwrap();
             let mut rejected = StagedBuild::create(&root).unwrap();
-            assert!(matches!(rejected.publish(&final_dir), Err(AutoBuildError::Integrity(_))));
+            assert!(matches!(
+                rejected.publish(&final_dir),
+                Err(AutoBuildError::Integrity(_))
+            ));
         }
         fs::remove_dir_all(root).unwrap();
     }
