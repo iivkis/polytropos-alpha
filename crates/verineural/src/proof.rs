@@ -283,7 +283,8 @@ impl LeanProofEngine {
                 | Operation::PositiveMask
                 | Operation::SelectPositive
                 | Operation::Reshape(_)
-                | Operation::Pointwise(_) => {}
+                | Operation::Pointwise(_)
+                | Operation::ReduceSum { .. } => {}
                 _ => {
                     return Err(ProofError::UnsupportedOperation {
                         node: index,
@@ -412,6 +413,18 @@ impl LeanProofEngine {
                 Operation::Pointwise(spec) => spec.expression().lean(&|port| {
                     call(node.inputs[port].index())
                 }),
+                Operation::ReduceSum { axis } => {
+                    let input = graph.node(node.inputs[0])?;
+                    let dims = input.shape.dims();
+                    let outer = dims[..*axis].iter().product::<usize>();
+                    let width = dims[*axis];
+                    let inner = dims[*axis + 1..].iter().product::<usize>();
+                    format!(
+                        "VeriNeural.reduceSumAxis (outer := {outer}) (width := {width}) \
+                         (inner := {inner}) {}",
+                        call(node.inputs[0].index())
+                    )
+                },
                 _ => unreachable!("checked while collecting ancestors"),
             };
 
@@ -458,6 +471,19 @@ impl LeanProofEngine {
                     format!("{} = {}", left.shape.dims()[1], right.shape.dims()[0])
                 } else if matches!(node.operation, Operation::BiasAdd) && port == 1 {
                     format!("{} = {}", predecessor.shape.dims()[0], node.shape.dims()[1])
+                } else if matches!(node.operation, Operation::ReduceSum { .. }) {
+                    let dims = predecessor.shape.dims();
+                    let axis = match &node.operation {
+                        Operation::ReduceSum { axis } => *axis,
+                        _ => unreachable!(),
+                    };
+                    let outer = dims[..axis].iter().product::<usize>();
+                    let width = dims[axis];
+                    let inner = dims[axis + 1..].iter().product::<usize>();
+                    format!(
+                        "VeriNeural.shapeSize {} = {outer} * {width} * {inner}",
+                        shape_expr(&predecessor.shape)
+                    )
                 } else if matches!(node.operation, Operation::Reshape(_)) {
                     format!(
                         "VeriNeural.shapeSize {} = VeriNeural.shapeSize {}",
@@ -1619,6 +1645,25 @@ fn prove_module_node_nonnegative(
         Operation::Pointwise(ref spec) => spec.expression()
             .nonnegative_lean(&|port| call(node.inputs[port].index()))
             .ok_or(ProofError::UnsupportedGuarantee { node: index })?,
+        Operation::ReduceSum { .. } => {
+            let input = node.inputs[0].index();
+            let dims = graph.nodes()[input].shape.dims();
+            let axis = match &node.operation {
+                Operation::ReduceSum { axis } => *axis,
+                _ => unreachable!(),
+            };
+            let outer = dims[..axis].iter().product::<usize>();
+            let width = dims[axis];
+            let inner = dims[axis + 1..].iter().product::<usize>();
+            let input_proof = prove_module_node_nonnegative(
+                graph, module_index, input, arguments, boundary, traversal, module_proofs,
+            )?;
+            format!(
+                "VeriNeural.reduceSumAxis_nonnegative (outer := {outer}) \
+                 (width := {width}) (inner := {inner}) {} ({input_proof})",
+                call(input)
+            )
+        }
         _ => return Err(ProofError::UnsupportedGuarantee { node: index }),
     };
     traversal.cache.insert(index, proof.clone());
@@ -1671,6 +1716,21 @@ fn prove_ideal_nonnegative(
         Operation::Pointwise(ref spec) => spec.expression()
             .nonnegative_lean(&|port| call(node.inputs[port]))
             .ok_or(ProofError::UnsupportedGuarantee { node: index })?,
+        Operation::ReduceSum { axis } => {
+            let input = node.inputs[0];
+            let dims = graph.node(input)?.shape.dims();
+            let outer = dims[..axis].iter().product::<usize>();
+            let width = dims[axis];
+            let inner = dims[axis + 1..].iter().product::<usize>();
+            let proof = prove_ideal_nonnegative(
+                graph, input, arguments, source_hypotheses, cache,
+            )?;
+            format!(
+                "VeriNeural.reduceSumAxis_nonnegative (outer := {outer}) \
+                 (width := {width}) (inner := {inner}) {} ({proof})",
+                call(input)
+            )
+        }
         Operation::Add | Operation::Mul | Operation::MatMul | Operation::BiasAdd => {
             let a = node.inputs[0];
             let b = node.inputs[1];

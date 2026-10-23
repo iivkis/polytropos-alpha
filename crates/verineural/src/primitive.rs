@@ -54,6 +54,11 @@ impl PrimitiveExpr {
         Self::apply(Operation::Reshape(shape), [self])
     }
 
+    /// General row-major axis reduction, not a specialized neural block.
+    pub fn reduce_sum(self, axis: usize) -> Self {
+        Self::apply(Operation::ReduceSum { axis }, [self])
+    }
+
     fn lower(&self, graph: &mut NeuralGraph, ports: &[NodeId]) -> Result<NodeId, NeuralError> {
         match self {
             Self::Port(index) => ports.get(*index).copied().ok_or(NeuralError::InvalidNode),

@@ -110,6 +110,8 @@ pub enum Operation {
     Reshape(Shape),
     /// A versioned external atomic operation with declarative pointwise semantics.
     Pointwise(PointwiseSpec),
+    /// Reduce one row-major tensor axis with an explicit left-to-right sum.
+    ReduceSum { axis: usize },
 }
 
 impl Operation {
@@ -126,6 +128,7 @@ impl Operation {
             Self::Sqrt => "sqrt",
             Self::Reshape(_) => "reshape",
             Self::Pointwise(_) => "pointwise",
+            Self::ReduceSum { .. } => "reduce_sum",
         }
     }
 
@@ -136,6 +139,7 @@ impl Operation {
             Self::SelectPositive => 3,
             Self::Relu | Self::PositiveMask | Self::Sqrt | Self::Reshape(_) => 1,
             Self::Pointwise(spec) => spec.arity(),
+            Self::ReduceSum { .. } => 1,
         }
     }
 
@@ -207,6 +211,15 @@ impl Operation {
                 Ok(inputs[0].clone())
             }
             Self::Relu | Self::PositiveMask | Self::Sqrt => Ok(inputs[0].clone()),
+            Self::ReduceSum { axis } => {
+                let input = &inputs[0];
+                if *axis >= input.rank() {
+                    return Err(NeuralError::InvalidAxis { axis: *axis, rank: input.rank() });
+                }
+                let mut dims = input.dims().to_vec();
+                dims.remove(*axis);
+                Shape::new(dims)
+            }
             Self::Reshape(output) => {
                 if inputs[0].element_count() != output.element_count() {
                     return Err(NeuralError::ElementCountMismatch {
@@ -253,7 +266,7 @@ impl Operation {
             }
             Self::Reshape(_) => inputs[0],
             Self::Input | Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd
-            | Self::Pointwise(_) => Domain::Any,
+            | Self::Pointwise(_) | Self::ReduceSum { .. } => Domain::Any,
         }
     }
 }
@@ -756,6 +769,12 @@ impl NeuralGraph {
             },
         });
         Ok(id)
+    }
+
+    /// Sum one tensor axis in row-major order. Reductions are not implicitly
+    /// reassociated: both the host reference and ideal Lean semantics fold left.
+    pub fn reduce_sum(&mut self, input: NodeId, axis: usize) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::ReduceSum { axis }, &[input])
     }
 
     pub fn add(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, NeuralError> {

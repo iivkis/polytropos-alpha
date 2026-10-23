@@ -205,6 +205,26 @@ impl Tensor<f32> {
         )
     }
 
+    /// Row-major sum over any axis, with an explicit left-to-right f32 fold.
+    /// This is a host reference, NOT a proof of its rounding or GPU behavior.
+    pub fn reduce_sum(&self, axis: usize) -> Result<Self, NeuralError> {
+        let output_shape = Operation::ReduceSum { axis }
+            .infer_shape(std::slice::from_ref(&self.shape))?;
+        let width = self.shape.dims()[axis];
+        let inner = self.shape.dims()[axis + 1..].iter().product::<usize>();
+        let mut values = Vec::with_capacity(output_shape.element_count());
+        for index in 0..output_shape.element_count() {
+            let outer = index / inner;
+            let suffix = index % inner;
+            let mut sum = 0.0f32;
+            for lane in 0..width {
+                sum += self.values[(outer * width + lane) * inner + suffix];
+            }
+            values.push(sum);
+        }
+        Self::new(output_shape, values)
+    }
+
     /// Same values, new dimensions with the same element count.
     pub fn reshape(self, shape: Shape) -> Result<Self, NeuralError> {
         Operation::Reshape(shape.clone()).infer_shape(std::slice::from_ref(&self.shape))?;

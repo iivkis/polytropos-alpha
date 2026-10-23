@@ -190,3 +190,8 @@ tasks:
     desc: Kernel-check independent user-defined atomic pointwise semantics and contracts
     cmds:
       - cargo test -p verineural --test pointwise_primitive -- --ignored
+
+  verify-tensor-reductions:
+    desc: Lean-check axis-sum ideal semantics, nonnegative fold, and consumer contracts
+    cmds:
+      - cargo test -p verineural --test tensor_reductions -- --ignored

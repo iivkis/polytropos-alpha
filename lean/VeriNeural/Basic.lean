@@ -42,6 +42,16 @@ def reshape {n : Nat} (a : Tensor n) : Tensor n := a
 def flatGet {n : Nat} (a : Tensor n) (index : Nat) : Int :=
   if h : index < n then a ⟨index, h⟩ else 0
 
+/-- Row-major sum across an arbitrary axis, encoded by prefix, width and
+    suffix element counts. The sum is a left fold starting at zero. -/
+def reduceSumAxis {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) : Tensor (outer * inner) :=
+  fun i =>
+    (List.range width).foldl
+      (fun acc j =>
+        acc + flatGet a ((i.val / inner) * width * inner + j * inner + i.val % inner))
+      0
+
 /-- Ideal integer row-major matrix multiplication. -/
 def matmul {m k n : Nat} (a : Tensor (m * k))
     (b : Tensor (k * n)) : Tensor (m * n) :=
@@ -111,6 +121,32 @@ theorem flatGet_nonnegative {n : Nat} (a : Tensor n)
   · rename_i h
     exact ha ⟨index, h⟩
   · decide
+
+/-- Every intermediate accumulator stays nonnegative when the input is
+    nonnegative; unlike a post-hoc range assertion, this is kernel checked. -/
+theorem reduceSumAxis_nonnegative {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) (ha : Nonnegative a) :
+    Nonnegative (reduceSumAxis a) := by
+  intro i
+  have hfold :
+      ∀ xs : List Nat, ∀ acc : Int, 0 ≤ acc →
+        0 ≤ xs.foldl
+          (fun sum j =>
+            sum + flatGet a ((i.val / inner) * width * inner + j * inner + i.val % inner))
+          acc := by
+    intro xs
+    induction xs with
+    | nil =>
+        intro acc hacc
+        exact hacc
+    | cons j rest ih =>
+        intro acc hacc
+        change 0 ≤ rest.foldl
+          (fun sum lane =>
+            sum + flatGet a ((i.val / inner) * width * inner + lane * inner + i.val % inner))
+          (acc + flatGet a ((i.val / inner) * width * inner + j * inner + i.val % inner))
+        exact ih _ (Int.add_nonneg hacc (flatGet_nonnegative a ha _))
+  exact hfold (List.range width) 0 (by decide)
 
 /-- Every left-to-right partial sum of row-major MatMul is nonnegative. -/
 theorem matmul_nonnegative {m k n : Nat} (a : Tensor (m * k))

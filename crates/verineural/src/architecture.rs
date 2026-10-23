@@ -114,6 +114,7 @@ fn operation_title(operation: &Operation) -> &'static str {
         Operation::Sqrt => "Sqrt",
         Operation::Reshape(_) => "Reshape",
         Operation::Pointwise(_) => "User-defined pointwise",
+        Operation::ReduceSum { .. } => "Reduce sum",
     }
 }
 
@@ -541,6 +542,10 @@ pub fn snapshot_architecture(
                 ("vn_id", format!("n{index}")),
                 ("vn_kind", kind.into()),
                 ("vn_op", node.operation.name().into()),
+                ("vn_reduction_axis", match node.operation {
+                    Operation::ReduceSum { axis } => axis.to_string(),
+                    _ => String::new(),
+                }),
                 ("vn_custom_semantics", match &node.operation {
                     Operation::Pointwise(spec) => format!(
                         "{}@{}:{}",
@@ -903,6 +908,10 @@ pub(crate) fn auto_architecture_dot(
                 ("vn_id", format!("n{i}")),
                 ("vn_kind", kind.to_owned()),
                 ("vn_op", node.operation.name().to_owned()),
+                ("vn_reduction_axis", match node.operation {
+                    Operation::ReduceSum { axis } => axis.to_string(),
+                    _ => String::new(),
+                }),
                 ("vn_custom_semantics", match &node.operation {
                     Operation::Pointwise(spec) => format!(
                         "{}@{}:{}",

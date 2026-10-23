@@ -51,6 +51,7 @@ fn operation(operation: &Operation) -> String {
             spec.arity(),
             spec.expression().canonical()
         ),
+        Operation::ReduceSum { axis } => format!("reduce_sum_axis:{axis}"),
         other => other.name().to_owned(),
     }
 }

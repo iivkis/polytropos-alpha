@@ -40,6 +40,7 @@ pub enum NeuralError {
         actual: usize,
     },
     InvalidNode,
+    InvalidAxis { axis: usize, rank: usize },
     InputCannotBeApplied,
     DomainNotEstablished {
         required: Domain,
@@ -99,6 +100,7 @@ impl fmt::Display for NeuralError {
                 "{operation} expects {expected} inputs, received {actual}"
             ),
             Self::InvalidNode => write!(f, "node belongs to a different graph or does not exist"),
+            Self::InvalidAxis { axis, rank } => write!(f, "tensor axis {axis} is outside rank {rank}"),
             Self::InputCannotBeApplied => write!(f, "create source nodes with graph.input()"),
             Self::DomainNotEstablished { required, actual } => write!(
                 f,
