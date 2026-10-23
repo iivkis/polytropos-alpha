@@ -133,6 +133,9 @@ fn custom_transition(
 
 Это не отдельный IR, не новое GPU-исполнение и не Lean-доказательство без запуска checker. Роли input/parameter пока сохраняются в модели и snapshot metadata, а не как самостоятельные операции IR. Нет изменяемых состояний, общего рекуррентного runtime, встроенного обновления параметров и автоматического доказательства FP32/SASS.
 
+**Stage 10 (реализованный API-срез, без подтверждённой приёмки):** `Model::certify(CertifiedBuildConfig::new(package_root))` и `Model::verify_certified(config, pinned_sha256)` используют те же Lean/GPU/SHA256 backend'ы, что `ArchitectureAutoCompiler`. Все явно объявленные ProofGoal обязательны; все named outputs требуют поддерживаемого lowering. `identity.txt` внутри SHA256SUMS связывает модель, роли и цели, а `--artifact-root` в лабораторных примерах разрешается относительно package root. Пока публикация идёт в `<artifact-root>/auto-build/`, а не в top-level файлы целевого CLI § 12.2; `cargo verineural build --certified` ещё не реализован. Это не является формальным FP32/SASS proof.
+
+
 ## 4. Semantic Neural IR
 
 Центральный компонент всей системы.

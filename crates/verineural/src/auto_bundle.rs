@@ -23,6 +23,9 @@ pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
         "lean/architecture.lean".to_owned(),
         "lean/audit.txt".to_owned(),
     ];
+    if plan.identity.is_some() {
+        files.push("identity.txt".to_owned());
+    }
     for (index, (name, _)) in plan.goals.iter().enumerate() {
         files.push(format!("lean/goal_{index}_{name}.lean"));
     }
@@ -52,6 +55,28 @@ pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
     files
 }
 
+/// Reject foreign or legacy bundles before starting a new staged build.
+/// Identity is checked again during replay, and SHA256SUMS covers its bytes.
+pub(super) fn check_existing_identity(dir: &Path, expected: &str) -> Result<(), AutoBuildError> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    if !dir.is_dir() {
+        return Err(AutoBuildError::Integrity(format!(
+            "certified output is not a directory: {}", dir.display()
+        )));
+    }
+    let saved = fs::read_to_string(dir.join("identity.txt")).map_err(|_| {
+        AutoBuildError::Integrity("existing bundle lacks a readable certified identity".into())
+    })?;
+    if saved != expected {
+        return Err(AutoBuildError::Integrity(
+            "existing bundle belongs to a different model identity or declaration".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn manifest_text(dir: &Path, plan: &AutoBuildPlan) -> Result<String, AutoBuildError> {
     let mut text = String::new();
     for name in artifact_files(plan) {
@@ -77,6 +102,9 @@ pub(super) fn verify_manifest(
     expected_digest: Option<&str>,
 ) -> Result<String, AutoBuildError> {
     let existing = fs::read_to_string(dir.join(MANIFEST))?;
+    if let Some(identity) = &plan.identity {
+        check_existing_identity(dir, identity)?;
+    }
     let expected = manifest_text(dir, plan)?;
     if existing != expected {
         return Err(AutoBuildError::Integrity(
@@ -174,6 +202,25 @@ mod tests {
             Err(AutoBuildError::Integrity(_))
         ));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn certified_identity_prevents_cross_model_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "verineural-identity-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("identity.txt"), "id=xor\nversion=1\n").unwrap();
+        check_existing_identity(&root, "id=xor\nversion=1\n").unwrap();
+        assert!(matches!(
+            check_existing_identity(&root, "id=other\nversion=1\n"),
+            Err(AutoBuildError::Integrity(_))
+        ));
+        fs::remove_file(root.join("identity.txt")).unwrap();
+        assert!(check_existing_identity(&root, "id=xor\nversion=1\n").is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

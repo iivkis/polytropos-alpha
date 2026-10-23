@@ -318,3 +318,9 @@ Architecture-composition slice локально подтверждён поль�
 ## Git-процесс
 
 Изменения интегрируются в `main` **только fast-forward**, без pull request, merge-коммитов, squash и force push. Полные правила для агентов — в корневом [AGENTS.md](AGENTS.md).
+
+## Stage 10: certified model build (first API slice)
+
+A finished consumer `Model` can now call `model.certify(CertifiedBuildConfig::new(package_root))` or `model.verify_certified(config, externally_pinned_sha256)`. This reuses `ArchitectureAutoCompiler`, checks all declared Lean proof goals with axiom audit, requires GPU lowering for all outputs, and hashes the canonical IR, deterministic DOT, Graphviz PNG, Lean files, LLVM/PTX and declaration identity. Guarantees apply to ideal-Int math and structurally audited translation, **not** GPU hardware/IEEE-754 equivalence.
+
+Developer-run acceptance commands (inside the pinned Nix shell): `task certified-xor`, `task verify-certified-xor`, `task certified-coupled`, `task verify-certified-coupled`. Optional per-lab override: `task certified-xor -- --artifact-root generated/case1`; relative paths are resolved against the lab package directory. `--pinned-sha256 <digest>` may be passed to verification; a SHA256SUMS file alone is not an external signature. Current output is `<artifact-root>/auto-build/`; top-level publication and the future `cargo verineural build --certified` subcommand remain pending under Stage 10.

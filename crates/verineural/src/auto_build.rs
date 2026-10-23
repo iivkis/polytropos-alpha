@@ -313,6 +313,8 @@ pub struct AutoBuildPlan {
     /// An additional union-of-outputs GPU program. Single-output legacy
     /// artifacts remain available for compatible consumer workflows.
     pub shared_gpu: Option<Box<GpuProgram>>,
+    /// Deterministic model declaration included in the certified manifest.
+    pub(crate) identity: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -503,6 +505,7 @@ impl ArchitectureAutoCompiler {
             goals,
             gpu,
             shared_gpu,
+            identity: None,
         })
     }
 
@@ -518,11 +521,47 @@ impl ArchitectureAutoCompiler {
         gpu_requirement: GpuRequirement,
         root: &Path,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
+        self.build_with_identity(graph, outputs, tasks, gpu_requirement, root, None)
+    }
+
+    /// Certified model build. A mismatched id/version or model declaration
+    /// cannot replace a previously published bundle, even if its IR matches.
+    pub fn build_identified(
+        &self,
+        graph: &NeuralGraph,
+        outputs: &[NodeId],
+        tasks: &[ArchitectureProofTask],
+        root: &Path,
+        identity: &str,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
+        self.build_with_identity(graph, outputs, tasks, GpuRequirement::AllOutputs, root, Some(identity))
+    }
+
+    fn build_with_identity(
+        &self,
+        graph: &NeuralGraph,
+        outputs: &[NodeId],
+        tasks: &[ArchitectureProofTask],
+        gpu_requirement: GpuRequirement,
+        root: &Path,
+        identity: Option<&str>,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
+        let mut plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
         let final_dir = root.join("auto-build");
+        if let Some(identity) = identity {
+            auto_bundle::check_existing_identity(&final_dir, identity)?;
+            plan.identity = Some(identity.to_owned());
+        } else if final_dir.join("identity.txt").exists() {
+            return Err(AutoBuildError::Integrity(
+                "generic auto-build cannot overwrite an identified certified bundle".into(),
+            ));
+        }
         let mut staged = StagedBuild::create(root)?;
         let directory = staged.directory.clone();
         fs::write(directory.join("semantic.ir"), graph.canonical_ir())?;
+        if let Some(identity) = &plan.identity {
+            fs::write(directory.join("identity.txt"), identity)?;
+        }
         let lean_dir = directory.join("lean");
         fs::create_dir_all(&lean_dir)?;
         let (checked, audit) = self
@@ -606,6 +645,10 @@ impl ArchitectureAutoCompiler {
         fs::write(directory.join("report.txt"), report_text(graph, &report))?;
         report.manifest_sha256 = auto_bundle::write_manifest(&directory, &plan)?;
         auto_bundle::verify_manifest(&directory, &plan, Some(&report.manifest_sha256))?;
+        if let Some(identity) = &plan.identity {
+            // Guard against a different writer publishing while we staged.
+            auto_bundle::check_existing_identity(&final_dir, identity)?;
+        }
         staged.publish(&final_dir)?;
         Ok(report)
     }
@@ -658,7 +701,7 @@ fn report_text(graph: &NeuralGraph, report: &AutoBuildReport) -> String {
                 .iter()
                 .map(|item| item.node)
                 .collect::<Vec<_>>(),
-            ptx.display()
+            ptx.strip_prefix(&report.directory).unwrap_or(ptx).display()
         ));
     }
     for item in &report.output_evidence {
@@ -666,7 +709,7 @@ fn report_text(graph: &NeuralGraph, report: &AutoBuildReport) -> String {
             text.push_str(&format!(
                 "gpu_output={};status=structurally-translated;ptx={}\n",
                 item.node,
-                ptx.display()
+                ptx.strip_prefix(&report.directory).unwrap_or(ptx).display()
             ));
         } else {
             text.push_str(&format!(
@@ -696,8 +739,38 @@ impl ArchitectureAutoCompiler {
         root: &Path,
         pinned_sha256: Option<&str>,
     ) -> Result<AutoBuildReport, AutoBuildError> {
+        self.verify_with_identity(graph, outputs, tasks, gpu_requirement, root, pinned_sha256, None)
+    }
+
+    /// Offline replay of an identified certified build, without a GPU.
+    pub fn verify_identified(
+        &self,
+        graph: &NeuralGraph,
+        outputs: &[NodeId],
+        tasks: &[ArchitectureProofTask],
+        root: &Path,
+        pinned_sha256: Option<&str>,
+        identity: &str,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
+        self.verify_with_identity(graph, outputs, tasks, GpuRequirement::AllOutputs, root, pinned_sha256, Some(identity))
+    }
+
+    fn verify_with_identity(
+        &self,
+        graph: &NeuralGraph,
+        outputs: &[NodeId],
+        tasks: &[ArchitectureProofTask],
+        gpu_requirement: GpuRequirement,
+        root: &Path,
+        pinned_sha256: Option<&str>,
+        identity: Option<&str>,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
         let directory = root.join("auto-build");
-        let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
+        let mut plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
+        if let Some(identity) = identity {
+            auto_bundle::check_existing_identity(&directory, identity)?;
+            plan.identity = Some(identity.to_owned());
+        }
         let digest = auto_bundle::verify_manifest(&directory, &plan, pinned_sha256)?;
         auto_bundle::verify_current_ir(&directory, &graph.canonical_ir())?;
         let ir_sha256 = auto_bundle::hash_file(&directory.join("semantic.ir"))?;

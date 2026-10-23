@@ -2,7 +2,7 @@
 //! Role labels are metadata, not new IR operations or runtime mutability.
 use crate::{
     ArchitectureAutoCompiler, ArchitectureMetadata, ArchitectureProofTask, AutoBuildError,
-    AutoBuildPlan, Domain, FP32Policy, GpuRequirement, NeuralError, NeuralGraph, NodeId, Operation,
+    AutoBuildPlan, AutoBuildReport, CertifiedBuildConfig, Domain, FP32Policy, GpuRequirement, NeuralError, NeuralGraph, NodeId, Operation,
     ProofGoal, Shape, Tensor,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -311,6 +311,77 @@ impl Model {
         Ok(ordered)
     }
 
+    /// Stable identity binds id/version, named sources/roles, outputs and
+    /// obligations. SHA256SUMS also binds the full canonical IR and artifacts.
+    fn certified_identity(&self) -> String {
+        let mut identity = format!(
+            "verineural-certified-model-v1\nid={}\nversion={}\n",
+            self.id, self.version
+        );
+        for (name, (node, role)) in &self.sources {
+            let source = self.graph.node(*node).expect("finished model source exists");
+            identity.push_str(&format!(
+                "source={name};node={};role={};shape={:?};domain={:?}\n",
+                node.index(), role.as_str(), source.shape.dims(), source.domain
+            ));
+        }
+        for (name, output) in &self.outputs {
+            identity.push_str(&format!("output={name};node={}\n", output.index()));
+        }
+        for (name, goal) in &self.goals {
+            identity.push_str(&format!(
+                "goal={name};node={};kind={:?}\n", goal.output.index(), goal.kind
+            ));
+        }
+        identity
+    }
+
+    /// Fail closed: certify every declared goal with Lean kernel + axiom audit,
+    /// require GPU lowering for every output, then atomically publish evidence.
+    /// The result explicitly does not certify CUDA/IEEE-754 machine semantics.
+    pub fn certify(
+        &self,
+        config: CertifiedBuildConfig,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
+        self.certify_with(&ArchitectureAutoCompiler::default(), config)
+    }
+
+    pub fn certify_with(
+        &self,
+        compiler: &ArchitectureAutoCompiler,
+        config: CertifiedBuildConfig,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
+        let outputs: Vec<_> = self.outputs.values().copied().collect();
+        let tasks: Vec<_> = self.goals.values().cloned().map(ArchitectureProofTask::Goal).collect();
+        compiler.build_identified(
+            &self.graph, &outputs, &tasks, &config.resolved_root(), &self.certified_identity()
+        )
+    }
+
+    /// Verify the complete current-source bundle without CUDA or GPU execution.
+    /// To establish authenticity, pass a digest pinned outside the bundle.
+    pub fn verify_certified(
+        &self,
+        config: CertifiedBuildConfig,
+        pinned_sha256: Option<&str>,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
+        self.verify_certified_with(&ArchitectureAutoCompiler::default(), config, pinned_sha256)
+    }
+
+    pub fn verify_certified_with(
+        &self,
+        compiler: &ArchitectureAutoCompiler,
+        config: CertifiedBuildConfig,
+        pinned_sha256: Option<&str>,
+    ) -> Result<AutoBuildReport, AutoBuildError> {
+        let outputs: Vec<_> = self.outputs.values().copied().collect();
+        let tasks: Vec<_> = self.goals.values().cloned().map(ArchitectureProofTask::Goal).collect();
+        compiler.verify_identified(
+            &self.graph, &outputs, &tasks, &config.resolved_root(), pinned_sha256,
+            &self.certified_identity()
+        )
+    }
+
     /// Reuse ArchitectureAutoCompiler; planned Lean goals are not certified.
     pub fn plan(
         &self,
@@ -379,6 +450,34 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(bound.len(), 3);
+    }
+
+    #[test]
+    fn certificate_identity_tracks_named_contracts_not_absolute_paths() {
+        let mut builder = ModelBuilder::new("ident", "0.1.0");
+        let x = builder.input("input", [2], Domain::NonNegativeFinite).unwrap();
+        let y = builder.block("nonnegative", &[x], |g, p| g.relu(p[0])).unwrap();
+        builder.output("value", y).unwrap();
+        builder.proof_goal(ProofGoal::nonnegative("nonnegative_goal", y, vec![])).unwrap();
+        let model = builder.finish().unwrap();
+        let declaration = model.certified_identity();
+        assert!(declaration.contains("id=ident\nversion=0.1.0"));
+        assert!(declaration.contains("source=input;node=0;role=input"));
+        assert!(declaration.contains("goal=nonnegative_goal;node=1"));
+        assert!(!declaration.contains("/tmp/"));
+    }
+
+    #[test]
+    fn certified_plan_rejects_unsupported_gpu_operations() {
+        let mut builder = ModelBuilder::new("unsupported", "1");
+        let x = builder.input("x", [2], Domain::Finite).unwrap();
+        let y = builder.graph_mut().sqrt(x).unwrap();
+        builder.output("y", y).unwrap();
+        let model = builder.finish().unwrap();
+        assert!(matches!(
+            model.plan(&ArchitectureAutoCompiler::default(), GpuRequirement::AllOutputs),
+            Err(AutoBuildError::Gpu(_)) | Err(AutoBuildError::Proof(_))
+        ));
     }
 
     #[test]
