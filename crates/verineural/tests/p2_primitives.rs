@@ -57,12 +57,16 @@ fn softmax_composes_in_one_ir_and_unsupported_backends_fail_closed() {
     let mut g = NeuralGraph::default();
     let input = g.input(Shape::new([2, 3]).unwrap(), Domain::Finite);
     let maximum = g.reduce_max(input, 1).unwrap();
+    // Reduction removes axis 1; restore its singleton dimension to broadcast
+    // each row maximum across that row instead of right-aligning [2] to [2, 3].
+    let maximum = g.reshape(maximum, Shape::new([2, 1]).unwrap()).unwrap();
     let maximum = g
         .broadcast_to(maximum, Shape::new([2, 3]).unwrap())
         .unwrap();
     let centered = g.sub(input, maximum).unwrap();
     let exponentials = g.exp(centered).unwrap();
     let sums = g.reduce_sum(exponentials, 1).unwrap();
+    let sums = g.reshape(sums, Shape::new([2, 1]).unwrap()).unwrap();
     let sums = g.broadcast_to(sums, Shape::new([2, 3]).unwrap()).unwrap();
     let probabilities = g.div(exponentials, sums).unwrap();
 
