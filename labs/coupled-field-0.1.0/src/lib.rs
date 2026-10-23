@@ -3,11 +3,10 @@
 //! or an implementation of training/state updates. It exercises nested module
 //! boundaries, parameter sharing, fork/fan-in and a global ideal-Int theorem.
 
-use std::collections::BTreeMap;
 use std::error::Error;
 use verineural::{
-    ArchitectureMetadata, Domain, MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId,
-    PortContract, Shape, Tensor,
+    ArchitectureMetadata, Domain, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph,
+    NodeId, Operation, Predicate, ProofGoal, ProofGoalKind, Shape, Tensor, ValueRef,
 };
 
 fn field() -> Shape {
@@ -16,178 +15,137 @@ fn field() -> Shape {
 fn channel() -> Shape {
     Shape::new(vec![4]).expect("valid channel shape")
 }
-fn any(s: Shape) -> PortContract {
-    PortContract::new(s, Domain::Any)
-}
 
-pub struct BoundaryCell {
-    contract: MathContract,
-}
-impl BoundaryCell {
-    pub fn new() -> Self {
-        Self {
-            contract: MathContract::new(
-                vec![any(field()), any(field()), any(channel())],
-                any(field()),
-            ),
-        }
-    }
-}
-impl Default for BoundaryCell {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl NeuralModule for BoundaryCell {
-    fn name(&self) -> &'static str {
-        "boundary_response"
-    }
-    fn contract(&self) -> &MathContract {
-        &self.contract
-    }
-    fn build(&self, g: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
-        let product = g.mul(inputs[0], inputs[1])?;
-        let biased = g.bias_add(product, inputs[2])?;
-        g.relu(biased)
-    }
+/// Consumer-defined primitive: every GPU/Lean operation still comes from VeriNeural.
+fn boundary_response(g: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+    let product = g.mul(inputs[0], inputs[1])?;
+    let biased = g.bias_add(product, inputs[2])?;
+    g.relu(biased)
 }
 
 /// CoupledUnit(a,b,c,p,q) := Relu(Boundary(a,b,p) + Boundary(b,c,q)).
-pub struct CoupledUnit {
-    contract: MathContract,
-}
-impl CoupledUnit {
-    pub fn new() -> Self {
-        Self {
-            contract: MathContract::new(
-                vec![
-                    any(field()),
-                    any(field()),
-                    any(field()),
-                    any(channel()),
-                    any(channel()),
-                ],
-                any(field()),
-            ),
-        }
-    }
-}
-impl Default for CoupledUnit {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl NeuralModule for CoupledUnit {
-    fn name(&self) -> &'static str {
-        "coupled_unit"
-    }
-    fn contract(&self) -> &MathContract {
-        &self.contract
-    }
-    fn build(&self, g: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
-        let left = g.apply_module(&BoundaryCell::new(), &[inputs[0], inputs[1], inputs[3]])?;
-        let right = g.apply_module(&BoundaryCell::new(), &[inputs[1], inputs[2], inputs[4]])?;
-        let mixed = g.add(left, right)?;
-        g.relu(mixed)
-    }
+fn coupled_unit(g: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+    let left = g.compose_inferred(
+        "boundary_response",
+        "1.0",
+        &[inputs[0], inputs[1], inputs[3]],
+        boundary_response,
+    )?;
+    let right = g.compose_inferred(
+        "boundary_response",
+        "1.0",
+        &[inputs[1], inputs[2], inputs[4]],
+        boundary_response,
+    )?;
+    let merged = g.add(left, right)?;
+    g.relu(merged)
 }
 
-/// Two overlapping coupled units share the same parameters, but rotate the
-/// field variables. The resulting whole-architecture output is a fork/fan-in.
-pub struct CoupledField {
-    contract: MathContract,
+/// Rotate the fields; reuse the two shared parameter sources for both branches.
+fn coupled_field(g: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+    let left = g.compose_inferred("coupled_unit", "1.0", inputs, coupled_unit)?;
+    let right = g.compose_inferred(
+        "coupled_unit",
+        "1.0",
+        &[inputs[0], inputs[2], inputs[1], inputs[4], inputs[3]],
+        coupled_unit,
+    )?;
+    let merged = g.add(left, right)?;
+    g.relu(merged)
 }
-impl CoupledField {
-    pub fn new() -> Self {
-        Self {
-            contract: CoupledUnit::new().contract,
-        }
+
+/// Named sources, outputs and independent Lean goals share one Semantic IR.
+pub fn architecture() -> Result<Model, ModelError> {
+    let mut m = ModelBuilder::new("coupled-field", "0.1.0");
+    let x = m.input("x", [1, 4], Domain::NonNegativeFinite)?;
+    let y = m.input("y", [1, 4], Domain::NonNegativeFinite)?;
+    let z = m.input("z", [1, 4], Domain::NonNegativeFinite)?;
+    let p = m.parameter("p", [4], Domain::NonNegativeFinite)?;
+    let q = m.parameter("q", [4], Domain::NonNegativeFinite)?;
+    let result = m.block("coupled_field", &[x, y, z, p, q], coupled_field)?;
+
+    // Expose the two actual branches for multi-output planning, without
+    // changing the existing single-root Stage 9 execution/evidence profile.
+    let root = m.graph_mut().node(result)?;
+    if !matches!(root.operation, Operation::Relu) {
+        return Err(ModelError::Invalid("expected output ReLU".into()));
     }
-}
-impl Default for CoupledField {
-    fn default() -> Self {
-        Self::new()
+    let merge_id = root.inputs[0];
+    let merge = m.graph_mut().node(merge_id)?;
+    if !matches!(merge.operation, Operation::Add) || merge.inputs.len() != 2 {
+        return Err(ModelError::Invalid("expected two-branch Add".into()));
     }
-}
-impl NeuralModule for CoupledField {
-    fn name(&self) -> &'static str {
-        "coupled_field"
+    let left = merge.inputs[0];
+    let right = merge.inputs[1];
+    if !matches!(m.graph_mut().node(right)?.operation, Operation::Relu) {
+        return Err(ModelError::Invalid("right branch must be a ReLU".into()));
     }
-    fn contract(&self) -> &MathContract {
-        &self.contract
-    }
-    fn build(&self, g: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
-        let left = g.apply_module(&CoupledUnit::new(), inputs)?;
-        let right = g.apply_module(
-            &CoupledUnit::new(),
-            &[inputs[0], inputs[2], inputs[1], inputs[4], inputs[3]],
-        )?;
-        let total = g.add(left, right)?;
-        g.relu(total)
-    }
+    m.output("final", result)?;
+    m.output("left", left)?;
+    m.output("right", right)?;
+    m.proof_goal(ProofGoal {
+        name: "coupled_branch_lower_bound".into(),
+        output: result,
+        kind: ProofGoalKind::Predicate(Predicate::pointwise_le(
+            ValueRef::Node(left),
+            ValueRef::Output,
+        )),
+    })?;
+    m.finish()
 }
 
 /// Concrete parameters and values are tiny nonnegative integers and exactly
 /// representable in binary32. All nonnegative facts used by Lean remain
 /// explicit caller assumptions, verified for this particular input vector.
 pub fn build() -> Result<Lab, Box<dyn Error>> {
-    let mut g = NeuralGraph::default();
-    let x = g.input(field(), Domain::NonNegativeFinite);
-    let y = g.input(field(), Domain::NonNegativeFinite);
-    let z = g.input(field(), Domain::NonNegativeFinite);
-    let p = g.input(channel(), Domain::NonNegativeFinite);
-    let q = g.input(channel(), Domain::NonNegativeFinite);
-    let output = g.apply_module(&CoupledField::new(), &[x, y, z, p, q])?;
-    let samples = [
-        (x, field(), vec![1., 2., 3., 4.]),
-        (y, field(), vec![2., 1., 0., 1.]),
-        (z, field(), vec![0., 1., 2., 1.]),
-        (p, channel(), vec![1., 0., 1., 0.]),
-        (q, channel(), vec![0., 2., 0., 1.]),
-    ];
-    let inputs = samples
-        .into_iter()
-        .map(|(id, s, v)| Ok((id, Tensor::new(s, v)?)))
-        .collect::<Result<Vec<_>, NeuralError>>()?;
-    let metadata = ArchitectureMetadata {
-        id: "coupled-field".into(),
-        version: "0.1.0".into(),
-        input_roles: BTreeMap::from([
-            (x.index(), "input".into()),
-            (y.index(), "input".into()),
-            (z.index(), "input".into()),
-            (p.index(), "parameter".into()),
-            (q.index(), "parameter".into()),
-        ]),
-        global_property: "architecture_global_nonnegative".into(),
-    };
-    Ok(Lab {
-        graph: g,
-        output,
-        source_nodes: [x, y, z, p, q],
-        inputs,
-        metadata,
-    })
+    let model = architecture()?;
+    let mut inputs = model.bind([
+        ("x", Tensor::new(field(), vec![1., 2., 3., 4.])?),
+        ("y", Tensor::new(field(), vec![2., 1., 0., 1.])?),
+        ("z", Tensor::new(field(), vec![0., 1., 2., 1.])?),
+        ("p", Tensor::new(channel(), vec![1., 0., 1., 0.])?),
+        ("q", Tensor::new(channel(), vec![0., 2., 0., 1.])?),
+    ])?;
+    inputs.sort_by_key(|(id, _)| id.index());
+    Ok(Lab { model, inputs })
 }
 
 pub struct Lab {
-    pub graph: NeuralGraph,
-    pub output: NodeId,
-    pub source_nodes: [NodeId; 5],
+    pub model: Model,
     pub inputs: Vec<(NodeId, Tensor<f32>)>,
-    pub metadata: ArchitectureMetadata,
 }
 
 impl Lab {
+    pub fn graph(&self) -> &NeuralGraph {
+        self.model.graph()
+    }
+
+    pub fn output(&self) -> NodeId {
+        self.model.output("final").expect("architecture declares final")
+    }
+
+    pub fn source_nodes(&self) -> [NodeId; 5] {
+        ["x", "y", "z", "p", "q"].map(|name| {
+            self.model
+                .source(name)
+                .expect("architecture declares every source")
+                .0
+        })
+    }
+
+    pub fn metadata(&self) -> ArchitectureMetadata {
+        self.model.metadata("architecture_global_nonnegative")
+    }
+
     pub fn inputs_bits(&self) -> String {
+        let roles = self.metadata().input_roles;
         self.inputs
             .iter()
             .map(|(id, t)| {
                 format!(
                     "node={} role={} shape={:?} bits={}\n",
                     id.index(),
-                    self.metadata
-                        .input_roles
+                    roles
                         .get(&id.index())
                         .expect("all source roles declared"),
                     t.shape().dims(),
@@ -201,11 +159,11 @@ impl Lab {
             .collect()
     }
     pub fn parameters_bits(&self) -> String {
+        let roles = self.metadata().input_roles;
         self.inputs
             .iter()
             .filter(|(id, _)| {
-                self.metadata
-                    .input_roles
+                roles
                     .get(&id.index())
                     .is_some_and(|s| s == "parameter")
             })
@@ -227,7 +185,7 @@ impl Lab {
     pub fn exact_integer_output(&self) -> Result<Vec<i64>, Box<dyn Error>> {
         use verineural::Operation;
         let mut values: Vec<Vec<i64>> = Vec::new();
-        for (idx, node) in self.graph.nodes().iter().enumerate() {
+        for (idx, node) in self.graph().nodes().iter().enumerate() {
             let result = match &node.operation {
                 Operation::Input => {
                     let t = &self
@@ -283,7 +241,7 @@ impl Lab {
             }
             values.push(result);
         }
-        let output = values[self.output.index()].clone();
+        let output = values[self.output().index()].clone();
         if output != [4, 10, 8, 12] {
             return Err("lab oracle regression".into());
         }
@@ -299,10 +257,27 @@ mod tests {
     #[test]
     fn nested_architecture_has_independent_global_property_and_exact_oracle() {
         let lab = build().unwrap();
-        assert_eq!(lab.graph.modules().len(), 7);
+        assert_eq!(lab.graph().modules().len(), 7);
+        assert_eq!(lab.graph().nodes().len(), 23);
+        assert_eq!(lab.source_nodes()[3], lab.model.source("p").unwrap().0);
+        assert_eq!(lab.source_nodes()[4], lab.model.source("q").unwrap().0);
+        assert_eq!(lab.model.outputs().len(), 3);
+        let compiler = verineural::ArchitectureAutoCompiler::new(
+            LeanProofEngine::default(),
+            GpuEngine::default(),
+        );
+        let plan = lab.model.plan(&compiler, verineural::GpuRequirement::AllOutputs).unwrap();
+        assert_eq!(plan.outputs.len(), 3);
+        assert!(plan.outputs.contains(&lab.output()));
+        assert_eq!(plan.goals.len(), 1);
+        assert_eq!(plan.goals[0].0, "coupled_branch_lower_bound");
+        assert!(plan.goals[0].1.source().contains(
+            "theorem architecture_property_coupled_branch_lower_bound"
+        ));
+        assert!(plan.shared_gpu.is_some());
         assert_eq!(lab.exact_integer_output().unwrap(), [4, 10, 8, 12]);
         let proof = LeanProofEngine::default()
-            .generate_global_nonnegative(&lab.graph, lab.output, &lab.source_nodes)
+            .generate_global_nonnegative(lab.graph(), lab.output(), &lab.source_nodes())
             .unwrap();
         assert!(
             proof
@@ -339,25 +314,25 @@ mod tests {
                 .contains("set_option linter.unusedVariables false")
         );
         let gpu = GpuEngine::default()
-            .compile(&lab.graph, lab.output)
+            .compile(lab.graph(), lab.output)
             .unwrap();
         assert!(!gpu.translation_plan().unwrap().kernels.is_empty());
         let snapshot =
-            verineural::snapshot_architecture(&lab.graph, lab.output, &gpu, &lab.metadata).unwrap();
+            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &lab.metadata()).unwrap();
         assert_eq!(snapshot.dot.matches("subgraph cluster_m").count(), 7);
         assert!(snapshot.dot.contains(r#"vn_role="parameter""#));
         // Module port metadata is stored once per normalized module scope.
         assert_eq!(
             snapshot.dot.matches("vn_input_ports=").count(),
-            lab.graph.modules().len()
+            lab.graph().modules().len()
         );
         assert_eq!(
             snapshot.dot.matches("vn_output_ports=").count(),
-            lab.graph.modules().len()
+            lab.graph().modules().len()
         );
         // The renderer should draw only real IR dependencies. Port identity
         // remains in the cluster label and the explicit typed port mappings.
-        let real_edges: usize = lab.graph.nodes().iter().map(|node| node.inputs.len()).sum();
+        let real_edges: usize = lab.graph().nodes().iter().map(|node| node.inputs.len()).sum();
         assert_eq!(snapshot.dot.matches(" -> ").count(), real_edges);
         assert_eq!(snapshot.dot.matches("vn_semantic_dst=").count(), real_edges);
         // The first boundary module declares x, y and shared parameter p.
@@ -404,6 +379,22 @@ mod tests {
     }
 
     #[test]
+    fn bad_inferred_component_rolls_back_and_preserves_sources() {
+        let mut model = ModelBuilder::new("bad", "1");
+        let x = model.input("x", [1, 3], Domain::NonNegativeFinite).unwrap();
+        let y = model.input("y", [1, 4], Domain::NonNegativeFinite).unwrap();
+        let z = model.input("z", [1, 4], Domain::NonNegativeFinite).unwrap();
+        let p = model.parameter("p", [4], Domain::NonNegativeFinite).unwrap();
+        let q = model.parameter("q", [4], Domain::NonNegativeFinite).unwrap();
+        assert!(matches!(
+            model.block("coupled_field", &[x, y, z, p, q], coupled_field),
+            Err(ModelError::Neural(NeuralError::ShapeMismatch { .. }))
+        ));
+        assert_eq!(model.graph_mut().modules().len(), 0);
+        assert_eq!(model.graph_mut().nodes().len(), 5);
+    }
+
+    #[test]
     fn changed_parameter_must_revalidate_its_contract() {
         let mut lab = build().unwrap();
         let id = lab.inputs[3].0;
@@ -411,7 +402,7 @@ mod tests {
         assert!(
             lab.inputs[3]
                 .1
-                .validate_domain(lab.graph.node(id).unwrap().domain)
+                .validate_domain(lab.graph().node(id).unwrap().domain)
                 .is_err()
         );
         assert!(lab.exact_integer_output().is_err());

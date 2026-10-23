@@ -9,8 +9,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use verineural::{
-    GpuEngine, GpuLaunchConfig, GpuProgram, LeanProgram, LeanProofEngine, Operation, Predicate,
-    ProofGoal, ProofGoalKind, ReluFusion, TranslationPlan, ValueRef, snapshot_architecture,
+    GpuEngine, GpuLaunchConfig, GpuProgram, LeanProgram, LeanProofEngine, ProofGoal, ReluFusion,
+    TranslationPlan, snapshot_architecture,
 };
 
 const FILES: [&str; 18] = [
@@ -75,27 +75,13 @@ fn verify_lean_evidence(
     Ok(())
 }
 
-/// Global ideal-Int relationship involving two independent graph branches.
-fn composition_goal(lab: &coupled_field_lab::Lab) -> Result<ProofGoal, Box<dyn Error>> {
-    let output = lab.graph.node(lab.output)?;
-    if !matches!(output.operation, Operation::Relu) {
-        return Err(failed("coupled field output is not a ReLU").into());
-    }
-    let merge = lab.graph.node(output.inputs[0])?;
-    if !matches!(merge.operation, Operation::Add) || merge.inputs.len() != 2 {
-        return Err(failed("coupled field output is not a two-branch merge").into());
-    }
-    if !matches!(lab.graph.node(merge.inputs[1])?.operation, Operation::Relu) {
-        return Err(failed("merged sibling lacks a proven nonnegative ReLU").into());
-    }
-    Ok(ProofGoal {
-        name: "coupled_branch_lower_bound".into(),
-        output: lab.output,
-        kind: ProofGoalKind::Predicate(Predicate::pointwise_le(
-            ValueRef::Node(merge.inputs[0]),
-            ValueRef::Output,
-        )),
-    })
+/// The lab declares this predicate once in ModelBuilder; consumers must not
+/// reconstruct a potentially different theorem from an ad-hoc graph walk.
+fn composition_goal(lab: &coupled_field_lab::Lab) -> Result<&ProofGoal, Box<dyn Error>> {
+    lab.model
+        .proof_goals()
+        .get("coupled_branch_lower_bound")
+        .ok_or_else(|| failed("missing declared coupled branch proof obligation").into())
 }
 
 fn verified_bundle(
@@ -104,11 +90,11 @@ fn verified_bundle(
     program: &GpuProgram,
     expected: &[i64],
 ) -> Result<(), Box<dyn Error>> {
-    let identity = format!("id={}\nversion={}\n", lab.metadata.id, lab.metadata.version);
+    let identity = format!("id={}\nversion={}\n", lab.metadata().id, lab.metadata().version);
     if fs::read_to_string(root.join("architecture.identity"))? != identity {
         return Err(failed("bundle belongs to another architecture id/version").into());
     }
-    let snapshot = snapshot_architecture(&lab.graph, lab.output, program, &lab.metadata)?;
+    let snapshot = snapshot_architecture(lab.graph(), lab.output(), program, &lab.metadata())?;
     snapshot.verify(root)?;
     if fs::read_to_string(root.join("inputs.bits"))? != lab.inputs_bits()
         || fs::read_to_string(root.join("parameters.bits"))? != lab.parameters_bits()
@@ -123,9 +109,9 @@ fn verified_bundle(
         return Err(failed("saved GPU output differs from exact Int oracle").into());
     }
     let proof = LeanProofEngine::default().generate_global_nonnegative(
-        &lab.graph,
-        lab.output,
-        &lab.source_nodes,
+        lab.graph(),
+        lab.output(),
+        &lab.source_nodes(),
     )?;
     if !proof
         .theorem_names()
@@ -136,7 +122,7 @@ fn verified_bundle(
     }
     verify_lean_evidence(root, "architecture.lean", &proof)?;
     let relational =
-        LeanProofEngine::default().generate_goal(&lab.graph, &composition_goal(lab)?)?;
+        LeanProofEngine::default().generate_goal(lab.graph(), composition_goal(lab)?)?;
     verify_lean_evidence(root, "composition.lean", &relational)?;
     for label in ["baseline", "fused"] {
         let dir = root.join("gpu").join(label);
@@ -157,7 +143,7 @@ fn verified_bundle(
         };
         let original = GpuEngine::default()
             .with_launch_config(GpuLaunchConfig::new(256, fusion)?)
-            .compile(&lab.graph, lab.output)?;
+            .compile(lab.graph(), lab.output())?;
         if original.translation_plan()?.to_text() != saved || original.llvm_ir() != llvm {
             return Err(failed(format!(
                 "{label} code/plan diverged from current Rust graph"
@@ -177,7 +163,7 @@ fn verified_bundle(
          cuda_jit_sass=trusted-not-proven\n\
          parameter_values=explicitly-pinned-in-manifest\n\
          artifact_root=explicit-lab-local\n",
-        lab.metadata.id, lab.metadata.version, snapshot.ir_sha256,
+        lab.metadata().id, lab.metadata().version, snapshot.ir_sha256,
     );
     if fs::read_to_string(root.join("report.txt"))? != report {
         return Err(failed("assurance report mismatch").into());
@@ -215,19 +201,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The independently declared source assumptions are validated for the
     // specific tensor values. The Lean theorem remains conditional.
     for (id, t) in &lab.inputs {
-        t.validate_domain(lab.graph.node(*id)?.domain)?;
+        t.validate_domain(lab.graph().node(*id)?.domain)?;
     }
     let baseline =
         GpuEngine::default().with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Disabled)?);
     let fused = GpuEngine::default()
         .with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Experimental)?);
-    let base_plan = baseline.compile(&lab.graph, lab.output)?;
+    let base_plan = baseline.compile(lab.graph(), lab.output())?;
     if verify {
         verified_bundle(&root, &lab, &base_plan, &expected)?;
         return Ok(());
     }
     fs::create_dir_all(&root)?;
-    let identity = format!("id={}\nversion={}\n", lab.metadata.id, lab.metadata.version);
+    let identity = format!("id={}\nversion={}\n", lab.metadata().id, lab.metadata().version);
     if root.join("architecture.identity").exists()
         && fs::read_to_string(root.join("architecture.identity"))? != identity
     {
@@ -237,9 +223,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _ = fs::remove_file(root.join("SHA256SUMS"));
     let _ = fs::remove_file(root.join("report.txt"));
     let proof = LeanProofEngine::default().generate_global_nonnegative(
-        &lab.graph,
-        lab.output,
-        &lab.source_nodes,
+        lab.graph(),
+        lab.output(),
+        &lab.source_nodes(),
     )?;
     if !proof
         .theorem_names()
@@ -254,9 +240,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(failed("Lean returned no checked theorems").into());
     }
     let relational =
-        LeanProofEngine::default().generate_goal(&lab.graph, &composition_goal(&lab)?)?;
+        LeanProofEngine::default().generate_goal(lab.graph(), composition_goal(&lab)?)?;
     LeanProofEngine::default().verify_certified(&relational, &root.join("composition.lean"))?;
-    let snapshot = snapshot_architecture(&lab.graph, lab.output, &base_plan, &lab.metadata)?;
+    let snapshot = snapshot_architecture(lab.graph(), lab.output(), &base_plan, &lab.metadata())?;
     snapshot.write(&root)?;
     fs::write(root.join("architecture.identity"), identity)?;
     fs::write(root.join("inputs.bits"), lab.inputs_bits())?;
@@ -267,7 +253,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     for (label, engine, program) in [
         ("baseline", &baseline, base_plan.clone()),
-        ("fused", &fused, fused.compile(&lab.graph, lab.output)?),
+        ("fused", &fused, fused.compile(lab.graph(), lab.output())?),
     ] {
         let actual = engine.execute(&program, &lab.inputs, &root.join("gpu").join(label))?;
         if actual
@@ -312,7 +298,7 @@ fn main() -> Result<(), Box<dyn Error>> {
          cuda_jit_sass=trusted-not-proven\n\
          parameter_values=explicitly-pinned-in-manifest\n\
          artifact_root=explicit-lab-local\n",
-            lab.metadata.id, lab.metadata.version, snapshot.ir_sha256
+            lab.metadata().id, lab.metadata().version, snapshot.ir_sha256
         ),
     )?;
     fs::write(root.join("SHA256SUMS"), checksums(&root)?)?;
@@ -335,7 +321,7 @@ mod tests {
     fn stage9_rejects_swapped_lean_source_before_accepting_certificate() {
         let lab = build().unwrap();
         let expected = LeanProofEngine::default()
-            .generate_global_nonnegative(&lab.graph, lab.output, &lab.source_nodes)
+            .generate_global_nonnegative(lab.graph(), lab.output(), &lab.source_nodes())
             .unwrap();
         let root = std::env::temp_dir().join(format!(
             "verineural-stage9-proof-replay-{}-{:?}",
