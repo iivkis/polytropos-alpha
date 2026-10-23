@@ -489,10 +489,6 @@ impl Parameters {
     }
 }
 
-fn tensor(dims: &[usize], values: &[f32]) -> Result<Tensor<f32>, Box<dyn Error>> {
-    Ok(Tensor::new(Shape::new(dims.to_vec())?, values.to_vec())?)
-}
-
 /// Each GPU program is compiled once and replayed with refreshed input/weight
 /// tensors on an explicit nonblocking CUDA Graph stream (VeriNeural's runtime).
 /// Without CUDA/LLVM/Lean dependencies, the appropriate action is an error,
@@ -523,29 +519,29 @@ impl Runner {
         let core = gpu.prepare(
             &core_program,
             &models.core.bind([
-                ("state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-                ("token_bits", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-                ("rotated_weight", tensor(&[WIDTH, WIDTH], &p.cores[0])?),
-                ("bias", tensor(&[WIDTH], &p.core_bias)?),
+                ("state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
+                ("token_bits", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
+                ("rotated_weight", Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?),
+                ("bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
             ])?,
             &workspace.path().join("core"),
         )?;
         let router = gpu.prepare(
             &router_program,
             &models.router.bind([
-                ("dictionary_state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-                ("state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-                ("weights", tensor(&[WIDTH, ACTIONS], &p.router)?),
-                ("bias", tensor(&[ACTIONS], &p.router_bias)?),
+                ("dictionary_state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
+                ("state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
+                ("weights", Tensor::from_slice([WIDTH, ACTIONS], &p.router)?),
+                ("bias", Tensor::from_slice([ACTIONS], &p.router_bias)?),
             ])?,
             &workspace.path().join("router"),
         )?;
         let head = gpu.prepare(
             &head_program,
             &models.head.bind([
-                ("final_state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-                ("weights", tensor(&[WIDTH, 1], &p.head)?),
-                ("bias", tensor(&[1], &[p.head_bias])?),
+                ("final_state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
+                ("weights", Tensor::from_slice([WIDTH, 1], &p.head)?),
+                ("bias", Tensor::from_slice([1], &[p.head_bias])?),
             ])?,
             &workspace.path().join("head"),
         )?;
@@ -564,10 +560,10 @@ impl Runner {
         state: &[f32; WIDTH],
     ) -> Result<[f32; ACTIONS], Box<dyn Error>> {
         let values = self.models.router.bind([
-            ("dictionary_state", tensor(&[1, WIDTH], dict)?),
-            ("state", tensor(&[1, WIDTH], state)?),
-            ("weights", tensor(&[WIDTH, ACTIONS], &p.router)?),
-            ("bias", tensor(&[ACTIONS], &p.router_bias)?),
+            ("dictionary_state", Tensor::from_slice([1, WIDTH], dict)?),
+            ("state", Tensor::from_slice([1, WIDTH], state)?),
+            ("weights", Tensor::from_slice([WIDTH, ACTIONS], &p.router)?),
+            ("bias", Tensor::from_slice([ACTIONS], &p.router_bias)?),
         ])?;
         self.router.update_inputs(&values)?;
         self.router.replay()?;
@@ -589,10 +585,10 @@ impl Runner {
         let (core, turn) = route_parts(action)?;
         let rotated = rotate(&p.cores[core], turn)?;
         let values = self.models.core.bind([
-            ("state", tensor(&[1, WIDTH], state)?),
-            ("token_bits", tensor(&[1, WIDTH], &Dictionary::bits(token))?),
-            ("rotated_weight", tensor(&[WIDTH, WIDTH], &rotated)?),
-            ("bias", tensor(&[WIDTH], &p.core_bias)?),
+            ("state", Tensor::from_slice([1, WIDTH], state)?),
+            ("token_bits", Tensor::from_slice([1, WIDTH], &Dictionary::bits(token))?),
+            ("rotated_weight", Tensor::from_slice([WIDTH, WIDTH], &rotated)?),
+            ("bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
         ])?;
         self.core.update_inputs(&values)?;
         self.core.replay()?;
@@ -610,9 +606,9 @@ impl Runner {
 
     fn readout(&mut self, p: &Parameters, state: &[f32; WIDTH]) -> Result<f32, Box<dyn Error>> {
         let values = self.models.head.bind([
-            ("final_state", tensor(&[1, WIDTH], state)?),
-            ("weights", tensor(&[WIDTH, 1], &p.head)?),
-            ("bias", tensor(&[1], &[p.head_bias])?),
+            ("final_state", Tensor::from_slice([1, WIDTH], state)?),
+            ("weights", Tensor::from_slice([WIDTH, 1], &p.head)?),
+            ("bias", Tensor::from_slice([1], &[p.head_bias])?),
         ])?;
         self.head.update_inputs(&values)?;
         self.head.replay()?;

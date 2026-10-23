@@ -117,6 +117,8 @@ fn operation_title(operation: &Operation) -> &'static str {
         Operation::Reshape(_) => "Reshape",
         Operation::Pointwise(_) => "User-defined pointwise",
         Operation::ReduceSum { .. } => "Reduce sum",
+        Operation::ReduceMax { .. } => "Reduce max",
+        Operation::BroadcastTo(_) => "Broadcast",
         Operation::Permute { .. } => "Permute",
         Operation::ReverseAxis { .. } => "Reverse axis",
         Operation::Concat { .. } => "Concat",
@@ -578,7 +580,7 @@ pub fn snapshot_architecture(
                 (
                     "vn_reduction_axis",
                     match node.operation {
-                        Operation::ReduceSum { axis } => axis.to_string(),
+                        Operation::ReduceSum { axis } | Operation::ReduceMax { axis } => axis.to_string(),
                         _ => String::new(),
                     },
                 ),
@@ -586,6 +588,7 @@ pub fn snapshot_architecture(
                     "vn_axis",
                     match node.operation {
                         Operation::ReduceSum { axis }
+                        | Operation::ReduceMax { axis }
                         | Operation::ReverseAxis { axis }
                         | Operation::Concat { axis }
                         | Operation::ArgMax { axis, .. }
@@ -774,6 +777,8 @@ pub fn snapshot_architecture(
                 Operation::BiasAdd if port == 1 => "row-wise-broadcast",
                 Operation::Reshape(_) => "zero-copy-reshape",
                 Operation::Permute { .. } => "axis-permutation",
+                Operation::BroadcastTo(_) => "explicit-broadcast",
+                Operation::ReduceMax { .. } => "axis-reduction-max",
                 Operation::ReverseAxis { .. } => "axis-reversal",
                 Operation::Concat { .. } => "axis-concatenation",
                 Operation::ArgMax { .. } => "argmax-indexing",
@@ -991,7 +996,7 @@ pub(crate) fn auto_architecture_dot(
                 (
                     "vn_reduction_axis",
                     match node.operation {
-                        Operation::ReduceSum { axis } => axis.to_string(),
+                        Operation::ReduceSum { axis } | Operation::ReduceMax { axis } => axis.to_string(),
                         _ => String::new(),
                     },
                 ),
@@ -999,6 +1004,7 @@ pub(crate) fn auto_architecture_dot(
                     "vn_axis",
                     match node.operation {
                         Operation::ReduceSum { axis }
+                        | Operation::ReduceMax { axis }
                         | Operation::ReverseAxis { axis }
                         | Operation::Concat { axis }
                         | Operation::ArgMax { axis, .. }
@@ -1162,6 +1168,8 @@ pub(crate) fn auto_architecture_dot(
                 Operation::BiasAdd if port == 1 => "row-wise-broadcast",
                 Operation::Reshape(_) => "zero-copy-reshape",
                 Operation::Permute { .. } => "axis-permutation",
+                Operation::BroadcastTo(_) => "explicit-broadcast",
+                Operation::ReduceMax { .. } => "axis-reduction-max",
                 Operation::ReverseAxis { .. } => "axis-reversal",
                 Operation::Concat { .. } => "axis-concatenation",
                 Operation::ArgMax { .. } => "argmax-indexing",

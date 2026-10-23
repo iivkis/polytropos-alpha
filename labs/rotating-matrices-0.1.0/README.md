@@ -72,29 +72,15 @@ task certify-lab-rotating
 # Fail-closed probe, пока structural/indexing P0 не имеет GPU lowering
 ```
 
-`artifacts/` — **единственная папка выходных данных лаборатории; не игнорируется Git**.
-Evidence строится от одного `architecture_model()` и содержит один набор
-архитектурных файлов, а не отдельные сертификаты router/core/head:
+Потребитель теперь использует `Tensor::from_slice` вместо собственного helper.
 
-```text
-artifacts/
-├── semantic.ir
-├── architecture.lean
-├── architecture.dot
-├── architecture.png
-├── architecture.audit.txt
-├── architecture.graph.ll
-├── architecture.graph.ptx
-├── architecture.translation.plan
-├── architecture.translation.report
-├── certification.txt
-├── identity.txt
-├── SHA256SUMS
-├── inspect.txt
-└── training-report.txt
-```
-
-`inspect.semantic.ir` — диагностический экспорт и не входит в certified SHA bundle.
+`artifacts/inspect.txt`, `artifacts/inspect.semantic.ir` и `artifacts/training-report.txt`
+остаются диагностикой/результатами лаборатории. Stage 10 публикует единый
+сертифицируемый bundle в `artifacts/certified/auto-build/` с собственными
+`SHA256SUMS`, `identity.txt`, Lean, PTX, DOT/PNG и manifest. Лаборатория
+не копирует файлы из bundle вручную и не пересчитывает SHA-256 сама.
+До появления P0 GPU lowering `--certify-architecture` отклоняется и не
+выдаёт успешного сертификата. Это намеренно.
 
 `architecture.png` рендерится VeriNeural/Graphviz именно из сохранённого
 `architecture.dot`. Общий Lean генерируется из объединённого Semantic Neural IR,

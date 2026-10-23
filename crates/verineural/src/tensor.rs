@@ -89,6 +89,30 @@ impl<T, S: TensorShape> Tensor<T, S> {
     }
 }
 
+impl<T> Tensor<T> {
+    /// Construct a tensor without creating a Shape separately.
+    pub fn from_vec(dims: impl Into<Vec<usize>>, values: Vec<T>) -> Result<Self, NeuralError> {
+        Self::new(Shape::new(dims)?, values)
+    }
+
+    /// Copy borrowed values into a shape-validated tensor.
+    pub fn from_slice(dims: impl Into<Vec<usize>>, values: &[T]) -> Result<Self, NeuralError>
+    where
+        T: Clone,
+    {
+        Self::from_vec(dims, values.to_vec())
+    }
+
+    /// Create a tensor filled with T::default(), zero for numeric types.
+    pub fn zeros(dims: impl Into<Vec<usize>>) -> Result<Self, NeuralError>
+    where
+        T: Default + Clone,
+    {
+        let shape = Shape::new(dims)?;
+        Self::new(shape.clone(), vec![T::default(); shape.element_count()])
+    }
+}
+
 impl<T: Clone> Tensor<T> {
     /// Reorder axes in row-major order. `axes[output_axis] = input_axis`.
     pub fn permute(&self, axes: &[usize]) -> Result<Self, NeuralError> {
@@ -104,6 +128,22 @@ impl<T: Clone> Tensor<T> {
                 input_coords[input_axis] = output_coords[output_axis];
             }
             values.push(self.values[ravel_index(&input_coords, self.shape.dims())].clone());
+        }
+        Self::new(shape, values)
+    }
+
+    /// Explicit right-aligned broadcast; singleton input axes repeat.
+    pub fn broadcast_to(&self, output: Shape) -> Result<Self, NeuralError> {
+        let op = Operation::BroadcastTo(output);
+        let shape = op.infer_shape(std::slice::from_ref(&self.shape))?;
+        let offset = shape.rank() - self.shape.rank();
+        let mut values = Vec::with_capacity(shape.element_count());
+        for index in 0..shape.element_count() {
+            let out = unravel_index(index, shape.dims());
+            let coords = self.shape.dims().iter().enumerate().map(|(axis, &width)| {
+                if width == 1 { 0 } else { out[offset + axis] }
+            }).collect::<Vec<_>>();
+            values.push(self.values[ravel_index(&coords, self.shape.dims())].clone());
         }
         Self::new(shape, values)
     }
@@ -213,6 +253,23 @@ impl Tensor<f32> {
             .map(|(&a, &b)| a * b)
             .collect();
         Self::new(shape, values)
+    }
+
+    /// Elementwise subtraction, without implicit broadcasting.
+    pub fn sub(&self, rhs: &Self) -> Result<Self, NeuralError> {
+        let shape = Operation::Add.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
+        Self::new(shape, self.values.iter().zip(&rhs.values).map(|(&a, &b)| a - b).collect())
+    }
+
+    /// Elementwise division (including IEEE NaN/inf on zero denominator).
+    pub fn div(&self, rhs: &Self) -> Result<Self, NeuralError> {
+        let shape = Operation::Mul.infer_shape(&[self.shape.clone(), rhs.shape.clone()])?;
+        Self::new(shape, self.values.iter().zip(&rhs.values).map(|(&a, &b)| a / b).collect())
+    }
+
+    /// Elementwise exponential. Host f32 reference, not certified.
+    pub fn exp(&self) -> Result<Self, NeuralError> {
+        Self::new(self.shape.clone(), self.values.iter().map(|x| x.exp()).collect())
     }
 
     /// Add one rank-1 bias vector to every matrix row.
@@ -354,6 +411,29 @@ impl Tensor<f32> {
                 sum += self.values[(outer * width + lane) * inner + suffix];
             }
             values.push(sum);
+        }
+        Self::new(output_shape, values)
+    }
+
+    /// Deterministic maximum, preserving NaN and taking the first maximum
+    /// on ties. f32 semantics are reference-only until a backend is audited.
+    pub fn reduce_max(&self, axis: usize) -> Result<Self, NeuralError> {
+        let output_shape = Operation::ReduceMax { axis }
+            .infer_shape(std::slice::from_ref(&self.shape))?;
+        let width = self.shape.dims()[axis];
+        let inner = self.shape.dims()[axis + 1..].iter().product::<usize>();
+        let mut values = Vec::with_capacity(output_shape.element_count());
+        for index in 0..output_shape.element_count() {
+            let outer = index / inner;
+            let suffix = index % inner;
+            let mut best = self.values[(outer * width) * inner + suffix];
+            for lane in 1..width {
+                let candidate = self.values[(outer * width + lane) * inner + suffix];
+                if candidate.is_nan() || (!best.is_nan() && candidate > best) {
+                    best = candidate;
+                }
+            }
+            values.push(best);
         }
         Self::new(output_shape, values)
     }

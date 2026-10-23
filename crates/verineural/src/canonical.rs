@@ -52,6 +52,8 @@ fn operation(operation: &Operation) -> String {
             spec.expression().canonical()
         ),
         Operation::ReduceSum { axis } => format!("reduce_sum_axis:{axis}"),
+        Operation::ReduceMax { axis } => format!("reduce_max_axis:{axis}"),
+        Operation::BroadcastTo(output) => format!("broadcast_to:{}", shape(output)),
         Operation::Permute { axes } => format!(
             "permute_axes:{}",
             axes.iter()

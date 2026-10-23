@@ -73,6 +73,10 @@ P0-срез структурной тензорной маршрутизации
 
 Полный пример с пользовательским `NeuralModule` и `MathContract` находится в [examples/stage2_graph.rs](crates/verineural/examples/stage2_graph.rs).
 
+## P2: композиция низкоуровневой арифметики
+
+`Tensor::from_vec/from_slice/zeros` убирают повторяющиеся конструкции Shape/Tensor. `NeuralGraph::sub/div/exp/reduce_max/broadcast_to` позволяют собрать softmax-подобный граф потребителем, без нового фундаментального `Softmax`. Для `sub/div/exp` используется единый canonical `PointwiseSpec` AST. Новые операции имеют row-major CPU reference, shape/domain проверки и **явно unsupported** Lean ideal-Int/GPU lowering. Пример проверки: `cargo test -p verineural --test p2_primitives`. Сертифицированными NVIDIA FP32 операциями этот срез не объявляется.
+
 ## P1: явный state и именованный GPU runtime
 
 ModelBuilder::state/next_state определяют переход без скрытых side effects в IR, а block_multi возвращает именованные порты. GpuEngine::prepare_model создаёт единый CUDA Graph. ModelExecution::set_input, set_parameter и set_state обновляют только соответствующие входные буферы, run исполняет чистый шаг, step применяет device-to-device обратную связь, а output/state позволяют прочитать результат. GPU/FP32/SASS формально не сертифицированы; structural P0 операции остаются GPU unsupported.

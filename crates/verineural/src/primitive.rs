@@ -135,6 +135,9 @@ pub enum PointwiseExpr {
     Input(usize),
     Add(Box<Self>, Box<Self>),
     Mul(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+    Div(Box<Self>, Box<Self>),
+    Exp(Box<Self>),
     Relu(Box<Self>),
 }
 
@@ -153,8 +156,18 @@ impl PointwiseExpr {
         Self::Mul(Box::new(self), Box::new(rhs))
     }
 
-    pub fn relu(self) -> Self {
-        Self::Relu(Box::new(self))
+    pub fn sub(self, rhs: Self) -> Self { Self::Sub(Box::new(self), Box::new(rhs)) }
+    pub fn div(self, rhs: Self) -> Self { Self::Div(Box::new(self), Box::new(rhs)) }
+    pub fn exp(self) -> Self { Self::Exp(Box::new(self)) }
+    pub fn relu(self) -> Self { Self::Relu(Box::new(self)) }
+
+    pub(crate) fn has_ideal_int_semantics(&self) -> bool {
+        match self {
+            Self::Input(_) => true,
+            Self::Add(a, b) | Self::Mul(a, b) => a.has_ideal_int_semantics() && b.has_ideal_int_semantics(),
+            Self::Relu(a) => a.has_ideal_int_semantics(),
+            Self::Sub(..) | Self::Div(..) | Self::Exp(..) => false,
+        }
     }
 
     fn valid(&self, arity: usize, remaining_depth: usize) -> bool {
@@ -163,10 +176,10 @@ impl PointwiseExpr {
         }
         match self {
             Self::Input(index) => *index < arity,
-            Self::Add(a, b) | Self::Mul(a, b) => {
+            Self::Add(a, b) | Self::Mul(a, b) | Self::Sub(a, b) | Self::Div(a, b) => {
                 a.valid(arity, remaining_depth - 1) && b.valid(arity, remaining_depth - 1)
             }
-            Self::Relu(a) => a.valid(arity, remaining_depth - 1),
+            Self::Relu(a) | Self::Exp(a) => a.valid(arity, remaining_depth - 1),
         }
     }
 
@@ -176,6 +189,9 @@ impl PointwiseExpr {
             Self::Input(port) => format!("arg:{port}"),
             Self::Add(a, b) => format!("add({},{})", a.canonical(), b.canonical()),
             Self::Mul(a, b) => format!("mul({},{})", a.canonical(), b.canonical()),
+            Self::Sub(a, b) => format!("sub({},{})", a.canonical(), b.canonical()),
+            Self::Div(a, b) => format!("div({},{})", a.canonical(), b.canonical()),
+            Self::Exp(a) => format!("exp({})", a.canonical()),
             Self::Relu(a) => format!("relu({})", a.canonical()),
         }
     }
@@ -192,12 +208,18 @@ impl PointwiseExpr {
                 format!("(VeriNeural.mul {} {})", a.lean(input), b.lean(input))
             }
             Self::Relu(a) => format!("(VeriNeural.relu {})", a.lean(input)),
+            Self::Sub(..) | Self::Div(..) | Self::Exp(..) => {
+                unreachable!("unsupported pointwise expression must be rejected before Lean generation")
+            }
         }
     }
 
     /// Independent ideal-Int theorem rule for an unconditional final ReLU.
     /// All other expressions require a different proof rule: fail closed.
     pub(crate) fn nonnegative_lean(&self, input: &impl Fn(usize) -> String) -> Option<String> {
+        if !self.has_ideal_int_semantics() {
+            return None;
+        }
         match self {
             Self::Relu(inner) => Some(format!("VeriNeural.relu_nonnegative {}", inner.lean(input))),
             _ => None,
@@ -209,6 +231,9 @@ impl PointwiseExpr {
             Self::Input(port) => input(*port),
             Self::Add(a, b) => a.evaluate(input) + b.evaluate(input),
             Self::Mul(a, b) => a.evaluate(input) * b.evaluate(input),
+            Self::Sub(a, b) => a.evaluate(input) - b.evaluate(input),
+            Self::Div(a, b) => a.evaluate(input) / b.evaluate(input),
+            Self::Exp(a) => a.evaluate(input).exp(),
             Self::Relu(inner) => {
                 let value = inner.evaluate(input);
                 if value.is_nan() || value > 0.0 {

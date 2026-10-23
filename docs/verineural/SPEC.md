@@ -133,6 +133,14 @@ fn custom_transition(
 
 Это не отдельный IR, не новое GPU-исполнение и не Lean-доказательство без запуска checker. Роли input/parameter пока сохраняются в модели и snapshot metadata, а не как самостоятельные операции IR. Нет изменяемых состояний, общего рекуррентного runtime, встроенного обновления параметров и автоматического доказательства FP32/SASS.
 
+### P2 rotating-matrices: минимальные операции и подготовка consumer (код; локальная приёмка ожидается)
+
+В `Tensor<T>` доступны `from_vec`, `from_slice`, `zeros` с общей `Shape::new`-валидацией. Host f32 reference дополнен `sub/div/exp/reduce_max` и явным правосторонним `broadcast_to`. Rust graph вводит `reduce_max(input, axis)` и `broadcast_to(input, Shape)`; `sub/div/exp` десахарятся в типизированный `PointwiseSpec` AST, в котором сохраняются идентификатор, версия и математическое выражение. Это не готовый softmax, пользователь компонует его из узлов сам.
+
+Shape validation, обязательный `DType::F32`, детерминированная row-major перестановка и canonical IR/DOT видимость покрываются Rust-кодом и тестами. `reduce_max` сохраняет первый максимум, при NaN выдаёт NaN; broadcast повторяет только singleton-оси. Произвольный NumPy-like implicit broadcasting для арифметики не разрешается. `PointwiseExpr::Sub/Div/Exp` **не имеют** модели ideal-Int в Lean: доказательный backend отклоняет их до генерации Lean. `ReduceMax/BroadcastTo` также Lean/GPU unsupported, как и новые pointwise операции на GPU. Никакого фиктивного сертификата/заявления FP32/IEEE equivalence нет. Эти ограничения должны быть сняты отдельным доказуемым вертикальным срезом.
+
+Лаборатория перенесена на `Tensor::from_slice`; повторная публикация certified bundle, SHA-256 и Graphviz остаётся исключительно за Stage 10 (`Model::certify`), без локального `write_architecture_manifest`, ручного SHA/copy. Успех сертификации пока **не ожидается**: P0 structural/index operations всё ещё без GPU lowering.
+
 ### 3.5. P1 state transition и named CUDA Graph replay (API-срез; локальные проверки ожидаются)
 
 `ModelBuilder::state` регистрирует источник с ролью State; `next_state` объявляет один чистый переход с проверкой формы, типа и домена. Эти связи входят в identity и являются самостоятельными IR roots. `block_multi` выводит структурные контракты именованных выходов атомарно, без неявных математических доказательств.

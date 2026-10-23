@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{NeuralError, PointwiseSpec, Shape};
+use crate::{NeuralError, PointwiseExpr, PointwiseSpec, Shape};
 
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -145,6 +145,12 @@ pub enum Operation {
     ReduceSum {
         axis: usize,
     },
+    /// Deterministic maximum along one axis, with first-tie policy.
+    ReduceMax {
+        axis: usize,
+    },
+    /// Right-aligned, singleton-axis broadcasting.
+    BroadcastTo(Shape),
     /// Reorder tensor axes. `axes[output_axis] = input_axis`.
     Permute {
         axes: Vec<usize>,
@@ -184,6 +190,8 @@ impl Operation {
             Self::Reshape(_) => "reshape",
             Self::Pointwise(_) => "pointwise",
             Self::ReduceSum { .. } => "reduce_sum",
+            Self::ReduceMax { .. } => "reduce_max",
+            Self::BroadcastTo(_) => "broadcast_to",
             Self::Permute { .. } => "permute",
             Self::ReverseAxis { .. } => "reverse_axis",
             Self::Concat { .. } => "concat",
@@ -197,9 +205,10 @@ impl Operation {
             Self::Input => 0,
             Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd => 2,
             Self::SelectPositive => 3,
-            Self::Relu | Self::PositiveMask | Self::Sqrt | Self::Reshape(_) => 1,
+            Self::Relu | Self::PositiveMask | Self::Sqrt | Self::Reshape(_) | Self::BroadcastTo(_) => 1,
             Self::Pointwise(spec) => spec.arity(),
             Self::ReduceSum { .. }
+            | Self::ReduceMax { .. }
             | Self::Permute { .. }
             | Self::ReverseAxis { .. }
             | Self::ArgMax { .. } => 1,
@@ -275,7 +284,7 @@ impl Operation {
                 Ok(inputs[0].clone())
             }
             Self::Relu | Self::PositiveMask | Self::Sqrt => Ok(inputs[0].clone()),
-            Self::ReduceSum { axis } => {
+            Self::ReduceSum { axis } | Self::ReduceMax { axis } => {
                 let input = &inputs[0];
                 if *axis >= input.rank() {
                     return Err(NeuralError::InvalidAxis {
@@ -286,6 +295,19 @@ impl Operation {
                 let mut dims = input.dims().to_vec();
                 dims.remove(*axis);
                 Shape::new(dims)
+            }
+            Self::BroadcastTo(output) => {
+                let input = &inputs[0];
+                if input.rank() > output.rank()
+                    || input.dims().iter().rev().zip(output.dims().iter().rev())
+                        .any(|(&source, &target)| source != 1 && source != target)
+                {
+                    return Err(NeuralError::ShapeMismatch {
+                        expected: output.clone(),
+                        actual: input.clone(),
+                    });
+                }
+                Ok(output.clone())
             }
             Self::Permute { axes } => {
                 let input = &inputs[0];
@@ -456,7 +478,8 @@ impl Operation {
                     Domain::Any
                 }
             }
-            Self::Reshape(_) | Self::Permute { .. } | Self::ReverseAxis { .. } => inputs[0],
+            Self::Reshape(_) | Self::BroadcastTo(_) | Self::ReduceMax { .. }
+            | Self::Permute { .. } | Self::ReverseAxis { .. } => inputs[0],
             Self::Concat { .. } => {
                 if inputs
                     .iter()
@@ -1036,6 +1059,40 @@ impl NeuralGraph {
     /// reassociated: both the host reference and ideal Lean semantics fold left.
     pub fn reduce_sum(&mut self, input: NodeId, axis: usize) -> Result<NodeId, NeuralError> {
         self.apply(Operation::ReduceSum { axis }, &[input])
+    }
+
+    pub fn reduce_max(&mut self, input: NodeId, axis: usize) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::ReduceMax { axis }, &[input])
+    }
+
+    pub fn broadcast_to(&mut self, input: NodeId, shape: Shape) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::BroadcastTo(shape), &[input])
+    }
+
+    /// Elementwise subtraction defined as a versioned pointwise AST.
+    pub fn sub(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, NeuralError> {
+        let spec = PointwiseSpec::new(
+            "verineural.sub", "1", 2,
+            PointwiseExpr::input(0).sub(PointwiseExpr::input(1)),
+        )?;
+        spec.apply(self, &[a, b])
+    }
+
+    /// Elementwise division: IEEE f32 host reference, ideal-Int proof unsupported.
+    pub fn div(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, NeuralError> {
+        let spec = PointwiseSpec::new(
+            "verineural.div", "1", 2,
+            PointwiseExpr::input(0).div(PointwiseExpr::input(1)),
+        )?;
+        spec.apply(self, &[a, b])
+    }
+
+    /// Elementwise natural exponential: host reference only, GPU/proof unsupported.
+    pub fn exp(&mut self, input: NodeId) -> Result<NodeId, NeuralError> {
+        let spec = PointwiseSpec::new(
+            "verineural.exp", "1", 1, PointwiseExpr::input(0).exp(),
+        )?;
+        spec.apply(self, &[input])
     }
 
     pub fn permute(&mut self, input: NodeId, axes: &[usize]) -> Result<NodeId, NeuralError> {
