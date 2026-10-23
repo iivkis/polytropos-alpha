@@ -280,7 +280,7 @@ tasks:
     cmds:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --inspect
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --train 128
-      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-primitives
+      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-architecture
 
   inspect-lab-rotating:
     desc: Inspect rotating cores and export Semantic IR without GPU or Lean
@@ -301,7 +301,7 @@ tasks:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --train {{.CLI_ARGS}}
 
   certify-lab-rotating:
-    desc: Lean kernel proof and NVPTX translation of local core/router/head graphs (not full recurrence)
+    desc: Build one architecture Lean/DOT/PNG and shared NVPTX evidence bundle
     deps: [prepare]
     cmds:
-      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-primitives
+      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-architecture

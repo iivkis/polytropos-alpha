@@ -1,20 +1,57 @@
 //! Run with `task lab-rotating` or `task train-lab-rotating -- <updates>`.
 use rotating_matrices_lab::{
-    ACTIONS, Architectures, ArtifactWorkspace, Dataset, Dictionary, OP_COUNT, Parameters, Rng,
-    Runner, TrainingConfig, constant_baseline, evaluate, evaluate_with_route, operation, train,
+    ACTIONS, ArtifactWorkspace, Dataset, Dictionary, OP_COUNT, Parameters, Rng, Runner,
+    TrainingConfig, architecture_model, constant_baseline, evaluate, evaluate_with_route,
+    operation, train,
 };
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use verineural::CertifiedBuildConfig;
+
+const ARCHITECTURE_FILES: [&str; 11] = [
+    "semantic.ir",
+    "architecture.lean",
+    "architecture.dot",
+    "architecture.png",
+    "architecture.audit.txt",
+    "architecture.graph.ll",
+    "architecture.graph.ptx",
+    "architecture.translation.plan",
+    "architecture.translation.report",
+    "certification.txt",
+    "identity.txt",
+];
+
+fn sha256(path: &Path) -> Result<String, Box<dyn Error>> {
+    let output = Command::new("sha256sum").arg(path).output()?;
+    if !output.status.success() {
+        return Err(format!("sha256sum failed for {}", path.display()).into());
+    }
+    let text = String::from_utf8(output.stdout)?;
+    let digest = text.split_whitespace().next().unwrap_or("");
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("invalid SHA-256 for {}", path.display()).into());
+    }
+    Ok(digest.to_owned())
+}
+
+fn write_architecture_manifest(root: &Path) -> Result<(), Box<dyn Error>> {
+    let mut manifest = String::new();
+    for name in ARCHITECTURE_FILES {
+        manifest.push_str(&format!("{}  {name}\n", sha256(&root.join(name))?));
+    }
+    fs::write(root.join("SHA256SUMS"), manifest)?;
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "--inspect".into());
     let data = Dataset::new();
     let dictionary = Dictionary::fit(&data.train);
-    let architectures = Architectures::new()?;
+    let architecture = architecture_model()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts");
 
     match mode.as_str() {
@@ -38,18 +75,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 data.validation.len()
             ));
             fs::create_dir_all(&root)?;
-            for (name, graph) in [
-                ("core", architectures.core.graph()),
-                ("router", architectures.router.graph()),
-                ("head", architectures.head.graph()),
-            ] {
-                println!("{name}: {} Semantic IR nodes", graph.nodes().len());
-                inspect.push_str(&format!(
-                    "{name}: {} Semantic IR nodes\n",
-                    graph.nodes().len()
-                ));
-                fs::write(root.join(format!("{name}.ir")), graph.canonical_ir())?;
-            }
+            println!(
+                "architecture: {} Semantic IR nodes, {} modules, {} outputs",
+                architecture.graph().nodes().len(),
+                architecture.graph().modules().len(),
+                architecture.outputs().len()
+            );
+            inspect.push_str(&format!(
+                "architecture: {} Semantic IR nodes, {} modules, {} outputs\n",
+                architecture.graph().nodes().len(),
+                architecture.graph().modules().len(),
+                architecture.outputs().len()
+            ));
+            fs::write(root.join("semantic.ir"), architecture.graph().canonical_ir())?;
             for &(op, a, b) in &[(0, 10, 9), (3, 1, 0)] {
                 let case = operation(op, a, b)?;
                 println!("x={:?} y={}", case.text, case.target);
@@ -61,78 +99,75 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
             fs::write(root.join("inspect.txt"), inspect)?;
         }
-        "--certify-primitives" => {
-            // Three independent certified bundles remain intact *inside*
-            // three .tar files, so SHA256SUMS and local relative symlinks are
-            // still verifiable after extraction. No persistent subdirectories.
-            // This does NOT certify rotation, selection, recurrence or training.
+        "--certify-architecture" => {
+            // One Model -> one Semantic IR -> one Lean -> one DOT -> one PNG.
+            // Host argmax/rotation and the unbounded recurrence remain explicit
+            // trust boundaries instead of being mislabeled as certified.
             let workspace = ArtifactWorkspace::new()?;
-            let staged = workspace.path().join("flat");
-            fs::create_dir_all(&staged)?;
-            for (name, model) in [
-                ("core", &architectures.core),
-                ("router", &architectures.router),
-                ("head", &architectures.head),
-            ] {
-                let folder = format!("certified-{name}");
-                let path = workspace.path().join(&folder);
-                model.certify(CertifiedBuildConfig::new(&path))?;
-                let archive = staged.join(format!("{name}.certified.tar"));
-                let status = Command::new("tar")
-                    .args([
-                        "--sort=name",
-                        "--mtime=@0",
-                        "--owner=0",
-                        "--group=0",
-                        "--numeric-owner",
-                        "-cf",
-                    ])
-                    .arg(&archive)
-                    .arg("-C")
-                    .arg(workspace.path())
-                    .arg(&folder)
-                    .status()?;
-                if !status.success() {
-                    return Err(format!("tar failed for certified model {name}").into());
-                }
-                let bundle = path.join("auto-build");
-                for (source, extension) in [
-                    ("semantic.ir", "certified.ir"),
-                    ("architecture.dot", "dot"),
-                    ("architecture.png", "png"),
-                    ("lean/architecture.lean", "lean"),
-                    ("lean/audit.txt", "audit.txt"),
-                    ("report.txt", "certification.txt"),
-                ] {
-                    fs::copy(
-                        bundle.join(source),
-                        staged.join(format!("{name}.{extension}")),
-                    )?;
-                }
-                println!(
-                    "Certified primitive graph: {name} ({} in archive)",
-                    archive.display()
-                );
+            let certified_root = workspace.path().join("certified");
+            architecture.certify(CertifiedBuildConfig::new(&certified_root))?;
+            let bundle = certified_root.join("auto-build");
+            let shared_gpu = bundle.join("gpu_shared");
+            if !shared_gpu.is_dir() {
+                return Err("unified architecture did not produce shared GPU lowering".into());
             }
-            // Do not publish partial certificates if one of the three fails.
+
+            let staged = workspace.path().join("published");
+            fs::create_dir_all(&staged)?;
+            for (source, destination) in [
+                ("semantic.ir", "semantic.ir"),
+                ("architecture.dot", "architecture.dot"),
+                ("architecture.png", "architecture.png"),
+                ("lean/architecture.lean", "architecture.lean"),
+                ("lean/audit.txt", "architecture.audit.txt"),
+                ("report.txt", "certification.txt"),
+                ("identity.txt", "identity.txt"),
+            ] {
+                fs::copy(bundle.join(source), staged.join(destination))?;
+            }
+            for (source, destination) in [
+                ("graph.ll", "architecture.graph.ll"),
+                ("graph.ptx", "architecture.graph.ptx"),
+                ("translation.plan", "architecture.translation.plan"),
+                ("translation.report", "architecture.translation.report"),
+            ] {
+                fs::copy(shared_gpu.join(source), staged.join(destination))?;
+            }
+            if fs::metadata(staged.join("architecture.png"))?.len() == 0 {
+                return Err("architecture.png is empty".into());
+            }
+            write_architecture_manifest(&staged)?;
+
             fs::create_dir_all(&root)?;
+            for entry in fs::read_dir(&root)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("core.")
+                    || name.starts_with("router.")
+                    || name.starts_with("head.")
+                    || matches!(
+                        name.as_ref(),
+                        "core" | "router" | "head" | "gpu" | "certified-core"
+                            | "certified-router" | "certified-head"
+                    )
+                {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        fs::remove_dir_all(path)?;
+                    } else {
+                        fs::remove_file(path)?;
+                    }
+                }
+            }
             for entry in fs::read_dir(&staged)? {
                 let entry = entry?;
                 fs::copy(entry.path(), root.join(entry.file_name()))?;
             }
-            // Remove exactly the legacy generated directories only after all
-            // three new proof archives have been published successfully.
-            for name in [
-                "gpu",
-                "certified-core",
-                "certified-router",
-                "certified-head",
-            ] {
-                let legacy = root.join(name);
-                if legacy.exists() {
-                    fs::remove_dir_all(&legacy)?;
-                }
-            }
+            println!(
+                "Certified one architecture bundle: {}",
+                root.join("architecture.lean").display()
+            );
         }
         "--train" => {
             let updates = match args.next() {
@@ -140,7 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None => TrainingConfig::default().updates,
             };
             let mut parameters = Parameters::new(0x51A7_E5);
-            let mut runner = Runner::new(&root, &parameters)?;
+            let mut runner = Runner::new(&parameters)?;
             let baseline = evaluate(
                 &mut runner,
                 &parameters,
@@ -279,7 +314,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         _ => {
             return Err(format!(
-                "unknown mode {mode}; use --inspect, --train [updates] or --certify-primitives"
+                "unknown mode {mode}; use --inspect, --train [updates] or --certify-architecture"
             )
             .into());
         }

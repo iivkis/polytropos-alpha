@@ -60,7 +60,7 @@ task lab-rotating
 # Полный запуск: inspect, train 128 updates, certify; нужен GPU + Lean
 
 task inspect-lab-rotating
-# Только inspect: схема, формы, словарь и три semantic IR без GPU/Lean
+# Только inspect: схема, формы, словарь и единый semantic.ir без GPU/Lean
 
 task test-lab-rotating
 # Разработчик локально запускает CPU-only тесты
@@ -69,19 +69,44 @@ task train-lab-rotating -- 128
 # Требует NVPTX llc и NVIDIA CUDA Graph; нет тихого CPU fallback
 
 task certify-lab-rotating
-# Lean + NVPTX: сертификаты трёх *локальных* вычислительных графов
+# Один architecture.lean + architecture.dot + architecture.png + общий NVPTX
 ```
 
 `artifacts/` — **единственная папка выходных данных лаборатории; не игнорируется Git**.
-Она создаётся при запуске и должна попадать в коммит вместе с кодом.
-Файлы лежат непосредственно в ней, без `gpu/core`, `certified-core` и других
-подкаталогов: `inspect.txt`, `core.ir`, `router.ir`, `head.ir`,
-`core.graph.ptx`, `router.graph.ptx`, `head.graph.ptx`,
-`core.certified.tar`, `router.certified.tar`, `head.certified.tar`,
-`core.dot`, `router.dot`, `head.dot`, соответствующие PNG/Lean и отчёты.
-Три tar-файла сохраняют неизменённую внутреннюю структуру сертифицирующего
-VeriNeural bundle и его SHA256SUMS для последующего аудита; временные
-рабочие каталоги автоматически удаляются. Внешний `tar` определён в Nix.
+Evidence строится от одного `architecture_model()` и содержит один набор
+архитектурных файлов, а не отдельные сертификаты router/core/head:
+
+```text
+artifacts/
+├── semantic.ir
+├── architecture.lean
+├── architecture.dot
+├── architecture.png
+├── architecture.audit.txt
+├── architecture.graph.ll
+├── architecture.graph.ptx
+├── architecture.translation.plan
+├── architecture.translation.report
+├── certification.txt
+├── identity.txt
+├── SHA256SUMS
+├── inspect.txt
+└── training-report.txt
+```
+
+`architecture.png` рендерится VeriNeural/Graphviz именно из сохранённого
+`architecture.dot`. Общий Lean генерируется из объединённого Semantic Neural IR,
+в котором присутствуют router logits, recurrent transition и terminal readout.
+Runtime может исполнять части раздельно для последовательного CUDA Graph replay,
+но это не превращает их в три разные архитектуры.
+
+Текущая честная граница: `selected_rotated_weight` в общем IR является явным
+параметром. Преобразование router logits → `(core_id, rotate)`, поворот одной
+из двух канонических 64×64 матриц и повторение recurrent transition по
+произвольной длине строки пока выполняются host-кодом и не объявляются
+Lean/GPU-сертифицированной частью общей архитектуры. Для закрытия этой границы
+VeriNeural нужны архитектурно-нейтральные IR-примитивы argmax/selection и
+permutation/rotation с GPU+Lean lowering.
 
 Для публикации реальных результатов после запуска:
 
@@ -106,11 +131,12 @@ git push origin dev
 * Ядра выполняются через `GpuEngine::prepare` + `GpuExecution::update_inputs` /
   `replay` / `read_output`, то есть VeriNeural CUDA Graph. Нет собственного
   CUDA kernel и второго CPU forward.
-* `ModelBuilder` описывает три универсальных вычислительных графа:
-  `recurrent_transition`, `routing_logits`, `scalar_readout`.
-* Только `h_next ≥ 0` идеальной `Int` модели задан как Lean `ProofGoal`.
-  `certify-primitives` может подтвердить локальные доказательства **после
-  фактического запуска Lean checker** и LLVM/PTX lowering.
+* Runtime использует три переиспользуемых исполнения, но evidence-модель одна:
+  `architecture_model()` содержит `routing_logits`,
+  `routed_recurrent_transition` и `terminal_scalar_readout` в одном IR.
+* `architecture.lean` kernel-check'ит определения, формы и локальную семантику
+  объединённого поддерживаемого графа. Глобальная теорема корректности
+  маршрутизации и произвольного recurrent loop пока не заявлена.
 * Дискретный `argmax`/sampling маршрутизатора и поворот базовой матрицы
   выполняются на host как **неверифицированные** преобразования привязанных
   данных. Последовательное состояние передаётся между запусками CUDA Graph;

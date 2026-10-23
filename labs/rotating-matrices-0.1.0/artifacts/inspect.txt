@@ -1,9 +1,0 @@
-two canonical 64x64 cores, R0/R90/R180/R270 => 8 actions
-UTF-8 byte vocabulary=26 (train-only)
-40 operations; train=8160 validation=2080
-core: 8 Semantic IR nodes
-router: 7 Semantic IR nodes
-head: 5 Semantic IR nodes
-x="10 + 9" y=19
-x="1 AND 0" y=0
-Only inspect/IR export performed; no Lean check, GPU run or training.

@@ -1,8 +1,0 @@
-verineural-semantic-ir-v2
-policy=rounding=nearest_ties_to_even,fma=separate_operations,subnormals=preserve,reduction=left_to_right
-node=0;op=input;inputs=-;shape=1x64;domain=nonnegative_finite;requires=-;ensures=1x64@nonnegative_finite;claims=-;ideal=input;gpu=not_lowered
-node=1;op=input;inputs=-;shape=64x1;domain=finite;requires=-;ensures=64x1@finite;claims=-;ideal=input;gpu=not_lowered
-node=2;op=input;inputs=-;shape=1;domain=finite;requires=-;ensures=1@finite;claims=-;ideal=input;gpu=not_lowered
-node=3;op=matmul;inputs=0,1;shape=1x1;domain=any;requires=1x64@any,64x1@any;ensures=1x1@any;claims=-;ideal=matmul;gpu=not_lowered
-node=4;op=bias_add;inputs=3,2;shape=1x1;domain=any;requires=1x1@any,1@any;ensures=1x1@any;claims=-;ideal=bias_add;gpu=not_lowered
-module=0;kind=single;name=scalar_readout;version=model-block-v1;inputs=0,1,2;body=3..5;outputs=4;input_ports=input_0:1x64@nonnegative_finite,input_1:64x1@finite,input_2:1@finite;output_ports=output:1x1@any!-

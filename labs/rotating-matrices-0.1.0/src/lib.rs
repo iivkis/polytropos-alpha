@@ -11,7 +11,10 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use verineural::{Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError, Shape, Tensor};
+use verineural::{
+    Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph,
+    NodeId, Shape, Tensor,
+};
 
 pub const WIDTH: usize = 64;
 pub const CORES: usize = 2;
@@ -261,6 +264,27 @@ pub fn route_parts(action: usize) -> Result<(usize, usize), LabError> {
     Ok((action / TURNS, action % TURNS))
 }
 
+fn recurrent_transition(
+    g: &mut NeuralGraph,
+    x: &[NodeId],
+) -> Result<NodeId, NeuralError> {
+    let combined = g.add(x[0], x[1])?;
+    let mixed = g.matmul(combined, x[2])?;
+    let shifted = g.bias_add(mixed, x[3])?;
+    g.relu(shifted)
+}
+
+fn routing_logits(g: &mut NeuralGraph, x: &[NodeId]) -> Result<NodeId, NeuralError> {
+    let features = g.add(x[0], x[1])?;
+    let product = g.matmul(features, x[2])?;
+    g.bias_add(product, x[3])
+}
+
+fn scalar_readout(g: &mut NeuralGraph, x: &[NodeId]) -> Result<NodeId, NeuralError> {
+    let projection = g.matmul(x[0], x[1])?;
+    g.bias_add(projection, x[2])
+}
+
 /// One-step recurrent transition. No fixed sequence length is baked into IR.
 /// The caller explicitly rebinds `state` for each next UTF-8 token.
 pub fn core_model() -> Result<Model, ModelError> {
@@ -269,12 +293,11 @@ pub fn core_model() -> Result<Model, ModelError> {
     let token = m.input("token_bits", [1, WIDTH], Domain::NonNegativeFinite)?;
     let w = m.parameter("rotated_weight", [WIDTH, WIDTH], Domain::Finite)?;
     let bias = m.parameter("bias", [WIDTH], Domain::Finite)?;
-    let next = m.block("recurrent_transition", &[state, token, w, bias], |g, x| {
-        let combined = g.add(x[0], x[1])?;
-        let mixed = g.matmul(combined, x[2])?;
-        let shifted = g.bias_add(mixed, x[3])?;
-        g.relu(shifted)
-    })?;
+    let next = m.block(
+        "recurrent_transition",
+        &[state, token, w, bias],
+        recurrent_transition,
+    )?;
     m.output("next_state", next)?;
     m.proof_goal(verineural::ProofGoal::nonnegative(
         "next_state_nonnegative",
@@ -295,11 +318,7 @@ pub fn router_model() -> Result<Model, ModelError> {
     let logits = m.block(
         "routing_logits",
         &[dictionary, state, weights, bias],
-        |g, x| {
-            let features = g.add(x[0], x[1])?;
-            let product = g.matmul(features, x[2])?;
-            g.bias_add(product, x[3])
-        },
+        routing_logits,
     )?;
     m.output("logits", logits)?;
     m.finish()
@@ -311,10 +330,62 @@ pub fn head_model() -> Result<Model, ModelError> {
     let state = m.input("final_state", [1, WIDTH], Domain::NonNegativeFinite)?;
     let weights = m.parameter("weights", [WIDTH, 1], Domain::Finite)?;
     let bias = m.parameter("bias", [1], Domain::Finite)?;
-    let scalar = m.block("scalar_readout", &[state, weights, bias], |g, x| {
-        let projection = g.matmul(x[0], x[1])?;
-        g.bias_add(projection, x[2])
-    })?;
+    let scalar = m.block(
+        "scalar_readout",
+        &[state, weights, bias],
+        scalar_readout,
+    )?;
+    m.output("normalized_result", scalar)?;
+    m.finish()
+}
+
+/// One evidence model for the whole laboratory architecture.
+///
+/// Router, recurrent transition and terminal readout share ONE Semantic Neural IR.
+/// `selected_rotated_weight` is an explicit trust boundary: converting router
+/// logits into (core_id, rotate), rotating a canonical matrix and feeding that
+/// selected view into the step are currently host-orchestrated rather than
+/// falsely represented as proved Semantic Neural IR.
+pub fn architecture_model() -> Result<Model, ModelError> {
+    let mut m = ModelBuilder::new("rotating-matrices", "0.1.0");
+    let dictionary = m.input(
+        "dictionary_state",
+        [1, WIDTH],
+        Domain::NonNegativeFinite,
+    )?;
+    let state = m.input(
+        "recurrent_state",
+        [1, WIDTH],
+        Domain::NonNegativeFinite,
+    )?;
+    let token = m.input("token_bits", [1, WIDTH], Domain::NonNegativeFinite)?;
+
+    let router_weights = m.parameter("router_weights", [WIDTH, ACTIONS], Domain::Finite)?;
+    let router_bias = m.parameter("router_bias", [ACTIONS], Domain::Finite)?;
+    let selected_weight =
+        m.parameter("selected_rotated_weight", [WIDTH, WIDTH], Domain::Finite)?;
+    let core_bias = m.parameter("core_bias", [WIDTH], Domain::Finite)?;
+    let head_weights = m.parameter("head_weights", [WIDTH, 1], Domain::Finite)?;
+    let head_bias = m.parameter("head_bias", [1], Domain::Finite)?;
+
+    let logits = m.block(
+        "routing_logits",
+        &[dictionary, state, router_weights, router_bias],
+        routing_logits,
+    )?;
+    let next_state = m.block(
+        "routed_recurrent_transition",
+        &[state, token, selected_weight, core_bias],
+        recurrent_transition,
+    )?;
+    let scalar = m.block(
+        "terminal_scalar_readout",
+        &[next_state, head_weights, head_bias],
+        scalar_readout,
+    )?;
+
+    m.output("router_logits", logits)?;
+    m.output("next_state", next_state)?;
     m.output("normalized_result", scalar)?;
     m.finish()
 }
@@ -408,7 +479,7 @@ pub struct Runner {
     head: GpuExecution,
 }
 impl Runner {
-    pub fn new(output_dir: &Path, p: &Parameters) -> Result<Self, Box<dyn Error>> {
+    pub fn new(p: &Parameters) -> Result<Self, Box<dyn Error>> {
         let workspace = ArtifactWorkspace::new()?;
         let models = Architectures::new()?;
         let gpu = GpuEngine::default();
@@ -453,23 +524,6 @@ impl Runner {
             ])?,
             &workspace.path().join("head"),
         )?;
-        // VeriNeural keeps PTX in the prepared CUDA module. Copy audited
-        // lowering evidence into ONE flat, Git-trackable lab artifact folder.
-        // The per-program build directories stay only in temporary storage.
-        fs::create_dir_all(output_dir)?;
-        for name in ["core", "router", "head"] {
-            for file in [
-                "graph.ll",
-                "graph.ptx",
-                "translation.plan",
-                "translation.report",
-            ] {
-                fs::copy(
-                    workspace.path().join(name).join(file),
-                    output_dir.join(format!("{name}.{file}")),
-                )?;
-            }
-        }
         Ok(Self {
             models,
             core,
@@ -1002,39 +1056,41 @@ mod tests {
     }
 
     #[test]
-    fn semantic_ir_shapes_and_recurrent_boundary() {
-        let models = Architectures::new().unwrap();
+    fn one_semantic_ir_contains_router_core_and_head() {
+        let model = architecture_model().unwrap();
+        assert_eq!(model.graph().modules().len(), 3);
+        assert_eq!(model.outputs().len(), 3);
         assert_eq!(
-            models
-                .core
+            model
                 .graph()
-                .node(models.core.output("next_state").unwrap())
-                .unwrap()
-                .shape
-                .dims(),
-            &[1, WIDTH]
-        );
-        assert_eq!(
-            models
-                .router
-                .graph()
-                .node(models.router.output("logits").unwrap())
+                .node(model.output("router_logits").unwrap())
                 .unwrap()
                 .shape
                 .dims(),
             &[1, ACTIONS]
         );
         assert_eq!(
-            models
-                .head
+            model
                 .graph()
-                .node(models.head.output("normalized_result").unwrap())
+                .node(model.output("next_state").unwrap())
+                .unwrap()
+                .shape
+                .dims(),
+            &[1, WIDTH]
+        );
+        assert_eq!(
+            model
+                .graph()
+                .node(model.output("normalized_result").unwrap())
                 .unwrap()
                 .shape
                 .dims(),
             &[1, 1]
         );
-        assert!(models.core.graph().canonical_ir().contains("matmul"));
-        assert_eq!(models.core.proof_goals().len(), 1);
+        let ir = model.graph().canonical_ir();
+        assert!(ir.contains("routing_logits"));
+        assert!(ir.contains("routed_recurrent_transition"));
+        assert!(ir.contains("terminal_scalar_readout"));
+        assert_eq!(model.proof_goals().len(), 0);
     }
 }
