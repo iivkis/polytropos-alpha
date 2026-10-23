@@ -135,7 +135,11 @@ impl ComponentBinder<'_> {
         if inputs.len() != contract.requires.len() {
             return Err(self.failed(
                 "inputs",
-                format!("expected {} inputs, received {}", contract.requires.len(), inputs.len()),
+                format!(
+                    "expected {} inputs, received {}",
+                    contract.requires.len(),
+                    inputs.len()
+                ),
                 None,
             ));
         }
@@ -143,7 +147,11 @@ impl ComponentBinder<'_> {
             self.check_input(id, &format!("input_{index}"), required)?;
         }
         self.graph.apply_module(module, inputs).map_err(|source| {
-            self.failed("output", format!("{} postcondition or body", module.name()), Some(source))
+            self.failed(
+                "output",
+                format!("{} postcondition or body", module.name()),
+                Some(source),
+            )
         })
     }
 
@@ -163,9 +171,8 @@ impl ComponentBinder<'_> {
                     return Err(self.failed(name, "duplicate port binding", None));
                 }
             }
-            let id = found.ok_or_else(|| {
-                self.failed(required.name, "missing required port binding", None)
-            })?;
+            let id = found
+                .ok_or_else(|| self.failed(required.name, "missing required port binding", None))?;
             self.check_input(id, required.name, &required.port)?;
             ordered.push(id);
         }
@@ -174,9 +181,15 @@ impl ComponentBinder<'_> {
                 return Err(self.failed(name, "unexpected port binding", None));
             }
         }
-        self.graph.apply_multi_module(module, &ordered).map_err(|source| {
-            self.failed("outputs", format!("{} output postconditions or body", module.name()), Some(source))
-        })
+        self.graph
+            .apply_multi_module(module, &ordered)
+            .map_err(|source| {
+                self.failed(
+                    "outputs",
+                    format!("{} output postconditions or body", module.name()),
+                    Some(source),
+                )
+            })
     }
 
     /// Resolve results by their declared names instead of array positions.
@@ -209,19 +222,21 @@ impl ComponentBinder<'_> {
                 self.check_input(input, &format!("input[{step}]"), &ports[1].port)?;
             }
         }
-        self.graph.scan_fixed(transition, initial_state, inputs).map_err(|source| {
-            self.failed("next_state", "bounded state-transition contract", Some(source))
-        })
+        self.graph
+            .scan_fixed(transition, initial_state, inputs)
+            .map_err(|source| {
+                self.failed(
+                    "next_state",
+                    "bounded state-transition contract",
+                    Some(source),
+                )
+            })
     }
 }
 
 impl ProofGoal {
     /// Make the source assumptions explicit; they are never inferred as facts.
-    pub fn nonnegative(
-        name: impl Into<String>,
-        output: NodeId,
-        assumptions: Vec<NodeId>,
-    ) -> Self {
+    pub fn nonnegative(name: impl Into<String>, output: NodeId, assumptions: Vec<NodeId>) -> Self {
         Self {
             name: name.into(),
             output,
@@ -229,11 +244,7 @@ impl ProofGoal {
         }
     }
 
-    pub fn bounded_above(
-        name: impl Into<String>,
-        lower: NodeId,
-        output: NodeId,
-    ) -> Self {
+    pub fn bounded_above(name: impl Into<String>, lower: NodeId, output: NodeId) -> Self {
         Self {
             name: name.into(),
             output,
@@ -250,10 +261,12 @@ impl ProofGoal {
         graph: &NeuralGraph,
         checker: &LeanProofEngine,
     ) -> Result<LeanProgram, ObligationError> {
-        checker.generate_goal(graph, self).map_err(|source| ObligationError {
-            theorem: format!("architecture_property_{}", self.name),
-            source,
-        })
+        checker
+            .generate_goal(graph, self)
+            .map_err(|source| ObligationError {
+                theorem: format!("architecture_property_{}", self.name),
+                source,
+            })
     }
 
     /// Check the Lean file and its transitive axiom dependencies.
@@ -264,9 +277,11 @@ impl ProofGoal {
         path: &Path,
     ) -> Result<(CheckedLean, LeanAxiomAudit), ObligationError> {
         let program = self.generate_source(graph, checker)?;
-        checker.verify_certified(&program, path).map_err(|source| ObligationError {
-            theorem: format!("architecture_property_{}", self.name),
-            source,
-        })
+        checker
+            .verify_certified(&program, path)
+            .map_err(|source| ObligationError {
+                theorem: format!("architecture_property_{}", self.name),
+                source,
+            })
     }
 }
