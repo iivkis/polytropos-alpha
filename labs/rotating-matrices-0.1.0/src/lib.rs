@@ -10,9 +10,7 @@
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
-use verineural::{
-    Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError, Shape, Tensor,
-};
+use verineural::{Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError, Shape, Tensor};
 
 pub const WIDTH: usize = 64;
 pub const CORES: usize = 2;
@@ -61,7 +59,9 @@ fn root(op: usize, a: u16, b: u16) -> u16 {
 
 pub fn operation(op: usize, a: u16, b: u16) -> Result<Example, LabError> {
     if op >= OP_COUNT || a > 15 || b > 15 {
-        return Err(LabError("operation or operand outside laboratory domain".into()));
+        return Err(LabError(
+            "operation or operand outside laboratory domain".into(),
+        ));
     }
     let (text, target) = if op < ROOT_NAMES.len() {
         (format!("{a} {} {b}", ROOT_NAMES[op]), root(op, a, b))
@@ -86,7 +86,13 @@ pub fn operation(op: usize, a: u16, b: u16) -> Result<Example, LabError> {
             value,
         )
     };
-    Ok(Example { op, a, b, text, target })
+    Ok(Example {
+        op,
+        a,
+        b,
+        text,
+        target,
+    })
 }
 
 /// Hold out operand *pairs* across all 40 operation types. This prevents the
@@ -116,7 +122,9 @@ impl Dataset {
     }
 }
 impl Default for Dataset {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A training-partition byte dictionary, not a text/subword tokenizer.
@@ -130,7 +138,9 @@ impl Dictionary {
     pub fn fit(examples: &[Example]) -> Self {
         let mut counts = [0u32; 256];
         for case in examples {
-            for byte in case.text.bytes() { counts[byte as usize] += 1; }
+            for byte in case.text.bytes() {
+                counts[byte as usize] += 1;
+            }
         }
         let mut bytes = (0..=255u16)
             .filter(|&byte| counts[byte as usize] > 0)
@@ -138,24 +148,40 @@ impl Dictionary {
             .collect::<Vec<_>>();
         bytes.sort_by_key(|&byte| (std::cmp::Reverse(counts[byte as usize]), byte));
         let mut ids = [None; 256];
-        for (index, &byte) in bytes.iter().enumerate() { ids[byte as usize] = Some(index as u16); }
+        for (index, &byte) in bytes.iter().enumerate() {
+            ids[byte as usize] = Some(index as u16);
+        }
         Self { bytes, ids }
     }
 
-    pub fn len(&self) -> usize { self.bytes.len() }
-    pub fn byte_order(&self) -> &[u8] { &self.bytes }
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+    pub fn byte_order(&self) -> &[u8] {
+        &self.bytes
+    }
     pub fn encode(&self, input: &str) -> Result<Vec<u16>, LabError> {
-        input.as_bytes().iter().map(|&byte| self.ids[byte as usize]
-            .ok_or_else(|| LabError(format!("unseen UTF-8 byte 0x{byte:02x}")))).collect()
+        input
+            .as_bytes()
+            .iter()
+            .map(|&byte| {
+                self.ids[byte as usize]
+                    .ok_or_else(|| LabError(format!("unseen UTF-8 byte 0x{byte:02x}")))
+            })
+            .collect()
     }
 
     /// Dictionary state: normalized byte-id histogram hashed into 64 cells.
     /// It is available to the router before token-by-token core execution.
     pub fn state(&self, tokens: &[u16]) -> [f32; WIDTH] {
         let mut state = [0f32; WIDTH];
-        for &token in tokens { state[token as usize % WIDTH] += 1.0; }
+        for &token in tokens {
+            state[token as usize % WIDTH] += 1.0;
+        }
         if !tokens.is_empty() {
-            for value in &mut state { *value /= tokens.len() as f32; }
+            for value in &mut state {
+                *value /= tokens.len() as f32;
+            }
         }
         state
     }
@@ -175,7 +201,9 @@ impl Dictionary {
 /// This binding transformation is testable, but is NOT part of Semantic IR.
 pub fn rotate(matrix: &[f32], turns: usize) -> Result<Vec<f32>, LabError> {
     if matrix.len() != WIDTH * WIDTH || turns >= TURNS {
-        return Err(LabError("invalid rotation: expected 64x64 and turns 0..4".into()));
+        return Err(LabError(
+            "invalid rotation: expected 64x64 and turns 0..4".into(),
+        ));
     }
     let mut rotated = vec![0.0; matrix.len()];
     for r in 0..WIDTH {
@@ -194,7 +222,9 @@ pub fn rotate(matrix: &[f32], turns: usize) -> Result<Vec<f32>, LabError> {
 }
 
 pub fn route_parts(action: usize) -> Result<(usize, usize), LabError> {
-    if action >= ACTIONS { return Err(LabError("router action outside 0..8".into())); }
+    if action >= ACTIONS {
+        return Err(LabError("router action outside 0..8".into()));
+    }
     Ok((action / TURNS, action % TURNS))
 }
 
@@ -213,7 +243,11 @@ pub fn core_model() -> Result<Model, ModelError> {
         g.relu(shifted)
     })?;
     m.output("next_state", next)?;
-    m.proof_goal(verineural::ProofGoal::nonnegative("next_state_nonnegative", next, vec![]))?;
+    m.proof_goal(verineural::ProofGoal::nonnegative(
+        "next_state_nonnegative",
+        next,
+        vec![],
+    ))?;
     m.finish()
 }
 
@@ -225,11 +259,15 @@ pub fn router_model() -> Result<Model, ModelError> {
     let state = m.input("state", [1, WIDTH], Domain::NonNegativeFinite)?;
     let weights = m.parameter("weights", [WIDTH, ACTIONS], Domain::Finite)?;
     let bias = m.parameter("bias", [ACTIONS], Domain::Finite)?;
-    let logits = m.block("routing_logits", &[dictionary, state, weights, bias], |g, x| {
-        let features = g.add(x[0], x[1])?;
-        let product = g.matmul(features, x[2])?;
-        g.bias_add(product, x[3])
-    })?;
+    let logits = m.block(
+        "routing_logits",
+        &[dictionary, state, weights, bias],
+        |g, x| {
+            let features = g.add(x[0], x[1])?;
+            let product = g.matmul(features, x[2])?;
+            g.bias_add(product, x[3])
+        },
+    )?;
     m.output("logits", logits)?;
     m.finish()
 }
@@ -248,10 +286,18 @@ pub fn head_model() -> Result<Model, ModelError> {
     m.finish()
 }
 
-pub struct Architectures { pub core: Model, pub router: Model, pub head: Model }
+pub struct Architectures {
+    pub core: Model,
+    pub router: Model,
+    pub head: Model,
+}
 impl Architectures {
     pub fn new() -> Result<Self, ModelError> {
-        Ok(Self { core: core_model()?, router: router_model()?, head: head_model()? })
+        Ok(Self {
+            core: core_model()?,
+            router: router_model()?,
+            head: head_model()?,
+        })
     }
 }
 
@@ -260,7 +306,9 @@ impl Architectures {
 #[derive(Clone)]
 pub struct Rng(u64);
 impl Rng {
-    pub fn new(seed: u64) -> Self { Self(seed | 1) }
+    pub fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
     pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
@@ -269,8 +317,12 @@ impl Rng {
         self.0 = x;
         x
     }
-    pub fn uniform(&mut self) -> f32 { ((self.next_u64() >> 40) as f32) / 16_777_216.0 }
-    pub fn signed(&mut self) -> f32 { self.uniform() * 2.0 - 1.0 }
+    pub fn uniform(&mut self) -> f32 {
+        ((self.next_u64() >> 40) as f32) / 16_777_216.0
+    }
+    pub fn signed(&mut self) -> f32 {
+        self.uniform() * 2.0 - 1.0
+    }
 }
 
 /// The two canonical matrices own all 8192 weights. Rotated matrices are
@@ -298,8 +350,12 @@ impl Parameters {
         let router = (0..WIDTH * ACTIONS).map(|_| rng.signed() * 0.02).collect();
         let head = std::array::from_fn(|_| rng.signed() * 0.01);
         Self {
-            cores, router, router_bias: [0.0; ACTIONS], head,
-            head_bias: 0.18, core_bias: [0.008; WIDTH],
+            cores,
+            router,
+            router_bias: [0.0; ACTIONS],
+            head,
+            head_bias: 0.18,
+            core_bias: [0.008; WIDTH],
         }
     }
 }
@@ -322,31 +378,61 @@ impl Runner {
     pub fn new(output_dir: &Path, p: &Parameters) -> Result<Self, Box<dyn Error>> {
         let models = Architectures::new()?;
         let gpu = GpuEngine::default();
-        let core_program = gpu.compile(models.core.graph(), models.core.output("next_state").unwrap())?;
-        let router_program = gpu.compile(models.router.graph(), models.router.output("logits").unwrap())?;
-        let head_program = gpu.compile(models.head.graph(), models.head.output("normalized_result").unwrap())?;
-        let core = gpu.prepare(&core_program, &models.core.bind([
-            ("state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-            ("token_bits", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-            ("rotated_weight", tensor(&[WIDTH, WIDTH], &p.cores[0])?),
-            ("bias", tensor(&[WIDTH], &p.core_bias)?),
-        ])?, &output_dir.join("core"))?;
-        let router = gpu.prepare(&router_program, &models.router.bind([
-            ("dictionary_state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-            ("state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-            ("weights", tensor(&[WIDTH, ACTIONS], &p.router)?),
-            ("bias", tensor(&[ACTIONS], &p.router_bias)?),
-        ])?, &output_dir.join("router"))?;
-        let head = gpu.prepare(&head_program, &models.head.bind([
-            ("final_state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
-            ("weights", tensor(&[WIDTH, 1], &p.head)?),
-            ("bias", tensor(&[1], &[p.head_bias])?),
-        ])?, &output_dir.join("head"))?;
-        Ok(Self { models, core, router, head })
+        let core_program = gpu.compile(
+            models.core.graph(),
+            models.core.output("next_state").unwrap(),
+        )?;
+        let router_program = gpu.compile(
+            models.router.graph(),
+            models.router.output("logits").unwrap(),
+        )?;
+        let head_program = gpu.compile(
+            models.head.graph(),
+            models.head.output("normalized_result").unwrap(),
+        )?;
+        let core = gpu.prepare(
+            &core_program,
+            &models.core.bind([
+                ("state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
+                ("token_bits", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
+                ("rotated_weight", tensor(&[WIDTH, WIDTH], &p.cores[0])?),
+                ("bias", tensor(&[WIDTH], &p.core_bias)?),
+            ])?,
+            &output_dir.join("core"),
+        )?;
+        let router = gpu.prepare(
+            &router_program,
+            &models.router.bind([
+                ("dictionary_state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
+                ("state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
+                ("weights", tensor(&[WIDTH, ACTIONS], &p.router)?),
+                ("bias", tensor(&[ACTIONS], &p.router_bias)?),
+            ])?,
+            &output_dir.join("router"),
+        )?;
+        let head = gpu.prepare(
+            &head_program,
+            &models.head.bind([
+                ("final_state", tensor(&[1, WIDTH], &[0.0; WIDTH])?),
+                ("weights", tensor(&[WIDTH, 1], &p.head)?),
+                ("bias", tensor(&[1], &[p.head_bias])?),
+            ])?,
+            &output_dir.join("head"),
+        )?;
+        Ok(Self {
+            models,
+            core,
+            router,
+            head,
+        })
     }
 
-    fn logits(&mut self, p: &Parameters, dict: &[f32; WIDTH], state: &[f32; WIDTH])
-        -> Result<[f32; ACTIONS], Box<dyn Error>> {
+    fn logits(
+        &mut self,
+        p: &Parameters,
+        dict: &[f32; WIDTH],
+        state: &[f32; WIDTH],
+    ) -> Result<[f32; ACTIONS], Box<dyn Error>> {
         let values = self.models.router.bind([
             ("dictionary_state", tensor(&[1, WIDTH], dict)?),
             ("state", tensor(&[1, WIDTH], state)?),
@@ -355,11 +441,21 @@ impl Runner {
         ])?;
         self.router.update_inputs(&values)?;
         self.router.replay()?;
-        Ok(self.router.read_output()?.values().try_into().map_err(|_| LabError("router shape".into()))?)
+        Ok(self
+            .router
+            .read_output()?
+            .values()
+            .try_into()
+            .map_err(|_| LabError("router shape".into()))?)
     }
 
-    fn step(&mut self, p: &Parameters, state: &[f32; WIDTH], token: u16, action: usize)
-        -> Result<[f32; WIDTH], Box<dyn Error>> {
+    fn step(
+        &mut self,
+        p: &Parameters,
+        state: &[f32; WIDTH],
+        token: u16,
+        action: usize,
+    ) -> Result<[f32; WIDTH], Box<dyn Error>> {
         let (core, turn) = route_parts(action)?;
         let rotated = rotate(&p.cores[core], turn)?;
         let values = self.models.core.bind([
@@ -370,7 +466,11 @@ impl Runner {
         ])?;
         self.core.update_inputs(&values)?;
         self.core.replay()?;
-        let next: [f32; WIDTH] = self.core.read_output()?.values().try_into()
+        let next: [f32; WIDTH] = self
+            .core
+            .read_output()?
+            .values()
+            .try_into()
             .map_err(|_| LabError("core shape".into()))?;
         if next.iter().any(|v| !v.is_finite()) {
             return Err(Box::new(LabError("nonfinite recurrent state".into())));
@@ -387,19 +487,36 @@ impl Runner {
         self.head.update_inputs(&values)?;
         self.head.replay()?;
         let value = self.head.read_output()?.values()[0];
-        if !value.is_finite() { return Err(Box::new(LabError("nonfinite readout".into()))); }
+        if !value.is_finite() {
+            return Err(Box::new(LabError("nonfinite readout".into())));
+        }
         Ok(value)
     }
 
-    pub fn forward(&mut self, p: &Parameters, dictionary: &Dictionary, input: &str,
-        rng: &mut Rng, sample_routes: bool) -> Result<Trace, Box<dyn Error>> {
+    pub fn forward(
+        &mut self,
+        p: &Parameters,
+        dictionary: &Dictionary,
+        input: &str,
+        rng: &mut Rng,
+        sample_routes: bool,
+    ) -> Result<Trace, Box<dyn Error>> {
         self.forward_with_route(p, dictionary, input, rng, sample_routes, None)
     }
 
     /// Fixed-action counterfactual for measuring the effect of learned routing.
-    pub fn forward_with_route(&mut self, p: &Parameters, dictionary: &Dictionary, input: &str,
-        rng: &mut Rng, sample_routes: bool, fixed: Option<usize>) -> Result<Trace, Box<dyn Error>> {
-        if let Some(action) = fixed { route_parts(action)?; }
+    pub fn forward_with_route(
+        &mut self,
+        p: &Parameters,
+        dictionary: &Dictionary,
+        input: &str,
+        rng: &mut Rng,
+        sample_routes: bool,
+        fixed: Option<usize>,
+    ) -> Result<Trace, Box<dyn Error>> {
+        if let Some(action) = fixed {
+            route_parts(action)?;
+        }
         let tokens = dictionary.encode(input)?;
         let dict = dictionary.state(&tokens);
         let mut state = [0f32; WIDTH];
@@ -412,19 +529,34 @@ impl Runner {
             };
             let action = fixed.unwrap_or_else(|| choose(&probs, rng, sample_routes));
             let features = std::array::from_fn(|i| dict[i] + state[i]);
-            decisions.push(Decision { action, probs, features });
+            decisions.push(Decision {
+                action,
+                probs,
+                features,
+            });
             state = self.step(p, &state, token, action)?;
         }
         let normalized = self.readout(p, &state)?;
-        Ok(Trace { normalized, state, decisions })
+        Ok(Trace {
+            normalized,
+            state,
+            decisions,
+        })
     }
 
     /// Fixed route trace for common-random-number SPSA core updates. No
     /// duplicated host implementation of the verified transition formula.
-    fn replay_decisions(&mut self, p: &Parameters, dictionary: &Dictionary, input: &str,
-        decisions: &[Decision]) -> Result<f32, Box<dyn Error>> {
+    fn replay_decisions(
+        &mut self,
+        p: &Parameters,
+        dictionary: &Dictionary,
+        input: &str,
+        decisions: &[Decision],
+    ) -> Result<f32, Box<dyn Error>> {
         let tokens = dictionary.encode(input)?;
-        if tokens.len() != decisions.len() { return Err(Box::new(LabError("bad route trace".into()))); }
+        if tokens.len() != decisions.len() {
+            return Err(Box::new(LabError("bad route trace".into())));
+        }
         let mut state = [0f32; WIDTH];
         for (&token, decision) in tokens.iter().zip(decisions) {
             state = self.step(p, &state, token, decision.action)?;
@@ -452,18 +584,26 @@ fn probabilities(logits: &[f32; ACTIONS]) -> [f32; ACTIONS] {
     let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut weights = logits.map(|v| (v - maximum).clamp(-80.0, 0.0).exp());
     let sum: f32 = weights.iter().sum();
-    if !sum.is_finite() || sum == 0.0 { return [1.0 / ACTIONS as f32; ACTIONS]; }
-    for v in &mut weights { *v /= sum; }
+    if !sum.is_finite() || sum == 0.0 {
+        return [1.0 / ACTIONS as f32; ACTIONS];
+    }
+    for v in &mut weights {
+        *v /= sum;
+    }
     weights
 }
 fn choose(probs: &[f32; ACTIONS], rng: &mut Rng, stochastic: bool) -> usize {
     if !stochastic {
-        return (0..ACTIONS).max_by(|&a, &b| probs[a].total_cmp(&probs[b])).unwrap();
+        return (0..ACTIONS)
+            .max_by(|&a, &b| probs[a].total_cmp(&probs[b]))
+            .unwrap();
     }
     let mut sample = rng.uniform();
     for (i, &prob) in probs.iter().enumerate() {
         sample -= prob;
-        if sample <= 0.0 { return i; }
+        if sample <= 0.0 {
+            return i;
+        }
     }
     ACTIONS - 1
 }
@@ -514,16 +654,28 @@ impl Default for Metrics {
     }
 }
 impl Metrics {
-    pub fn accuracy(&self) -> f64 { self.exact as f64 / self.count.max(1) as f64 }
-    pub fn mae(&self) -> f64 { self.absolute_error / self.count.max(1) as f64 }
-    pub fn rmse(&self) -> f64 { (self.squared_error / self.count.max(1) as f64).sqrt() }
+    pub fn accuracy(&self) -> f64 {
+        self.exact as f64 / self.count.max(1) as f64
+    }
+    pub fn mae(&self) -> f64 {
+        self.absolute_error / self.count.max(1) as f64
+    }
+    pub fn rmse(&self) -> f64 {
+        (self.squared_error / self.count.max(1) as f64).sqrt()
+    }
 }
 
 /// Online regression for the scalar head, REINFORCE for the discrete router,
 /// SPSA (common routing trace) for both core matrices. This is an experimental
 /// training rule, not proof of convergence or a library-level optimizer.
-pub fn train(runner: &mut Runner, p: &mut Parameters, data: &Dataset,
-    dict: &Dictionary, config: TrainingConfig, seed: u64) -> Result<(), Box<dyn Error>> {
+pub fn train(
+    runner: &mut Runner,
+    p: &mut Parameters,
+    data: &Dataset,
+    dict: &Dictionary,
+    config: TrainingConfig,
+    seed: u64,
+) -> Result<(), Box<dyn Error>> {
     if data.train.is_empty() || config.spsa_interval == 0 || config.spsa_epsilon <= 0.0 {
         return Err(Box::new(LabError("invalid training configuration".into())));
     }
@@ -534,7 +686,9 @@ pub fn train(runner: &mut Runner, p: &mut Parameters, data: &Dataset,
         let op = iteration % OP_COUNT;
         let a = (rng.next_u64() % 16) as u16;
         let b = (rng.next_u64() % 16) as u16;
-        let case = if (a * 17 + b * 31) % 5 != 0 { operation(op, a, b)? } else {
+        let case = if (a * 17 + b * 31) % 5 != 0 {
+            operation(op, a, b)?
+        } else {
             // Deterministic rejection sampling: never train on a held-out pair.
             let mut found = None;
             for offset in 1..=16u16 {
@@ -554,7 +708,9 @@ pub fn train(runner: &mut Runner, p: &mut Parameters, data: &Dataset,
         // The same perturbation signs affect both trainable 64x64 bases.
         if config.core_lr > 0.0 && iteration % config.spsa_interval == 0 {
             let signs: [Vec<f32>; CORES] = std::array::from_fn(|_| {
-                (0..WIDTH * WIDTH).map(|_| if rng.next_u64() & 1 == 0 { -1.0 } else { 1.0 }).collect()
+                (0..WIDTH * WIDTH)
+                    .map(|_| if rng.next_u64() & 1 == 0 { -1.0 } else { 1.0 })
+                    .collect()
             });
             for core in 0..CORES {
                 for (weight, sign) in p.cores[core].iter_mut().zip(&signs[core]) {
@@ -568,13 +724,14 @@ pub fn train(runner: &mut Runner, p: &mut Parameters, data: &Dataset,
                 }
             }
             let minus = runner.replay_decisions(p, dict, &case.text, &trace.decisions)?;
-            let gradient = ((plus - target).powi(2) - (minus - target).powi(2))
-                / (4.0 * config.spsa_epsilon);
+            let gradient =
+                ((plus - target).powi(2) - (minus - target).powi(2)) / (4.0 * config.spsa_epsilon);
             for core in 0..CORES {
                 for (weight, sign) in p.cores[core].iter_mut().zip(&signs[core]) {
                     // We are currently at W - epsilon*S; restore W first.
                     *weight = (*weight + config.spsa_epsilon * sign
-                        - config.core_lr * gradient.clamp(-1.0, 1.0) * sign).clamp(-1.0, 1.0);
+                        - config.core_lr * gradient.clamp(-1.0, 1.0) * sign)
+                        .clamp(-1.0, 1.0);
                 }
             }
         }
@@ -586,12 +743,14 @@ pub fn train(runner: &mut Runner, p: &mut Parameters, data: &Dataset,
         let advantage = (baseline - loss).clamp(-0.5, 0.5);
         for decision in &trace.decisions {
             for action in 0..ACTIONS {
-                let score = (usize::from(action == decision.action) as f32 - decision.probs[action])
-                    * config.router_lr * advantage;
+                let score = (usize::from(action == decision.action) as f32
+                    - decision.probs[action])
+                    * config.router_lr
+                    * advantage;
                 for feature in 0..WIDTH {
-                    p.router[feature * ACTIONS + action] =
-                        (p.router[feature * ACTIONS + action] + score * decision.features[feature])
-                            .clamp(-2.0, 2.0);
+                    p.router[feature * ACTIONS + action] = (p.router[feature * ACTIONS + action]
+                        + score * decision.features[feature])
+                        .clamp(-2.0, 2.0);
                 }
                 p.router_bias[action] = (p.router_bias[action] + score).clamp(-2.0, 2.0);
             }
@@ -601,17 +760,31 @@ pub fn train(runner: &mut Runner, p: &mut Parameters, data: &Dataset,
     Ok(())
 }
 
-pub fn evaluate(runner: &mut Runner, p: &Parameters, dict: &Dictionary,
-    examples: &[Example], limit: usize, seed: u64) -> Result<Metrics, Box<dyn Error>> {
+pub fn evaluate(
+    runner: &mut Runner,
+    p: &Parameters,
+    dict: &Dictionary,
+    examples: &[Example],
+    limit: usize,
+    seed: u64,
+) -> Result<Metrics, Box<dyn Error>> {
     evaluate_with_route(runner, p, dict, examples, limit, seed, None)
 }
 
 /// Same dataset and weights, but optionally lock every token to a single
 /// (core_id, rotate) choice. This is a true routing ablation on the GPU model.
-pub fn evaluate_with_route(runner: &mut Runner, p: &Parameters, dict: &Dictionary,
-    examples: &[Example], limit: usize, seed: u64, fixed: Option<usize>)
-    -> Result<Metrics, Box<dyn Error>> {
-    if examples.is_empty() { return Err(Box::new(LabError("empty validation split".into()))); }
+pub fn evaluate_with_route(
+    runner: &mut Runner,
+    p: &Parameters,
+    dict: &Dictionary,
+    examples: &[Example],
+    limit: usize,
+    seed: u64,
+    fixed: Option<usize>,
+) -> Result<Metrics, Box<dyn Error>> {
+    if examples.is_empty() {
+        return Err(Box::new(LabError("empty validation split".into())));
+    }
     let mut rng = Rng::new(seed);
     let mut metrics = Metrics::default();
     // The standard dataset stores equal-sized, contiguous partitions per op.
@@ -634,7 +807,9 @@ pub fn evaluate_with_route(runner: &mut Runner, p: &Parameters, dict: &Dictionar
         metrics.squared_error += difference * difference;
         metrics.per_op_count[case.op] += 1;
         metrics.per_op_exact[case.op] += usize::from(correct);
-        for decision in &trace.decisions { metrics.action_counts[decision.action] += 1; }
+        for decision in &trace.decisions {
+            metrics.action_counts[decision.action] += 1;
+        }
     }
     Ok(metrics)
 }
@@ -648,9 +823,22 @@ mod tests {
         assert_eq!(operation(0, 10, 9).unwrap().target, 19);
         assert_eq!(operation(3, 1, 0).unwrap().target, 0);
         let dataset = Dataset::new();
-        assert_eq!(dataset.train.len() + dataset.validation.len(), OP_COUNT * 256);
-        assert!(dataset.validation.iter().all(|case| (case.a * 17 + case.b * 31) % 5 == 0));
-        assert!(dataset.train.iter().all(|case| (case.a * 17 + case.b * 31) % 5 != 0));
+        assert_eq!(
+            dataset.train.len() + dataset.validation.len(),
+            OP_COUNT * 256
+        );
+        assert!(
+            dataset
+                .validation
+                .iter()
+                .all(|case| (case.a * 17 + case.b * 31) % 5 == 0)
+        );
+        assert!(
+            dataset
+                .train
+                .iter()
+                .all(|case| (case.a * 17 + case.b * 31) % 5 != 0)
+        );
         let mut signatures = std::collections::BTreeSet::new();
         for op in 0..OP_COUNT {
             assert!(dataset.train.iter().any(|case| case.op == op));
@@ -672,12 +860,19 @@ mod tests {
         let ids = dictionary.encode("10 + 9").unwrap();
         assert_eq!(ids.len(), "10 + 9".len());
         let bits = Dictionary::bits(ids[0]);
-        let reconstructed = bits.iter().take(9).enumerate()
+        let reconstructed = bits
+            .iter()
+            .take(9)
+            .enumerate()
             .fold(0u16, |value, (i, bit)| value | ((*bit as u16) << i));
         assert_eq!(reconstructed, ids[0] + 1);
         assert_eq!(dictionary.state(&ids).iter().sum::<f32>().round() as i32, 1);
         let non_ascii = Dictionary::fit(&[Example {
-            op: 0, a: 0, b: 0, text: "é".into(), target: 0,
+            op: 0,
+            a: 0,
+            b: 0,
+            text: "é".into(),
+            target: 0,
         }]);
         assert_eq!(non_ascii.encode("é").unwrap().len(), 2);
         assert!(non_ascii.encode("a").is_err());
@@ -695,7 +890,9 @@ mod tests {
         assert_eq!(rotate(&first, 2).unwrap()[WIDTH * WIDTH - 1], 1.0);
         assert_eq!(rotate(&first, 3).unwrap()[WIDTH * (WIDTH - 1)], 1.0);
         let mut rolled = first.clone();
-        for _ in 0..4 { rolled = rotate(&rolled, 1).unwrap(); }
+        for _ in 0..4 {
+            rolled = rotate(&rolled, 1).unwrap();
+        }
         assert_eq!(rolled, first);
         for action in 0..ACTIONS {
             assert_eq!(route_parts(action).unwrap(), (action / 4, action % 4));
@@ -706,9 +903,36 @@ mod tests {
     #[test]
     fn semantic_ir_shapes_and_recurrent_boundary() {
         let models = Architectures::new().unwrap();
-        assert_eq!(models.core.graph().node(models.core.output("next_state").unwrap()).unwrap().shape.dims(), &[1, WIDTH]);
-        assert_eq!(models.router.graph().node(models.router.output("logits").unwrap()).unwrap().shape.dims(), &[1, ACTIONS]);
-        assert_eq!(models.head.graph().node(models.head.output("normalized_result").unwrap()).unwrap().shape.dims(), &[1, 1]);
+        assert_eq!(
+            models
+                .core
+                .graph()
+                .node(models.core.output("next_state").unwrap())
+                .unwrap()
+                .shape
+                .dims(),
+            &[1, WIDTH]
+        );
+        assert_eq!(
+            models
+                .router
+                .graph()
+                .node(models.router.output("logits").unwrap())
+                .unwrap()
+                .shape
+                .dims(),
+            &[1, ACTIONS]
+        );
+        assert_eq!(
+            models
+                .head
+                .graph()
+                .node(models.head.output("normalized_result").unwrap())
+                .unwrap()
+                .shape
+                .dims(),
+            &[1, 1]
+        );
         assert!(models.core.graph().canonical_ir().contains("matmul"));
         assert_eq!(models.core.proof_goals().len(), 1);
     }
