@@ -316,7 +316,7 @@ mod tests {
                 .contains("set_option linter.unusedVariables false")
         );
         let gpu = GpuEngine::default()
-            .compile(lab.graph(), lab.output)
+            .compile(lab.graph(), lab.output())
             .unwrap();
         assert!(!gpu.translation_plan().unwrap().kernels.is_empty());
         let snapshot =
