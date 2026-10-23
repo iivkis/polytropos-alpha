@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 architecture.outputs().len()
             ));
             fs::write(
-                root.join("semantic.ir"),
+                root.join("inspect.semantic.ir"),
                 architecture.graph().canonical_ir(),
             )?;
             for &(op, a, b) in &[(0, 10, 9), (3, 1, 0)] {
@@ -104,8 +104,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         "--certify-architecture" => {
             // One Model -> one Semantic IR -> one Lean -> one DOT -> one PNG.
-            // Host argmax/rotation and the unbounded recurrence remain explicit
-            // trust boundaries instead of being mislabeled as certified.
+            // The P0 structural/index path is part of this model. Certification
+            // must fail closed until those operations have audited GPU lowering;
+            // the unbounded recurrence remains a separate trust boundary.
             let workspace = ArtifactWorkspace::new()?;
             let certified_root = workspace.path().join("certified");
             architecture.certify(CertifiedBuildConfig::new(&certified_root))?;

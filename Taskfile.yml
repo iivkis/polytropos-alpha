@@ -275,15 +275,14 @@ tasks:
       - cargo test -p verineural-consumer-acceptance --all-targets -- --ignored
 
   lab-rotating:
-    desc: Run full rotating-matrices laboratory and generate one Git-trackable artifacts/ folder
+    desc: Inspect and train rotating-matrices; structural/index GPU certification remains fail-closed
     deps: [prepare]
     cmds:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --inspect
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --train 128
-      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-architecture
 
   inspect-lab-rotating:
-    desc: Inspect rotating cores and export Semantic IR without GPU or Lean
+    desc: Inspect rotating cores and export diagnostic Semantic IR without GPU or Lean
     deps: [prepare]
     cmds:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --inspect
@@ -301,7 +300,7 @@ tasks:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --train {{.CLI_ARGS}}
 
   certify-lab-rotating:
-    desc: Build one architecture Lean/DOT/PNG and shared NVPTX evidence bundle
+    desc: Attempt certified build; P0 structural/index nodes are expected to fail closed until GPU lowering
     deps: [prepare]
     cmds:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-architecture

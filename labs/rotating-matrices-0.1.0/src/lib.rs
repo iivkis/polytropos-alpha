@@ -3,17 +3,18 @@
 //! VeriNeural API; host code owns tokenizer/dataset, discrete action sampling,
 //! parameter updates, and the boundary between successive graph replays.
 //!
-//! In particular: preparing rotated weight *bindings* is host preprocessing.
-//! Neither those rotations nor BPTT/training or arbitrary-length recurrence are
-//! claimed to be proved by the generated Lean obligations.
+//! The evidence model expresses the rotation bank and deterministic selection in
+//! Semantic IR. The stochastic training runtime still materializes the sampled
+//! rotated binding on the host through VeriNeural's generic tensor references;
+//! BPTT/training and arbitrary-length recurrence are not claimed certified.
 
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use verineural::{
-    Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph,
-    NodeId, Shape, Tensor,
+    ArgMaxTieBreak, Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError, NeuralError,
+    NeuralGraph, NodeId, Shape, Tensor,
 };
 
 pub const WIDTH: usize = 64;
@@ -238,28 +239,33 @@ impl Dictionary {
     }
 }
 
-/// Row-major clockwise quarter turns, defined once for all core weights.
-/// This binding transformation is testable, but is NOT part of Semantic IR.
+/// Row-major clockwise quarter turns using the same generic host tensor
+/// primitives as the Semantic IR construction. The training runtime still
+/// materializes this sampled binding on the host until GPU indexing lowering
+/// exists, but the laboratory no longer carries a second rotation algorithm.
 pub fn rotate(matrix: &[f32], turns: usize) -> Result<Vec<f32>, LabError> {
     if matrix.len() != WIDTH * WIDTH || turns >= TURNS {
         return Err(LabError(
             "invalid rotation: expected 64x64 and turns 0..4".into(),
         ));
     }
-    let mut rotated = vec![0.0; matrix.len()];
-    for r in 0..WIDTH {
-        for c in 0..WIDTH {
-            let (rr, cc) = match turns {
-                0 => (r, c),
-                1 => (c, WIDTH - 1 - r),
-                2 => (WIDTH - 1 - r, WIDTH - 1 - c),
-                3 => (WIDTH - 1 - c, r),
-                _ => unreachable!(),
-            };
-            rotated[rr * WIDTH + cc] = matrix[r * WIDTH + c];
-        }
+    let shape = Shape::new(vec![WIDTH, WIDTH]).map_err(|error| LabError(error.to_string()))?;
+    let base = Tensor::new(shape, matrix.to_vec()).map_err(|error| LabError(error.to_string()))?;
+    let rotated = match turns {
+        0 => Ok(base),
+        1 => base
+            .permute(&[1, 0])
+            .and_then(|tensor| tensor.reverse_axis(1)),
+        2 => base
+            .reverse_axis(0)
+            .and_then(|tensor| tensor.reverse_axis(1)),
+        3 => base
+            .permute(&[1, 0])
+            .and_then(|tensor| tensor.reverse_axis(0)),
+        _ => unreachable!(),
     }
-    Ok(rotated)
+    .map_err(|error| LabError(error.to_string()))?;
+    Ok(rotated.into_values())
 }
 
 pub fn route_parts(action: usize) -> Result<(usize, usize), LabError> {
@@ -338,14 +344,36 @@ pub fn head_model() -> Result<Model, ModelError> {
     m.finish()
 }
 
+fn rotating_bank(
+    g: &mut NeuralGraph,
+    core0: NodeId,
+    core1: NodeId,
+) -> Result<NodeId, NeuralError> {
+    fn rotations(g: &mut NeuralGraph, core: NodeId) -> Result<[NodeId; TURNS], NeuralError> {
+        let transposed = g.permute(core, &[1, 0])?;
+        let r90 = g.reverse_axis(transposed, 1)?;
+        let r270 = g.reverse_axis(transposed, 0)?;
+        let flipped_rows = g.reverse_axis(core, 0)?;
+        let r180 = g.reverse_axis(flipped_rows, 1)?;
+        Ok([core, r90, r180, r270])
+    }
+
+    let mut variants = Vec::with_capacity(ACTIONS);
+    for core in [core0, core1] {
+        for rotated in rotations(g, core)? {
+            variants.push(g.reshape(rotated, Shape::new(vec![1, WIDTH, WIDTH])?)?);
+        }
+    }
+    g.concat(0, &variants)
+}
+
 /// One evidence model for the whole laboratory architecture.
 ///
-/// Router, recurrent transition and terminal readout share ONE Semantic Neural IR.
-/// `selected_rotated_weight` remains an explicit GPU-certification boundary in
-/// this executable evidence model. VeriNeural can now represent deterministic
-/// argmax, selection and rotation composition in Semantic IR/Lean, but those
-/// operations deliberately fail closed in the GPU backend until lowering is
-/// implemented and audited.
+/// Router, rotation bank, deterministic first-tie argmax selection, recurrent
+/// transition and terminal readout share ONE Semantic Neural IR. The P0
+/// structural/indexing path is therefore visible to canonical IR and Lean.
+/// GPU lowering of these structural/index operations intentionally remains
+/// fail-closed until a dedicated backend slice is implemented and audited.
 pub fn architecture_model() -> Result<Model, ModelError> {
     let mut m = ModelBuilder::new("rotating-matrices", "0.1.0");
     let dictionary = m.input("dictionary_state", [1, WIDTH], Domain::NonNegativeFinite)?;
@@ -354,7 +382,8 @@ pub fn architecture_model() -> Result<Model, ModelError> {
 
     let router_weights = m.parameter("router_weights", [WIDTH, ACTIONS], Domain::Finite)?;
     let router_bias = m.parameter("router_bias", [ACTIONS], Domain::Finite)?;
-    let selected_weight = m.parameter("selected_rotated_weight", [WIDTH, WIDTH], Domain::Finite)?;
+    let core0 = m.parameter("core0", [WIDTH, WIDTH], Domain::Finite)?;
+    let core1 = m.parameter("core1", [WIDTH, WIDTH], Domain::Finite)?;
     let core_bias = m.parameter("core_bias", [WIDTH], Domain::Finite)?;
     let head_weights = m.parameter("head_weights", [WIDTH, 1], Domain::Finite)?;
     let head_bias = m.parameter("head_bias", [1], Domain::Finite)?;
@@ -364,6 +393,11 @@ pub fn architecture_model() -> Result<Model, ModelError> {
         &[dictionary, state, router_weights, router_bias],
         routing_logits,
     )?;
+    let action = m
+        .graph_mut()
+        .argmax(logits, 1, ArgMaxTieBreak::First)?;
+    let bank = rotating_bank(m.graph_mut(), core0, core1)?;
+    let selected_weight = m.graph_mut().take(bank, action, 0)?;
     let next_state = m.block(
         "routed_recurrent_transition",
         &[state, token, selected_weight, core_bias],
@@ -690,9 +724,13 @@ fn probabilities(logits: &[f32; ACTIONS]) -> [f32; ACTIONS] {
 }
 fn choose(probs: &[f32; ACTIONS], rng: &mut Rng, stochastic: bool) -> usize {
     if !stochastic {
-        return (0..ACTIONS)
-            .max_by(|&a, &b| probs[a].total_cmp(&probs[b]))
-            .unwrap();
+        let mut best = 0;
+        for index in 1..ACTIONS {
+            if probs[index] > probs[best] {
+                best = index;
+            }
+        }
+        return best;
     }
     let mut sample = rng.uniform();
     for (i, &prob) in probs.iter().enumerate() {
@@ -1044,6 +1082,12 @@ mod tests {
             assert_eq!(route_parts(action).unwrap(), (action / 4, action % 4));
         }
         assert!(route_parts(8).is_err());
+
+        let mut rng = Rng::new(7);
+        let mut probs = [0.0; ACTIONS];
+        probs[1] = 0.5;
+        probs[2] = 0.5;
+        assert_eq!(choose(&probs, &mut rng, false), 1);
     }
 
     #[test]
@@ -1080,6 +1124,12 @@ mod tests {
         );
         let ir = model.graph().canonical_ir();
         assert!(ir.contains("routing_logits"));
+        assert!(ir.contains("permute_axes:1,0"));
+        assert!(ir.contains("reverse_axis:"));
+        assert!(ir.contains("concat_axis:0"));
+        assert!(ir.contains("argmax_axis:1:tie=first"));
+        assert!(ir.contains("take_axis:0"));
+        assert!(!ir.contains("selected_rotated_weight"));
         assert!(ir.contains("routed_recurrent_transition"));
         assert!(ir.contains("terminal_scalar_readout"));
         assert_eq!(model.proof_goals().len(), 0);
