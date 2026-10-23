@@ -358,6 +358,7 @@ impl Model {
         crate::certified::preflight_root(&root, &identity)?;
         let report = compiler.build_identified(&self.graph, &outputs, &tasks, &root, &identity)?;
         crate::certified::publish_root(&root, &identity)?;
+        crate::certified::verify_root(&root, &identity)?;
         Ok(report)
     }
 

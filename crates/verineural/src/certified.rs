@@ -97,7 +97,21 @@ pub(crate) fn preflight_root(root: &Path, identity: &str) -> Result<(), crate::A
                     )));
                 }
             }
-            Ok(meta) if meta.is_file() && legacy_ok => {}
+            Ok(meta) if meta.is_file() && legacy_ok => {
+                let backup = root.join(".verineural-pre-stage10");
+                if let Ok(backup_meta) = std::fs::symlink_metadata(&backup) {
+                    if !backup_meta.is_dir() || backup_meta.file_type().is_symlink() {
+                        return Err(crate::AutoBuildError::Integrity(
+                            "legacy backup must be a real directory".into(),
+                        ));
+                    }
+                }
+                if std::fs::symlink_metadata(backup.join(name)).is_ok() {
+                    return Err(crate::AutoBuildError::Integrity(format!(
+                        "legacy backup already exists; refusing partial migration of {name}"
+                    )));
+                }
+            }
             Ok(_) => return Err(crate::AutoBuildError::Integrity(format!(
                 "refusing to replace unowned artifact: {}", path.display()
             ))),
@@ -153,6 +167,63 @@ pub(crate) fn verify_root(root: &Path, identity: &str) -> Result<(), crate::Auto
     Ok(())
 }
 
+/// Shared Cargo example entry point for any consumer-defined model.
+///
+/// Architecture definitions belong in the consumer's src/lib.rs. An example
+/// can call this function without implementing proof orchestration or CLI
+/// parsing a second time.
+pub fn certified_example_main(
+    model: &crate::Model,
+    package_root: impl Into<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = std::env::args().skip(1);
+    let mut verify = false;
+    let mut root: Option<PathBuf> = None;
+    let mut pin: Option<String> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--verify" if !verify => verify = true,
+            "--artifact-root" if root.is_none() => {
+                root = Some(args.next().ok_or("--artifact-root requires a path")?.into());
+            }
+            "--pinned-sha256" if pin.is_none() => {
+                let digest = args.next().ok_or("--pinned-sha256 requires a digest")?;
+                if digest.len() != 64 || !digest.bytes().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("--pinned-sha256 requires exactly 64 hexadecimal characters".into());
+                }
+                pin = Some(digest);
+            }
+            _ => return Err(format!("unknown or repeated certified option: {arg}").into()),
+        }
+    }
+    if pin.is_some() && !verify {
+        return Err("--pinned-sha256 only applies to --verify".into());
+    }
+    let mut config = CertifiedBuildConfig::new(package_root)
+        .require_all_proofs()
+        .require_gpu_lowering();
+    if let Some(root) = root {
+        config = config.artifact_root(root);
+    }
+    let report = if verify {
+        model.verify_certified(config, pin.as_deref())?
+    } else {
+        model.certify(config)?
+    };
+    println!(
+        "{}",
+        if verify { "Certified replay passed" } else { "Certified build published" }
+    );
+    println!("Evidence: {}", report.directory.display());
+    println!("Lean checker: {}", report.lean_version);
+    println!("Mandatory goals verified: {}", report.goal_theorems.len());
+    println!("SHA256SUMS: {} (pin externally)", report.manifest_sha256);
+    println!(
+        "Assurance: Lean ideal-Int proofs and GPU structural translation; NOT FP32/SASS machine proof"
+    );
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod root_tests {
     use super::*;
@@ -188,6 +259,25 @@ mod root_tests {
             "legacy dot"
         );
         verify_root(&root, identity).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migration_fails_before_mutation_if_a_backup_conflicts() {
+        let root = test_root("backup-conflict");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".verineural-pre-stage10")).unwrap();
+        std::fs::write(root.join("architecture.identity"), "id=lab\nversion=1\n").unwrap();
+        std::fs::write(root.join("architecture.dot"), "original").unwrap();
+        std::fs::write(root.join("architecture.png"), "original png").unwrap();
+        std::fs::write(root.join(".verineural-pre-stage10/architecture.png"), "previous").unwrap();
+        let identity = "verineural-certified-model-v1\nid=lab\nversion=1\n";
+        assert!(publish_root(&root, identity).is_err());
+        assert_eq!(std::fs::read_to_string(root.join("architecture.dot")).unwrap(), "original");
+        assert_eq!(
+            std::fs::read_to_string(root.join("architecture.png")).unwrap(),
+            "original png"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

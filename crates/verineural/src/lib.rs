@@ -57,7 +57,7 @@ pub use auto_build::{
     check_architecture_connectivity,
 };
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
-pub use certified::CertifiedBuildConfig;
+pub use certified::{CertifiedBuildConfig, certified_example_main};
 pub use consumer::{BindingError, ComponentBinder, ObligationError};
 pub use error::NeuralError;
 pub use gpu::{

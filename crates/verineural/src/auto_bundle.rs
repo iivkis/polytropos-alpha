@@ -58,8 +58,15 @@ pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
 /// Reject foreign or legacy bundles before starting a new staged build.
 /// Identity is checked again during replay, and SHA256SUMS covers its bytes.
 pub(super) fn check_existing_identity(dir: &Path, expected: &str) -> Result<(), AutoBuildError> {
-    if !dir.exists() {
-        return Ok(());
+    match fs::symlink_metadata(dir) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(AutoBuildError::Integrity(
+                "certified bundle directory cannot be a symlink".into(),
+            ));
+        }
+        Ok(_) => {}
     }
     if !dir.is_dir() {
         return Err(AutoBuildError::Integrity(format!(
@@ -220,6 +227,26 @@ mod tests {
         ));
         fs::remove_file(root.join("identity.txt")).unwrap();
         assert!(check_existing_identity(&root, "id=xor\nversion=1\n").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn existing_certified_bundle_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!(
+            "verineural-symlink-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("real")).unwrap();
+        fs::write(root.join("real/identity.txt"), "id=lab\nversion=1\n").unwrap();
+        symlink("real", root.join("auto-build")).unwrap();
+        assert!(matches!(
+            check_existing_identity(&root.join("auto-build"), "id=lab\nversion=1\n"),
+            Err(AutoBuildError::Integrity(_))
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

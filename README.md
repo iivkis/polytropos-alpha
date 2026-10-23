@@ -347,3 +347,14 @@ Stage 10 builds because they write the same root filenames. The internal
 bundle uses staging and rollback, but first-time root-link migration is not
 a single atomic filesystem operation. Lean ideal-Int proofs do not certify
 GPU FP32/SASS machine behavior. Full external-tool acceptance is still pending.
+
+### Stage 10 hardening and joint acceptance
+
+On Linux, replacing an existing auto-build/ atomically exchanges complete directories with renameat2(RENAME_EXCHANGE) and fails closed where unsupported. First-time root alias creation and Stage9 migration remain non-atomic as a set of file operations. Both labs now call shared verineural::certified_example_main instead of maintaining CLI parsers.
+
+WARNING: existing Stage9 package-root artifact files are Git-tracked; the default-root migration will modify your working tree. Use dedicated paths for the first acceptance run:
+
+    task certified-build -- --manifest-path labs/xor-0.1.0/Cargo.toml --artifact-root /tmp/verineural-stage10-xor
+    task verify-certified-build -- --manifest-path labs/xor-0.1.0/Cargo.toml --artifact-root /tmp/verineural-stage10-xor
+
+Cargo/Lean/LLVM/Graphviz and hardware checks must still be run in the pinned Nix shell. No external-tool passes are claimed from this source patch.

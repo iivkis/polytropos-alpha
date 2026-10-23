@@ -349,8 +349,45 @@ static NEXT_BUILD_ID: AtomicU64 = AtomicU64::new(0);
 
 struct StagedBuild {
     directory: PathBuf,
-    backup: PathBuf,
     published: bool,
+}
+
+// Linux renameat2(RENAME_EXCHANGE) switches two existing directories in one
+// filesystem operation: no interval when readers see no auto-build directory.
+// The swap is fail-closed where the atomic primitive is unavailable.
+#[cfg(target_os = "linux")]
+fn atomic_exchange_dirs(old: &Path, new: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+
+    unsafe extern "C" {
+        fn renameat2(
+            olddirfd: c_int,
+            oldpath: *const c_char,
+            newdirfd: c_int,
+            newpath: *const c_char,
+            flags: c_uint,
+        ) -> c_int;
+    }
+    const AT_FDCWD: c_int = -100;
+    const RENAME_EXCHANGE: c_uint = 2;
+    let old = CString::new(old.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in old path"))?;
+    let new = CString::new(new.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in new path"))?;
+    let code = unsafe {
+        renameat2(AT_FDCWD, old.as_ptr(), AT_FDCWD, new.as_ptr(), RENAME_EXCHANGE)
+    };
+    if code == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn atomic_exchange_dirs(_old: &Path, _new: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic bundle replacement requires Linux renameat2(RENAME_EXCHANGE)",
+    ))
 }
 
 impl StagedBuild {
@@ -360,18 +397,8 @@ impl StagedBuild {
             let id = NEXT_BUILD_ID.fetch_add(1, Ordering::Relaxed);
             let suffix = format!("{}-{id}", std::process::id());
             let directory = root.join(format!(".auto-build.staging-{suffix}"));
-            let backup = root.join(format!(".auto-build.previous-{suffix}"));
-            if backup.exists() {
-                continue;
-            }
             match fs::create_dir(&directory) {
-                Ok(()) => {
-                    return Ok(Self {
-                        directory,
-                        backup,
-                        published: false,
-                    });
-                }
+                Ok(()) => return Ok(Self { directory, published: false }),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error.into()),
             }
@@ -379,33 +406,34 @@ impl StagedBuild {
     }
 
     fn publish(&mut self, final_dir: &Path) -> Result<(), AutoBuildError> {
-        let previous = final_dir.exists();
-        if previous && !final_dir.is_dir() {
-            return Err(AutoBuildError::Integrity(format!(
-                "existing auto-build path is not a directory: {}",
-                final_dir.display()
-            )));
-        }
-        if previous {
-            fs::rename(final_dir, &self.backup)?;
-        }
-        if let Err(error) = fs::rename(&self.directory, final_dir) {
-            if previous {
-                fs::rename(&self.backup, final_dir).map_err(|rollback| {
-                    AutoBuildError::Integrity(format!(
-                        "publish failed ({error}); could not restore previous bundle: {rollback}; \
-                         previous bundle remains at {}",
-                        self.backup.display()
-                    ))
-                })?;
+        match fs::symlink_metadata(final_dir) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(AutoBuildError::Integrity(format!(
+                        "existing auto-build is not a real directory: {}",
+                        final_dir.display()
+                    )));
+                }
+                atomic_exchange_dirs(final_dir, &self.directory)?;
+                // The exchange is the commit point: a cleanup failure must not
+                // turn an already-published certificate into a reported failure.
+                self.published = true;
+                if let Err(error) = fs::remove_dir_all(&self.directory) {
+                    eprintln!(
+                        "verineural: previously published bundle remains at {}: {error}",
+                        self.directory.display()
+                    );
+                }
+                Ok(())
             }
-            return Err(error.into());
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // First publication has only one directory rename.
+                fs::rename(&self.directory, final_dir)?;
+                self.published = true;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
         }
-        self.published = true;
-        if previous {
-            fs::remove_dir_all(&self.backup)?;
-        }
-        Ok(())
     }
 }
 
@@ -964,19 +992,39 @@ mod staged_build_tests {
     }
 
     #[test]
-    fn successful_publication_replaces_bundle_and_cleans_backup() {
+    #[cfg(target_os = "linux")]
+    fn successful_publication_atomically_swaps_and_cleans_previous_bundle() {
         let root = test_root("publish");
+        let _ = fs::remove_dir_all(&root);
         let old = root.join("auto-build");
         fs::create_dir_all(&old).unwrap();
         fs::write(old.join("report.txt"), "old").unwrap();
         let mut staged = StagedBuild::create(&root).unwrap();
         let staging = staged.directory.clone();
-        let backup = staged.backup.clone();
         fs::write(staging.join("report.txt"), "new").unwrap();
         staged.publish(&old).unwrap();
         assert_eq!(fs::read_to_string(old.join("report.txt")).unwrap(), "new");
         assert!(!staging.exists());
-        assert!(!backup.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn initial_publication_and_rejection_of_symlink_bundle() {
+        let root = test_root("initial");
+        let _ = fs::remove_dir_all(&root);
+        let final_dir = root.join("auto-build");
+        let mut staged = StagedBuild::create(&root).unwrap();
+        fs::write(staged.directory.join("report.txt"), "initial").unwrap();
+        staged.publish(&final_dir).unwrap();
+        assert_eq!(fs::read_to_string(final_dir.join("report.txt")).unwrap(), "initial");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            fs::rename(&final_dir, root.join("owned")).unwrap();
+            symlink("owned", &final_dir).unwrap();
+            let mut rejected = StagedBuild::create(&root).unwrap();
+            assert!(matches!(rejected.publish(&final_dir), Err(AutoBuildError::Integrity(_))));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
