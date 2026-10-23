@@ -1,0 +1,580 @@
+[1mdiff --git a/crates/verineural/src/consumer.rs b/crates/verineural/src/consumer.rs[m
+[1mindex 8c7b8a7..98cafc3 100644[m
+[1m--- a/crates/verineural/src/consumer.rs[m
+[1m+++ b/crates/verineural/src/consumer.rs[m
+[36m@@ -135,7 +135,11 @@[m [mimpl ComponentBinder<'_> {[m
+         if inputs.len() != contract.requires.len() {[m
+             return Err(self.failed([m
+                 "inputs",[m
+[31m-                format!("expected {} inputs, received {}", contract.requires.len(), inputs.len()),[m
+[32m+[m[32m                format!([m
+[32m+[m[32m                    "expected {} inputs, received {}",[m
+[32m+[m[32m                    contract.requires.len(),[m
+[32m+[m[32m                    inputs.len()[m
+[32m+[m[32m                ),[m
+                 None,[m
+             ));[m
+         }[m
+[36m@@ -143,7 +147,11 @@[m [mimpl ComponentBinder<'_> {[m
+             self.check_input(id, &format!("input_{index}"), required)?;[m
+         }[m
+         self.graph.apply_module(module, inputs).map_err(|source| {[m
+[31m-            self.failed("output", format!("{} postcondition or body", module.name()), Some(source))[m
+[32m+[m[32m            self.failed([m
+[32m+[m[32m                "output",[m
+[32m+[m[32m                format!("{} postcondition or body", module.name()),[m
+[32m+[m[32m                Some(source),[m
+[32m+[m[32m            )[m
+         })[m
+     }[m
+ [m
+[36m@@ -165,9 +173,8 @@[m [mimpl ComponentBinder<'_> {[m
+                     }[m
+                 }[m
+             }[m
+[31m-            let id = found.ok_or_else(|| {[m
+[31m-                self.failed(required.name, "missing required port binding", None)[m
+[31m-            })?;[m
+[32m+[m[32m            let id = found[m
+[32m+[m[32m                .ok_or_else(|| self.failed(required.name, "missing required port binding", None))?;[m
+             self.check_input(id, required.name, &required.port)?;[m
+             ordered.push(id);[m
+         }[m
+[36m@@ -176,9 +183,15 @@[m [mimpl ComponentBinder<'_> {[m
+                 return Err(self.failed(name, "unexpected port binding", None));[m
+             }[m
+         }[m
+[31m-        self.graph.apply_multi_module(module, &ordered).map_err(|source| {[m
+[31m-            self.failed("outputs", format!("{} output postconditions or body", module.name()), Some(source))[m
+[31m-        })[m
+[32m+[m[32m        self.graph[m
+[32m+[m[32m            .apply_multi_module(module, &ordered)[m
+[32m+[m[32m            .map_err(|source| {[m
+[32m+[m[32m                self.failed([m
+[32m+[m[32m                    "outputs",[m
+[32m+[m[32m                    format!("{} output postconditions or body", module.name()),[m
+[32m+[m[32m                    Some(source),[m
+[32m+[m[32m                )[m
+[32m+[m[32m            })[m
+     }[m
+ [m
+     /// Resolve results by their declared names instead of array positions.[m
+[36m@@ -211,19 +224,21 @@[m [mimpl ComponentBinder<'_> {[m
+                 self.check_input(input, &format!("input[{step}]"), &ports[1].port)?;[m
+             }[m
+         }[m
+[31m-        self.graph.scan_fixed(transition, initial_state, inputs).map_err(|source| {[m
+[31m-            self.failed("next_state", "bounded state-transition contract", Some(source))[m
+[31m-        })[m
+[32m+[m[32m        self.graph[m
+[32m+[m[32m            .scan_fixed(transition, initial_state, inputs)[m
+[32m+[m[32m            .map_err(|source| {[m
+[32m+[m[32m                self.failed([m
+[32m+[m[32m                    "next_state",[m
+[32m+[m[32m                    "bounded state-transition contract",[m
+[32m+[m[32m                    Some(source),[m
+[32m+[m[32m                )[m
+[32m+[m[32m            })[m
+     }[m
+ }[m
+ [m
+ impl ProofGoal {[m
+     /// Make the source assumptions explicit; they are never inferred as facts.[m
+[31m-    pub fn nonnegative([m
+[31m-        name: impl Into<String>,[m
+[31m-        output: NodeId,[m
+[31m-        assumptions: Vec<NodeId>,[m
+[31m-    ) -> Self {[m
+[32m+[m[32m    pub fn nonnegative(name: impl Into<String>, output: NodeId, assumptions: Vec<NodeId>) -> Self {[m
+         Self {[m
+             name: name.into(),[m
+             output,[m
+[36m@@ -231,11 +246,7 @@[m [mimpl ProofGoal {[m
+         }[m
+     }[m
+ [m
+[31m-    pub fn bounded_above([m
+[31m-        name: impl Into<String>,[m
+[31m-        lower: NodeId,[m
+[31m-        output: NodeId,[m
+[31m-    ) -> Self {[m
+[32m+[m[32m    pub fn bounded_above(name: impl Into<String>, lower: NodeId, output: NodeId) -> Self {[m
+         Self {[m
+             name: name.into(),[m
+             output,[m
+[36m@@ -252,10 +263,12 @@[m [mimpl ProofGoal {[m
+         graph: &NeuralGraph,[m
+         checker: &LeanProofEngine,[m
+     ) -> Result<LeanProgram, ObligationError> {[m
+[31m-        checker.generate_goal(graph, self).map_err(|source| ObligationError {[m
+[31m-            theorem: format!("architecture_property_{}", self.name),[m
+[31m-            source,[m
+[31m-        })[m
+[32m+[m[32m        checker[m
+[32m+[m[32m            .generate_goal(graph, self)[m
+[32m+[m[32m            .map_err(|source| ObligationError {[m
+[32m+[m[32m                theorem: format!("architecture_property_{}", self.name),[m
+[32m+[m[32m                source,[m
+[32m+[m[32m            })[m
+     }[m
+ [m
+     /// Check the Lean file and its transitive axiom dependencies.[m
+[36m@@ -266,9 +279,11 @@[m [mimpl ProofGoal {[m
+         path: &Path,[m
+     ) -> Result<(CheckedLean, LeanAxiomAudit), ObligationError> {[m
+         let program = self.generate_source(graph, checker)?;[m
+[31m-        checker.verify_certified(&program, path).map_err(|source| ObligationError {[m
+[31m-            theorem: format!("architecture_property_{}", self.name),[m
+[31m-            source,[m
+[31m-        })[m
+[32m+[m[32m        checker[m
+[32m+[m[32m            .verify_certified(&program, path)[m
+[32m+[m[32m            .map_err(|source| ObligationError {[m
+[32m+[m[32m                theorem: format!("architecture_property_{}", self.name),[m
+[32m+[m[32m                source,[m
+[32m+[m[32m            })[m
+     }[m
+ }[m
+[1mdiff --git a/labs/consumer-acceptance-0.1.0/src/lib.rs b/labs/consumer-acceptance-0.1.0/src/lib.rs[m
+[1mindex 02681f3..6abadf9 100644[m
+[1m--- a/labs/consumer-acceptance-0.1.0/src/lib.rs[m
+[1m+++ b/labs/consumer-acceptance-0.1.0/src/lib.rs[m
+[36m@@ -1,10 +1,10 @@[m
+ //! Architecture-neutral acceptance consumers. This crate depends only on the[m
+ //! published VeriNeural API; no core implementation or bespoke Lean generator.[m
+ use verineural::{[m
+[31m-    ArchitectureAutoCompiler, ArchitectureProofTask, Domain, FixedScan, GpuRequirement,[m
+[31m-    MathContract, MultiOutputContract, MultiOutputModule, NamedPortContract, NeuralError,[m
+[31m-    NeuralGraph, NeuralModule, NodeId, PointwiseExpr, PointwiseSpec, PortContract, ProofGoal,[m
+[31m-    Shape, AutoBuildError,[m
+[32m+[m[32m    ArchitectureAutoCompiler, ArchitectureProofTask, AutoBuildError, Domain, FixedScan,[m
+[32m+[m[32m    GpuRequirement, MathContract, MultiOutputContract, MultiOutputModule, NamedPortContract,[m
+[32m+[m[32m    NeuralError, NeuralGraph, NeuralModule, NodeId, PointwiseExpr, PointwiseSpec, PortContract,[m
+[32m+[m[32m    ProofGoal, Shape,[m
+ };[m
+ [m
+ fn shape(dims: &[usize]) -> Shape {[m
+[36m@@ -19,15 +19,24 @@[m [mimpl PositiveJoin {[m
+     fn new(width: usize) -> Self {[m
+         let port = PortContract::nonnegative(shape(&[width]));[m
+         Self {[m
+[31m-            contract: MathContract::new(vec![port.clone(), port], PortContract::any(shape(&[width])))[m
+[31m-                .nonnegative(),[m
+[32m+[m[32m            contract: MathContract::new([m
+[32m+[m[32m                vec![port.clone(), port],[m
+[32m+[m[32m                PortContract::any(shape(&[width])),[m
+[32m+[m[32m            )[m
+[32m+[m[32m            .nonnegative(),[m
+         }[m
+     }[m
+ }[m
+ impl NeuralModule for PositiveJoin {[m
+[31m-    fn name(&self) -> &'static str { "fixture_positive_join" }[m
+[31m-    fn semantic_version(&self) -> &'static str { "1" }[m
+[31m-    fn contract(&self) -> &MathContract { &self.contract }[m
+[32m+[m[32m    fn name(&self) -> &'static str {[m
+[32m+[m[32m        "fixture_positive_join"[m
+[32m+[m[32m    }[m
+[32m+[m[32m    fn semantic_version(&self) -> &'static str {[m
+[32m+[m[32m        "1"[m
+[32m+[m[32m    }[m
+[32m+[m[32m    fn contract(&self) -> &MathContract {[m
+[32m+[m[32m        &self.contract[m
+[32m+[m[32m    }[m
+     fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {[m
+         let added = graph.add(inputs[0], inputs[1])?;[m
+         graph.relu(added)[m
+[36m@@ -40,11 +49,21 @@[m [mpub fn nested() -> (NeuralGraph, NodeId, ProofGoal) {[m
+     let y = graph.input(shape(&[4]), Domain::NonNegativeFinite);[m
+     let z = graph.input(shape(&[4]), Domain::NonNegativeFinite);[m
+     let join = PositiveJoin::new(4);[m
+[31m-    let left = graph.component("fixture/nested/left").single(&join, &[x, y]).unwrap();[m
+[31m-    let right = graph.component("fixture/nested/right").single(&join, &[x, z]).unwrap();[m
+[32m+[m[32m    let left = graph[m
+[32m+[m[32m        .component("fixture/nested/left")[m
+[32m+[m[32m        .single(&join, &[x, y])[m
+[32m+[m[32m        .unwrap();[m
+[32m+[m[32m    let right = graph[m
+[32m+[m[32m        .component("fixture/nested/right")[m
+[32m+[m[32m        .single(&join, &[x, z])[m
+[32m+[m[32m        .unwrap();[m
+     let merged = graph.add(left, right).unwrap();[m
+     let output = graph.relu(merged).unwrap();[m
+[31m-    (graph, output, ProofGoal::bounded_above("nested_branch_bound", left, output))[m
+[32m+[m[32m    ([m
+[32m+[m[32m        graph,[m
+[32m+[m[32m        output,[m
+[32m+[m[32m        ProofGoal::bounded_above("nested_branch_bound", left, output),[m
+[32m+[m[32m    )[m
+ }[m
+ [m
+ /// A consumer-owned, explicitly bounded state transition.[m
+[36m@@ -69,12 +88,20 @@[m [mimpl Accumulate {[m
+     }[m
+ }[m
+ impl MultiOutputModule for Accumulate {[m
+[31m-    fn name(&self) -> &'static str { "fixture_accumulate" }[m
+[31m-    fn semantic_version(&self) -> &'static str { "1" }[m
+[31m-    fn contract(&self) -> &MultiOutputContract { &self.ports }[m
+[31m-    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId])[m
+[31m-        -> Result<Vec<NodeId>, NeuralError>[m
+[31m-    {[m
+[32m+[m[32m    fn name(&self) -> &'static str {[m
+[32m+[m[32m        "fixture_accumulate"[m
+[32m+[m[32m    }[m
+[32m+[m[32m    fn semantic_version(&self) -> &'static str {[m
+[32m+[m[32m        "1"[m
+[32m+[m[32m    }[m
+[32m+[m[32m    fn contract(&self) -> &MultiOutputContract {[m
+[32m+[m[32m        &self.ports[m
+[32m+[m[32m    }[m
+[32m+[m[32m    fn build([m
+[32m+[m[32m        &self,[m
+[32m+[m[32m        graph: &mut NeuralGraph,[m
+[32m+[m[32m        inputs: &[NodeId],[m
+[32m+[m[32m    ) -> Result<Vec<NodeId>, NeuralError> {[m
+         let sum = graph.add(inputs[0], inputs[1])?;[m
+         let next = graph.relu(sum)?;[m
+         let output = graph.relu(next)?;[m
+[36m@@ -88,8 +115,10 @@[m [mpub fn recurrent() -> (NeuralGraph, FixedScan) {[m
+     let first = graph.input(shape(&[3]), Domain::NonNegativeFinite);[m
+     let second = graph.input(shape(&[3]), Domain::NonNegativeFinite);[m
+     let step = Accumulate::new(3);[m
+[31m-    let scan = graph.component("fixture/recurrent/steps")[m
+[31m-        .scan(&step, initial, &[first, second]).unwrap();[m
+[32m+[m[32m    let scan = graph[m
+[32m+[m[32m        .component("fixture/recurrent/steps")[m
+[32m+[m[32m        .scan(&step, initial, &[first, second])[m
+[32m+[m[32m        .unwrap();[m
+     (graph, scan)[m
+ }[m
+ [m
+[36m@@ -107,17 +136,14 @@[m [mpub fn tensor_heavy() -> (NeuralGraph, NodeId, ProofGoal) {[m
+         "1.0.0",[m
+         1,[m
+         PointwiseExpr::input(0).relu(),[m
+[31m-    ).unwrap();[m
+[32m+[m[32m    )[m
+[32m+[m[32m    .unwrap();[m
+     let custom = spec.apply(&mut graph, &[product]).unwrap();[m
+     let mask = graph.positive_mask(gates).unwrap();[m
+     let gated = graph.select_positive(mask, custom, product).unwrap();[m
+     let reduced = graph.reduce_sum(gated, 1).unwrap();[m
+     let output = graph.relu(reduced).unwrap();[m
+[31m-    let goal = ProofGoal::nonnegative([m
+[31m-        "tensor_heavy_output",[m
+[31m-        output,[m
+[31m-        vec![matrix, values, gates],[m
+[31m-    );[m
+[32m+[m[32m    let goal = ProofGoal::nonnegative("tensor_heavy_output", output, vec![matrix, values, gates]);[m
+     (graph, output, goal)[m
+ }[m
+ [m
+[36m@@ -130,7 +156,10 @@[m [mpub fn plan_nested() -> Result<(usize, Vec<String>), AutoBuildError> {[m
+         &[ArchitectureProofTask::Goal(goal)],[m
+         GpuRequirement::AllOutputs,[m
+     )?;[m
+[31m-    Ok((plan.connectivity.module_instances, plan.goals[0].1.theorem_names().to_vec()))[m
+[32m+[m[32m    Ok(([m
+[32m+[m[32m        plan.connectivity.module_instances,[m
+[32m+[m[32m        plan.goals[0].1.theorem_names().to_vec(),[m
+[32m+[m[32m    ))[m
+ }[m
+ [m
+ #[cfg(test)][m
+[36m@@ -145,15 +174,27 @@[m [mmod tests {[m
+         assert_eq!(graph.canonical_ir(), other.canonical_ir());[m
+         assert_eq!(graph.modules().len(), 2);[m
+         assert!(graph.canonical_ir().contains("fixture_positive_join"));[m
+[31m-        let plan = ArchitectureAutoCompiler::default().plan([m
+[31m-            &graph,[m
+[31m-            &[output],[m
+[31m-            &[ArchitectureProofTask::Goal(goal.clone())],[m
+[31m-            GpuRequirement::AllOutputs,[m
+[31m-        ).unwrap();[m
+[32m+[m[32m        let plan = ArchitectureAutoCompiler::default()[m
+[32m+[m[32m            .plan([m
+[32m+[m[32m                &graph,[m
+[32m+[m[32m                &[output],[m
+[32m+[m[32m                &[ArchitectureProofTask::Goal(goal.clone())],[m
+[32m+[m[32m                GpuRequirement::AllOutputs,[m
+[32m+[m[32m            )[m
+[32m+[m[32m            .unwrap();[m
+         assert!(matches!(plan.gpu[0], PlannedGpu::Supported { .. }));[m
+[31m-        assert!(plan.goals[0].1.theorem_names().contains(&"architecture_property_nested_branch_bound".to_owned()));[m
+[31m-        assert!(plan.goals[0].1.source().contains("pointwise_le_relu_add_of_nonnegative"));[m
+[32m+[m[32m        assert!([m
+[32m+[m[32m            plan.goals[0][m
+[32m+[m[32m                .1[m
+[32m+[m[32m                .theorem_names()[m
+[32m+[m[32m                .contains(&"architecture_property_nested_branch_bound".to_owned())[m
+[32m+[m[32m        );[m
+[32m+[m[32m        assert!([m
+[32m+[m[32m            plan.goals[0][m
+[32m+[m[32m                .1[m
+[32m+[m[32m                .source()[m
+[32m+[m[32m                .contains("pointwise_le_relu_add_of_nonnegative")[m
+[32m+[m[32m        );[m
+         assert_eq!(plan.connectivity.module_instances, 2);[m
+     }[m
+ [m
+[36m@@ -163,7 +204,9 @@[m [mmod tests {[m
+         let x = graph.input(shape(&[4]), Domain::NonNegativeFinite);[m
+         let wrong = graph.input(shape(&[3]), Domain::NonNegativeFinite);[m
+         let before = graph.nodes().len();[m
+[31m-        let error = graph.component("example/left").single(&PositiveJoin::new(4), &[x, wrong])[m
+[32m+[m[32m        let error = graph[m
+[32m+[m[32m            .component("example/left")[m
+[32m+[m[32m            .single(&PositiveJoin::new(4), &[x, wrong])[m
+             .unwrap_err();[m
+         assert_eq!(error.component_path, "example/left");[m
+         assert_eq!(error.port, "input_1");[m
+[36m@@ -171,8 +214,10 @@[m [mmod tests {[m
+         assert!(error.to_string().contains("shape mismatch"));[m
+         assert_eq!(graph.nodes().len(), before);[m
+         let weak_domain = graph.input(shape(&[4]), Domain::Any);[m
+[31m-        let error = graph.component("example/parameters")[m
+[31m-            .single(&PositiveJoin::new(4), &[x, weak_domain]).unwrap_err();[m
+[32m+[m[32m        let error = graph[m
+[32m+[m[32m            .component("example/parameters")[m
+[32m+[m[32m            .single(&PositiveJoin::new(4), &[x, weak_domain])[m
+[32m+[m[32m            .unwrap_err();[m
+         assert_eq!(error.port, "input_1");[m
+         assert_eq!(error.constraint, "input value domain");[m
+         assert!(error.to_string().contains("NonNegativeFinite"));[m
+[36m@@ -187,16 +232,28 @@[m [mmod tests {[m
+             name: "two_steps".into(),[m
+             scan: scan.clone(),[m
+         }];[m
+[31m-        let plan = ArchitectureAutoCompiler::default().plan([m
+[31m-            &graph,[m
+[31m-            &scan.proof_outputs(),[m
+[31m-            &tasks,[m
+[31m-            GpuRequirement::AllOutputs,[m
+[31m-        ).unwrap();[m
+[32m+[m[32m        let plan = ArchitectureAutoCompiler::default()[m
+[32m+[m[32m            .plan([m
+[32m+[m[32m                &graph,[m
+[32m+[m[32m                &scan.proof_outputs(),[m
+[32m+[m[32m                &tasks,[m
+[32m+[m[32m                GpuRequirement::AllOutputs,[m
+[32m+[m[32m            )[m
+[32m+[m[32m            .unwrap();[m
+         assert_eq!(plan.connectivity.module_instances, 2);[m
+         assert_eq!(plan.goals.len(), 1);[m
+[31m-        assert!(plan.goals[0].1.theorem_names().iter().any(|name| name.contains("two_steps")));[m
+[31m-        assert!(plan.gpu.iter().all(|part| matches!(part, PlannedGpu::Supported { .. })));[m
+[32m+[m[32m        assert!([m
+[32m+[m[32m            plan.goals[0][m
+[32m+[m[32m                .1[m
+[32m+[m[32m                .theorem_names()[m
+[32m+[m[32m                .iter()[m
+[32m+[m[32m                .any(|name| name.contains("two_steps"))[m
+[32m+[m[32m        );[m
+[32m+[m[32m        assert!([m
+[32m+[m[32m            plan.gpu[m
+[32m+[m[32m                .iter()[m
+[32m+[m[32m                .all(|part| matches!(part, PlannedGpu::Supported { .. }))[m
+[32m+[m[32m        );[m
+     }[m
+ [m
+     #[test][m
+[36m@@ -206,7 +263,10 @@[m [mmod tests {[m
+         let wrong = graph.input(shape(&[2]), Domain::NonNegativeFinite);[m
+         let step = Accumulate::new(3);[m
+         let before = graph.nodes().len();[m
+[31m-        let error = graph.component("example/scan").scan(&step, initial, &[wrong]).unwrap_err();[m
+[32m+[m[32m        let error = graph[m
+[32m+[m[32m            .component("example/scan")[m
+[32m+[m[32m            .scan(&step, initial, &[wrong])[m
+[32m+[m[32m            .unwrap_err();[m
+         assert_eq!(error.port, "input[0]");[m
+         assert_eq!(error.component_path, "example/scan");[m
+         assert_eq!(graph.nodes().len(), before);[m
+[36m@@ -218,11 +278,15 @@[m [mmod tests {[m
+         let mut graph = NeuralGraph::default();[m
+         let initial = graph.input(shape(&[3]), Domain::NonNegativeFinite);[m
+         let event = graph.input(shape(&[3]), Domain::NonNegativeFinite);[m
+[31m-        let scan = graph.component("example/unproved_scan")[m
+[31m-            .scan(&weak, initial, &[event]).unwrap();[m
+[32m+[m[32m        let scan = graph[m
+[32m+[m[32m            .component("example/unproved_scan")[m
+[32m+[m[32m            .scan(&weak, initial, &[event])[m
+[32m+[m[32m            .unwrap();[m
+         assert!(matches!([m
+             LeanProofEngine::default().generate_fixed_scan_nonnegative([m
+[31m-                &graph, &scan, "missing_invariant"[m
+[32m+[m[32m                &graph,[m
+[32m+[m[32m                &scan,[m
+[32m+[m[32m                "missing_invariant"[m
+             ),[m
+             Err(ProofError::InvalidScan)[m
+         ));[m
+[36m@@ -234,17 +298,19 @@[m [mmod tests {[m
+         let initial = graph.input(shape(&[3]), Domain::NonNegativeFinite);[m
+         let event = graph.input(shape(&[3]), Domain::NonNegativeFinite);[m
+         let step = Accumulate::new(3);[m
+[31m-        let outputs = graph.component("example/step").multi_named([m
+[31m-            &step, &[("input", event), ("state", initial)][m
+[31m-        ).unwrap();[m
+[32m+[m[32m        let outputs = graph[m
+[32m+[m[32m            .component("example/step")[m
+[32m+[m[32m            .multi_named(&step, &[("input", event), ("state", initial)])[m
+[32m+[m[32m            .unwrap();[m
+         assert_eq!(outputs.len(), 2);[m
+         assert!(outputs.contains_key("next_state"));[m
+         assert!(outputs.contains_key("output"));[m
+         assert_eq!(graph.multi_modules().len(), 1);[m
+         let before = graph.nodes().len();[m
+[31m-        let err: BindingError = graph.component("example/bad_step").multi([m
+[31m-            &step, &[("input", event), ("input", initial)][m
+[31m-        ).unwrap_err();[m
+[32m+[m[32m        let err: BindingError = graph[m
+[32m+[m[32m            .component("example/bad_step")[m
+[32m+[m[32m            .multi(&step, &[("input", event), ("input", initial)])[m
+[32m+[m[32m            .unwrap_err();[m
+         assert_eq!(err.port, "state"); // required state has not been bound[m
+         assert_eq!(graph.nodes().len(), before);[m
+     }[m
+[36m@@ -254,15 +320,30 @@[m [mmod tests {[m
+         let (graph, output, goal) = tensor_heavy();[m
+         let (same, _, _) = tensor_heavy();[m
+         assert_eq!(graph.canonical_ir(), same.canonical_ir());[m
+[31m-        assert!(graph.nodes().iter().any(|node| matches!(node.operation, Operation::Pointwise(_))));[m
+[32m+[m[32m        assert!([m
+[32m+[m[32m            graph[m
+[32m+[m[32m                .nodes()[m
+[32m+[m[32m                .iter()[m
+[32m+[m[32m                .any(|node| matches!(node.operation, Operation::Pointwise(_)))[m
+[32m+[m[32m        );[m
+         let tasks = [ArchitectureProofTask::Goal(goal)];[m
+[31m-        let plan = ArchitectureAutoCompiler::default().plan([m
+[31m-            &graph, &[output], &tasks, GpuRequirement::AllowUnsupported[m
+[31m-        ).unwrap();[m
+[31m-        assert!(plan.goals[0].1.theorem_names().contains(&"architecture_property_tensor_heavy_output".to_owned()));[m
+[32m+[m[32m        let plan = ArchitectureAutoCompiler::default()[m
+[32m+[m[32m            .plan(&graph, &[output], &tasks, GpuRequirement::AllowUnsupported)[m
+[32m+[m[32m            .unwrap();[m
+[32m+[m[32m        assert!([m
+[32m+[m[32m            plan.goals[0][m
+[32m+[m[32m                .1[m
+[32m+[m[32m                .theorem_names()[m
+[32m+[m[32m                .contains(&"architecture_property_tensor_heavy_output".to_owned())[m
+[32m+[m[32m        );[m
+         assert!(matches!(plan.gpu[0], PlannedGpu::Unsupported { .. }));[m
+         assert!(matches!([m
+[31m-            ArchitectureAutoCompiler::default().plan(&graph, &[output], &tasks, GpuRequirement::AllOutputs),[m
+[32m+[m[32m            ArchitectureAutoCompiler::default().plan([m
+[32m+[m[32m                &graph,[m
+[32m+[m[32m                &[output],[m
+[32m+[m[32m                &tasks,[m
+[32m+[m[32m                GpuRequirement::AllOutputs[m
+[32m+[m[32m            ),[m
+             Err(AutoBuildError::Gpu(GpuError::UnsupportedOperation { .. }))[m
+         ));[m
+     }[m
+[36m@@ -272,12 +353,17 @@[m [mmod tests {[m
+         let mut graph = NeuralGraph::default();[m
+         let x = graph.input(shape(&[2]), Domain::Finite);[m
+         let spec = PointwiseSpec::new([m
+[31m-            "fixture.consumer.unsafe_claim", "1", 1,[m
+[32m+[m[32m            "fixture.consumer.unsafe_claim",[m
+[32m+[m[32m            "1",[m
+[32m+[m[32m            1,[m
+             PointwiseExpr::input(0).add(PointwiseExpr::input(0)),[m
+[31m-        ).unwrap();[m
+[32m+[m[32m        )[m
+[32m+[m[32m        .unwrap();[m
+         let output = spec.apply(&mut graph, &[x]).unwrap();[m
+         let false_goal = ProofGoal::nonnegative("unjustified", output, vec![]);[m
+[31m-        let error = false_goal.generate_source(&graph, &LeanProofEngine::default()).unwrap_err();[m
+[32m+[m[32m        let error = false_goal[m
+[32m+[m[32m            .generate_source(&graph, &LeanProofEngine::default())[m
+[32m+[m[32m            .unwrap_err();[m
+         assert_eq!(error.theorem, "architecture_property_unjustified");[m
+         assert!(error.to_string().contains("unjustified"));[m
+     }[m
+[36m@@ -292,16 +378,21 @@[m [mmod tests {[m
+         let lean = LeanProofEngine::default();[m
+         let (nested_graph, _, nested_goal) = nested();[m
+         let (_, nested_audit) = nested_goal[m
+[31m-            .certify(&nested_graph, &lean, &root.join("nested.lean")).unwrap();[m
+[32m+[m[32m            .certify(&nested_graph, &lean, &root.join("nested.lean"))[m
+[32m+[m[32m            .unwrap();[m
+         assert!(!nested_audit.theorem_names.is_empty());[m
+ [m
+         let (recurrent_graph, scan) = recurrent();[m
+[31m-        let recurrent_goal = lean.generate_fixed_scan_nonnegative(&recurrent_graph, &scan, "two_steps").unwrap();[m
+[31m-        lean.verify_certified(&recurrent_goal, &root.join("recurrent.lean")).unwrap();[m
+[32m+[m[32m        let recurrent_goal = lean[m
+[32m+[m[32m            .generate_fixed_scan_nonnegative(&recurrent_graph, &scan, "two_steps")[m
+[32m+[m[32m            .unwrap();[m
+[32m+[m[32m        lean.verify_certified(&recurrent_goal, &root.join("recurrent.lean"))[m
+[32m+[m[32m            .unwrap();[m
+ [m
+         let (tensor_graph, _, tensor_goal) = tensor_heavy();[m
+         let (_, tensor_audit) = tensor_goal[m
+[31m-            .certify(&tensor_graph, &lean, &root.join("tensor_heavy.lean")).unwrap();[m
+[32m+[m[32m            .certify(&tensor_graph, &lean, &root.join("tensor_heavy.lean"))[m
+[32m+[m[32m            .unwrap();[m
+         assert!(!tensor_audit.theorem_names.is_empty());[m
+ [m
+         // Independent property of the consumer-defined atomic operation,[m
+[36m@@ -309,19 +400,35 @@[m [mmod tests {[m
+         let mut custom_graph = NeuralGraph::default();[m
+         let x = custom_graph.input(shape(&[2]), Domain::Finite);[m
+         let spec = PointwiseSpec::new([m
+[31m-            "fixture.custom_relu", "1", 1, PointwiseExpr::input(0).relu()[m
+[31m-        ).unwrap();[m
+[32m+[m[32m            "fixture.custom_relu",[m
+[32m+[m[32m            "1",[m
+[32m+[m[32m            1,[m
+[32m+[m[32m            PointwiseExpr::input(0).relu(),[m
+[32m+[m[32m        )[m
+[32m+[m[32m        .unwrap();[m
+         let contract = MathContract::new([m
+             vec![PortContract::finite(shape(&[2]))],[m
+             PortContract::any(shape(&[2])),[m
+[31m-        ).nonnegative();[m
+[31m-        let custom_output = custom_graph.compose([m
+[31m-            "fixture_atomic_contract", "1", &contract, &[x],[m
+[31m-            |g, args| spec.apply(g, args),[m
+[31m-        ).unwrap();[m
+[32m+[m[32m        )[m
+[32m+[m[32m        .nonnegative();[m
+[32m+[m[32m        let custom_output = custom_graph[m
+[32m+[m[32m            .compose([m
+[32m+[m[32m                "fixture_atomic_contract",[m
+[32m+[m[32m                "1",[m
+[32m+[m[32m                &contract,[m
+[32m+[m[32m                &[x],[m
+[32m+[m[32m                |g, args| spec.apply(g, args),[m
+[32m+[m[32m            )[m
+[32m+[m[32m            .unwrap();[m
+         let program = lean.generate(&custom_graph, custom_output).unwrap();[m
+[31m-        assert!(program.theorem_names().iter().any(|name| name.contains("claim")));[m
+[31m-        lean.verify_certified(&program, &root.join("custom_operation.lean")).unwrap();[m
+[32m+[m[32m        assert!([m
+[32m+[m[32m            program[m
+[32m+[m[32m                .theorem_names()[m
+[32m+[m[32m                .iter()[m
+[32m+[m[32m                .any(|name| name.contains("claim"))[m
+[32m+[m[32m        );[m
+[32m+[m[32m        lean.verify_certified(&program, &root.join("custom_operation.lean"))[m
+[32m+[m[32m            .unwrap();[m
+ [m
+         // Mathematical counterexample: final ReLU can fall below the left[m
+         // operand when the independent right branch is negative.[m
+[36m@@ -332,7 +439,11 @@[m [mmod tests {[m
+         let total = false_graph.add(positive_a, b).unwrap();[m
+         let final_output = false_graph.relu(total).unwrap();[m
+         let claim = ProofGoal::bounded_above("false_bound", positive_a, final_output);[m
+[31m-        assert!(claim.certify(&false_graph, &lean, &root.join("false.lean")).is_err());[m
+[32m+[m[32m        assert!([m
+[32m+[m[32m            claim[m
+[32m+[m[32m                .certify(&false_graph, &lean, &root.join("false.lean"))[m
+[32m+[m[32m                .is_err()[m
+[32m+[m[32m        );[m
+         fs::remove_dir_all(root).unwrap();[m
+     }[m
+ }[m
