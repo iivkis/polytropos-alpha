@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{GpuProgram, ModuleInstanceRef, NeuralGraph, NodeId, Operation};
 
 /// Stable provenance and presentation metadata for one architecture.
-/// An input role may be "input" or "parameter"; IR has no state/control nodes.
+/// Input, parameter and temporal state are metadata on the same pure IR source.
 #[derive(Clone, Debug)]
 pub struct ArchitectureMetadata {
     pub id: String,
@@ -90,6 +90,7 @@ fn node_theme(kind: &str, op: &Operation) -> (&'static str, &'static str) {
     match kind {
         "input" => ("#EAF2FF", "#3972BD"),
         "parameter" => ("#FFF1DB", "#B9772A"),
+        "state" => ("#E9F6F5", "#36827C"),
         "architecture_output" => ("#DDF8E9", "#26805A"),
         _ => match op {
             Operation::Add => ("#F1F5F9", "#64748B"),
@@ -402,7 +403,7 @@ pub fn snapshot_architecture(
         if !matches!(
             graph.nodes().get(idx).map(|node| &node.operation),
             Some(Operation::Input)
-        ) || !matches!(role.as_str(), "input" | "parameter")
+        ) || !matches!(role.as_str(), "input" | "parameter" | "state")
         {
             return Err(bad(
                 "unsupported input role or non-input node role assignment",
@@ -413,7 +414,7 @@ pub fn snapshot_architecture(
         matches!(node.operation, Operation::Input) && !metadata.input_roles.contains_key(&idx)
     }) {
         return Err(bad(
-            "every architecture source input needs an explicit input/parameter role",
+            "every architecture source input needs an explicit input/parameter/state role",
         ));
     }
     if metadata.global_property != "architecture_global_nonnegative" {
@@ -484,9 +485,9 @@ pub fn snapshot_architecture(
         ("vn_architecture_output", format!("n{}", output.index())),
         (
             "vn_supported_roles",
-            "input,parameter,primitive,module-boundary,output".into(),
+            "input,parameter,state,primitive,module-boundary,output".into(),
         ),
-        ("vn_unmodeled", "state,control,training".into()),
+        ("vn_unmodeled", "control,training".into()),
         ("vn_module_instances", scopes.len().to_string()),
     ] {
         writeln!(dot, "  {key}={};", quoted(&value)).expect("writing to string");
@@ -558,6 +559,7 @@ pub fn snapshot_architecture(
             let title = match kind {
                 "input" => "INPUT".to_owned(),
                 "parameter" => "PARAMETER".to_owned(),
+                "state" => "STATE".to_owned(),
                 "architecture_output" => format!("OUTPUT · {}", operation_title(&node.operation)),
                 _ => operation_title(&node.operation).to_owned(),
             };

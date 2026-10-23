@@ -669,6 +669,112 @@ impl GpuExecution {
         self.session.flush_input_copies()
     }
 
+    /// Rebind one named source without uploading unchanged parameters or state.
+    /// Metadata and domain are checked before touching GPU memory.
+    pub fn update_input(&mut self, id: NodeId, value: &Tensor<f32>) -> Result<(), GpuError> {
+        let node = self.program.graph.node(id)?;
+        if !self.program.source_inputs().contains(&id) {
+            return Err(GpuError::InvalidInput {
+                node: id.index(),
+                reason: "source is outside the compiled output slice",
+            });
+        }
+        if value.shape() != &node.shape {
+            return Err(GpuError::InvalidGraph(NeuralError::ShapeMismatch {
+                expected: node.shape.clone(),
+                actual: value.shape().clone(),
+            }));
+        }
+        value.validate_domain(node.domain)?;
+        let address = self.input_addresses[&id.index()];
+        self.session.copy_to_device(address, value.values())?;
+        self.session.flush_input_copies()
+    }
+
+    /// Copy selected completed outputs to next-step state inputs on-device.
+    /// Validate all links before copying, including alias hazards in multi-state
+    /// feedback, so a rejected mapping leaves the previous state intact.
+    pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
+        let mut destinations = BTreeSet::new();
+        let mut copies = Vec::with_capacity(links.len());
+        for &(state, next) in links {
+            let old = self.program.graph.node(state)?;
+            let new = self.program.graph.node(next)?;
+            if !destinations.insert(state.index()) {
+                return Err(GpuError::InvalidInput {
+                    node: state.index(),
+                    reason: "duplicate state feedback destination",
+                });
+            }
+            if old.shape != new.shape {
+                return Err(GpuError::InvalidGraph(NeuralError::ShapeMismatch {
+                    expected: old.shape.clone(),
+                    actual: new.shape.clone(),
+                }));
+            }
+            if new.dtype != old.dtype {
+                return Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
+                    operation: "feedback_state",
+                    expected: old.dtype,
+                    actual: new.dtype,
+                }));
+            }
+            if !new.domain.satisfies(old.domain) {
+                return Err(GpuError::InvalidGraph(NeuralError::DomainNotEstablished {
+                    required: old.domain,
+                    actual: new.domain,
+                }));
+            }
+            let &dest = self.input_addresses.get(&state.index()).ok_or(
+                GpuError::InvalidInput {
+                    node: state.index(),
+                    reason: "feedback destination is not a live source",
+                },
+            )?;
+            let src = self
+                .output_addresses
+                .iter()
+                .find(|(node, _, _)| *node == next)
+                .map(|(_, _, address)| *address)
+                .ok_or(GpuError::InvalidInput {
+                    node: next.index(),
+                    reason: "feedback source is not a selected output",
+                })?;
+            copies.push((dest, src, old.shape.element_count()));
+        }
+        // Serial D2D transfers are safe only if no earlier destination
+        // aliases a different source. Otherwise reject instead of silently
+        // changing the meaning of simultaneous multi-state assignment.
+        if copies.iter().any(|(dst, _, _)| {
+            copies.iter().any(|(other_dst, src, _)| dst == src && dst != other_dst)
+        }) {
+            return Err(GpuError::InvalidInput {
+                node: 0,
+                reason: "overlapping state feedback sources require staging",
+            });
+        }
+        for (dst, src, elements) in copies {
+            if dst != src {
+                self.session.copy_device_to_device(dst, src, elements)?;
+            }
+        }
+        self.session.synchronize()
+    }
+
+    /// Read a current source (for state inspection) without another replay.
+    pub fn read_source(&mut self, id: NodeId) -> Result<Tensor<f32>, GpuError> {
+        let node = self.program.graph.node(id)?;
+        let address = self.input_addresses.get(&id.index()).copied().ok_or(
+            GpuError::InvalidInput {
+                node: id.index(),
+                reason: "source is outside the compiled output slice",
+            },
+        )?;
+        let mut values = vec![0.0f32; node.shape.element_count()];
+        self.session.copy_to_host(&mut values, address)?;
+        Ok(Tensor::new(node.shape.clone(), values)?)
+    }
+
     pub fn replay(&self) -> Result<(), GpuError> {
         if self.has_graph {
             self.session.launch_graph()?;

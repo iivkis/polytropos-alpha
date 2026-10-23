@@ -73,6 +73,10 @@ P0-срез структурной тензорной маршрутизации
 
 Полный пример с пользовательским `NeuralModule` и `MathContract` находится в [examples/stage2_graph.rs](crates/verineural/examples/stage2_graph.rs).
 
+## P1: явный state и именованный GPU runtime
+
+ModelBuilder::state/next_state определяют переход без скрытых side effects в IR, а block_multi возвращает именованные порты. GpuEngine::prepare_model создаёт единый CUDA Graph. ModelExecution::set_input, set_parameter и set_state обновляют только соответствующие входные буферы, run исполняет чистый шаг, step применяет device-to-device обратную связь, а output/state позволяют прочитать результат. GPU/FP32/SASS формально не сертифицированы; structural P0 операции остаются GPU unsupported.
+
 ## Автоматическая сборка пользовательских архитектур (новый срез)
 
 `ArchitectureAutoCompiler` объединяет проверку типизированных связей компонентов, генерацию и Lean-аудит всех выбранных выходов и независимых целей, LLVM/PTX lowering каждого поддерживаемого NVIDIA-выхода и один отчёт с гипотезами и статусами. Модули и математические цели объявляются потребителем на Rust; встроенной LLM-архитектуры нет. Неподдерживаемые GPU-операции либо отклоняются (`GpuRequirement::AllOutputs`), либо получают явный статус `unsupported`. **Структурная проверка связей на Rust и доказательство свойств Lean не являются доказательством PTX/SASS и FP32 эквивалентности.**

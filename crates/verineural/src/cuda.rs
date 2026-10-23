@@ -89,6 +89,7 @@ mod platform {
         pinned_free: unsafe extern "C" fn(*mut c_void) -> ResultCode,
         host_to_device: unsafe extern "C" fn(DevicePtr, *const c_void, usize, Handle) -> ResultCode,
         device_to_host: unsafe extern "C" fn(*mut c_void, DevicePtr, usize, Handle) -> ResultCode,
+        device_to_device: unsafe extern "C" fn(DevicePtr, DevicePtr, usize, Handle) -> ResultCode,
         stream_create: unsafe extern "C" fn(*mut Handle, c_uint) -> ResultCode,
         stream_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
         stream_sync: unsafe extern "C" fn(Handle) -> ResultCode,
@@ -136,6 +137,7 @@ mod platform {
                 pinned_free: lib.function("cuMemFreeHost")?,
                 host_to_device: lib.function("cuMemcpyHtoDAsync_v2")?,
                 device_to_host: lib.function("cuMemcpyDtoHAsync_v2")?,
+                device_to_device: lib.function("cuMemcpyDtoDAsync_v2")?,
                 stream_create: lib.function("cuStreamCreate")?,
                 stream_destroy: lib.function("cuStreamDestroy_v2")?,
                 stream_sync: lib.function("cuStreamSynchronize")?,
@@ -384,6 +386,25 @@ mod platform {
             self.staging_pending.push(staging);
             check("cuMemcpyHtoDAsync_v2", unsafe {
                 (self.functions.host_to_device)(address, pinned, bytes, self.stream)
+            })
+        }
+
+        /// State feedback happens on the existing explicit non-blocking stream.
+        /// It is not part of graph capture and never round-trips through the host.
+        pub fn copy_device_to_device(
+            &mut self,
+            destination: DevicePtr,
+            source: DevicePtr,
+            elements: usize,
+        ) -> Result<(), GpuError> {
+            self.require_allocation(destination, elements)?;
+            self.require_allocation(source, elements)?;
+            let bytes = elements
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(GpuError::UnsupportedSize { elements })?;
+            let _context = self.enter_context()?;
+            check("cuMemcpyDtoDAsync_v2", unsafe {
+                (self.functions.device_to_device)(destination, source, bytes, self.stream)
             })
         }
 
@@ -760,6 +781,12 @@ mod platform {
         }
 
         pub fn copy_to_device(&mut self, _: u64, _: &[f32]) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn copy_device_to_device(&mut self, _: u64, _: u64, _: usize) -> Result<(), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))

@@ -1374,6 +1374,102 @@ impl NeuralGraph {
         Ok(output)
     }
 
+    /// Infer an atomic named multi-output block from its semantic IR.
+    /// Input names and output names are part of the structural contract;
+    /// mathematical postconditions still require explicit proof obligations.
+    pub fn compose_multi_inferred<F>(
+        &mut self,
+        name: &'static str,
+        semantic_version: &'static str,
+        inputs: &[(&'static str, NodeId)],
+        output_names: &[&'static str],
+        build: F,
+    ) -> Result<Vec<NodeId>, NeuralError>
+    where
+        F: FnOnce(&mut NeuralGraph, &[NodeId]) -> Result<Vec<NodeId>, NeuralError>,
+    {
+        if output_names.is_empty() {
+            return Err(NeuralError::ContractViolation {
+                module: name,
+                detail: "multi-output block requires at least one output",
+            });
+        }
+        for names in [
+            inputs.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            output_names.to_vec(),
+        ] {
+            let mut seen = BTreeSet::new();
+            if names.iter().any(|label| label.is_empty() || !seen.insert(*label)) {
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "empty or duplicate inferred multi-port name",
+                });
+            }
+        }
+        let input_ids: Vec<_> = inputs.iter().map(|(_, node)| *node).collect();
+        let requires = inputs
+            .iter()
+            .map(|(label, node)| {
+                let value = self.node(*node)?;
+                Ok(NamedPortContract::new(
+                    label,
+                    PortContract::typed(value.shape.clone(), value.dtype, value.domain),
+                ))
+            })
+            .collect::<Result<Vec<_>, NeuralError>>()?;
+        let body_start = self.nodes.len();
+        let module_start = self.modules.len();
+        let multi_start = self.multi_modules.len();
+        let mut candidate = self.clone();
+        let outputs = build(&mut candidate, &input_ids)?;
+        if outputs.len() != output_names.len() {
+            return Err(NeuralError::ContractViolation {
+                module: name,
+                detail: "incorrect inferred multi-output result count",
+            });
+        }
+        candidate.validate_body(
+            body_start,
+            module_start,
+            multi_start,
+            &input_ids,
+            &outputs,
+            name,
+        )?;
+        if outputs.iter().map(|id| id.index()).collect::<BTreeSet<_>>().len()
+            != outputs.len()
+        {
+            return Err(NeuralError::ContractViolation {
+                module: name,
+                detail: "duplicate inferred multi-output identity",
+            });
+        }
+        let ensures = outputs
+            .iter()
+            .zip(output_names)
+            .map(|(&id, &label)| {
+                let value = candidate.node(id)?;
+                Ok(NamedPortContract::new(
+                    label,
+                    PortContract::typed(value.shape.clone(), value.dtype, value.domain),
+                ))
+            })
+            .collect::<Result<Vec<_>, NeuralError>>()?;
+        let module_index = candidate.multi_modules.len();
+        candidate.multi_modules.push(MultiModuleInvocation {
+            name,
+            semantic_version,
+            inputs: input_ids,
+            body_start,
+            body_end: candidate.nodes.len(),
+            outputs: outputs.clone(),
+            contract: MultiOutputContract::new(requires, ensures),
+        });
+        candidate.module_order.push(ModuleInstanceKey::Multi(module_index));
+        *self = candidate;
+        Ok(outputs)
+    }
+
     /// Unroll a statically bounded state transition, without introducing a
     /// built-in recurrent architecture or an implicit GPU execution mode.
     /// The transition's interface must be exactly:

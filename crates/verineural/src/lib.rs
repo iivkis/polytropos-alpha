@@ -40,6 +40,7 @@ mod error;
 mod gpu;
 mod ir;
 mod model;
+mod model_execution;
 mod modules;
 mod numeric;
 mod primitive;
@@ -72,6 +73,7 @@ pub use ir::{
     ValueRef,
 };
 pub use model::{Model, ModelBuilder, ModelError, SourceRole};
+pub use model_execution::{ModelExecution, ModelExecutionError};
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
 pub use numeric::{
     ExactFp32Plan, NumericError, RneErrorContract, RneFp32Plan, RneFp32Trace,

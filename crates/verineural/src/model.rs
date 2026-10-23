@@ -13,6 +13,7 @@ use std::fmt;
 pub enum SourceRole {
     Input,
     Parameter,
+    State,
 }
 
 impl SourceRole {
@@ -20,6 +21,7 @@ impl SourceRole {
         match self {
             Self::Input => "input",
             Self::Parameter => "parameter",
+            Self::State => "state",
         }
     }
 }
@@ -74,6 +76,7 @@ pub struct ModelBuilder {
     graph: NeuralGraph,
     sources: BTreeMap<String, (NodeId, SourceRole)>,
     outputs: BTreeMap<String, NodeId>,
+    next_states: BTreeMap<String, NodeId>,
     goals: BTreeMap<String, ProofGoal>,
 }
 
@@ -93,6 +96,7 @@ impl ModelBuilder {
             graph: NeuralGraph::new(policy),
             sources: BTreeMap::new(),
             outputs: BTreeMap::new(),
+            next_states: BTreeMap::new(),
             goals: BTreeMap::new(),
         }
     }
@@ -139,6 +143,53 @@ impl ModelBuilder {
         self.insert_source(name, dims, domain, SourceRole::Parameter)
     }
 
+    /// State is an explicit named source, not a mutable IR operation.
+    pub fn state(
+        &mut self,
+        name: impl Into<String>,
+        dims: impl Into<Vec<usize>>,
+        domain: Domain,
+    ) -> Result<NodeId, ModelError> {
+        self.insert_source(name, dims, domain, SourceRole::State)
+    }
+
+    /// A pure graph transition: the next value must satisfy the state contract.
+    pub fn next_state(&mut self, name: &str, next: NodeId) -> Result<(), ModelError> {
+        let (source, role) = self
+            .sources
+            .get(name)
+            .copied()
+            .ok_or_else(|| ModelError::Invalid(format!("unknown state: {name}")))?;
+        if role != SourceRole::State || self.next_states.contains_key(name) {
+            return Err(ModelError::Invalid(format!(
+                "not a state or duplicate transition: {name}"
+            )));
+        }
+        let before = self.graph.node(source)?;
+        let after = self.graph.node(next)?;
+        if before.shape != after.shape {
+            return Err(ModelError::Neural(NeuralError::ShapeMismatch {
+                expected: before.shape.clone(),
+                actual: after.shape.clone(),
+            }));
+        }
+        if after.dtype != before.dtype {
+            return Err(ModelError::Neural(NeuralError::DTypeMismatch {
+                operation: "next_state",
+                expected: before.dtype,
+                actual: after.dtype,
+            }));
+        }
+        if !after.domain.satisfies(before.domain) {
+            return Err(ModelError::Neural(NeuralError::DomainNotEstablished {
+                required: before.domain,
+                actual: after.domain,
+            }));
+        }
+        self.next_states.insert(name.to_owned(), next);
+        Ok(())
+    }
+
     /// Atomic, capture-checked block; output contract inferred from the IR.
     /// Independent mathematical properties must use explicit proof goals.
     pub fn block<F>(
@@ -156,6 +207,33 @@ impl ModelBuilder {
         Ok(self
             .graph
             .compose_inferred(name, "model-block-v1", inputs, build)?)
+    }
+
+    /// Atomic named multi-output block with inferred structural contracts.
+    pub fn block_multi<F>(
+        &mut self,
+        name: &'static str,
+        inputs: &[(&'static str, NodeId)],
+        output_names: &[&'static str],
+        build: F,
+    ) -> Result<BTreeMap<String, NodeId>, ModelError>
+    where
+        F: FnOnce(&mut NeuralGraph, &[NodeId]) -> Result<Vec<NodeId>, NeuralError>,
+    {
+        if !valid_name(name)
+            || inputs.iter().any(|(port, _)| !valid_name(port))
+            || output_names.iter().any(|port| !valid_name(port))
+        {
+            return Err(ModelError::Invalid(format!("invalid multi-block name: {name}")));
+        }
+        let ids = self.graph.compose_multi_inferred(
+            name, "model-multi-block-v1", inputs, output_names, build,
+        )?;
+        Ok(output_names
+            .iter()
+            .zip(ids)
+            .map(|(&name, id)| (name.to_owned(), id))
+            .collect())
     }
 
     pub fn output(&mut self, name: impl Into<String>, id: NodeId) -> Result<(), ModelError> {
@@ -209,7 +287,17 @@ impl ModelBuilder {
                 "all graph source inputs must have a registered model name".into(),
             ));
         }
-        let roots: Vec<_> = self.outputs.values().copied().collect();
+        for (name, (_, role)) in &self.sources {
+            if *role == SourceRole::State && !self.next_states.contains_key(name) {
+                return Err(ModelError::Invalid(format!("missing next_state: {name}")));
+            }
+        }
+        let roots: Vec<_> = self
+            .outputs
+            .values()
+            .chain(self.next_states.values())
+            .copied()
+            .collect();
         let scope = self.graph.dependency_scope(&roots)?;
         for goal in self.goals.values() {
             if !scope.contains(&goal.output.index()) {
@@ -225,6 +313,7 @@ impl ModelBuilder {
             graph: self.graph,
             sources: self.sources,
             outputs: self.outputs,
+            next_states: self.next_states,
             goals: self.goals,
         })
     }
@@ -237,6 +326,7 @@ pub struct Model {
     graph: NeuralGraph,
     sources: BTreeMap<String, (NodeId, SourceRole)>,
     outputs: BTreeMap<String, NodeId>,
+    next_states: BTreeMap<String, NodeId>,
     goals: BTreeMap<String, ProofGoal>,
 }
 
@@ -257,12 +347,26 @@ impl Model {
         &self.outputs
     }
 
+    /// Explicit transition mapping, with no hidden mutation in Semantic IR.
+    pub fn state_links(&self) -> &BTreeMap<String, NodeId> {
+        &self.next_states
+    }
+
+    pub(crate) fn execution_roots(&self) -> Vec<NodeId> {
+        let mut ids = BTreeSet::new();
+        self.outputs
+            .values()
+            .chain(self.next_states.values())
+            .copied()
+            .filter(|id| ids.insert(id.index()))
+            .collect()
+    }
+
     pub fn proof_goals(&self) -> &BTreeMap<String, ProofGoal> {
         &self.goals
     }
 
-    /// Supply source roles to the existing snapshot exporter. Current exporter
-    /// supports only input/parameter; state is not yet a distinct IR role.
+    /// State is metadata on a pure source, not a side-effecting graph operation.
     pub fn metadata(&self, global_property: impl Into<String>) -> ArchitectureMetadata {
         ArchitectureMetadata {
             id: self.id.clone(),
@@ -334,6 +438,9 @@ impl Model {
         for (name, output) in &self.outputs {
             identity.push_str(&format!("output={name};node={}\n", output.index()));
         }
+        for (name, next) in &self.next_states {
+            identity.push_str(&format!("next_state={name};node={}\n", next.index()));
+        }
         for (name, goal) in &self.goals {
             identity.push_str(&format!(
                 "goal={name};node={};kind={:?}\n",
@@ -356,7 +463,7 @@ impl Model {
         compiler: &ArchitectureAutoCompiler,
         config: CertifiedBuildConfig,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        let outputs: Vec<_> = self.outputs.values().copied().collect();
+        let outputs = self.execution_roots();
         let tasks: Vec<_> = self
             .goals
             .values()
@@ -388,7 +495,7 @@ impl Model {
         config: CertifiedBuildConfig,
         pinned_sha256: Option<&str>,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        let outputs: Vec<_> = self.outputs.values().copied().collect();
+        let outputs = self.execution_roots();
         let tasks: Vec<_> = self
             .goals
             .values()
@@ -415,7 +522,7 @@ impl Model {
         compiler: &ArchitectureAutoCompiler,
         gpu_requirement: GpuRequirement,
     ) -> Result<AutoBuildPlan, AutoBuildError> {
-        let outputs: Vec<_> = self.outputs.values().copied().collect();
+        let outputs = self.execution_roots();
         let tasks: Vec<_> = self
             .goals
             .values()
