@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{
-    ContractClaim, DType, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation, Predicate,
-    Shape, ValueRef,
+    ContractClaim, DType, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation,
+    Predicate, Shape, ValueRef,
 };
 
 const LEAN_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Basic.lean");
@@ -599,7 +599,10 @@ impl LeanProofEngine {
                             shape_expr(&predecessor.shape)
                         )
                     } else {
-                        format!("VeriNeural.shapeSize {} = 1", shape_expr(&predecessor.shape))
+                        format!(
+                            "VeriNeural.shapeSize {} = 1",
+                            shape_expr(&predecessor.shape)
+                        )
                     }
                 } else if matches!(node.operation, Operation::Reshape(_)) {
                     format!(
@@ -692,8 +695,7 @@ impl LeanProofEngine {
                         let right = node.inputs[1].index();
                         let (outer, left_width, inner) =
                             axis_factors(&graph.nodes()[left].shape, axis);
-                        let (_, right_width, _) =
-                            axis_factors(&graph.nodes()[right].shape, axis);
+                        let (_, right_width, _) = axis_factors(&graph.nodes()[right].shape, axis);
                         format!(
                             "VeriNeural.concatAxis_nonnegative (outer := {outer}) \
                              (leftWidth := {left_width}) (rightWidth := {right_width}) \
@@ -707,8 +709,7 @@ impl LeanProofEngine {
                     Operation::Take { axis } => {
                         let data = node.inputs[0].index();
                         let selected = node.inputs[1].index();
-                        let (outer, width, inner) =
-                            axis_factors(&graph.nodes()[data].shape, axis);
+                        let (outer, width, inner) = axis_factors(&graph.nodes()[data].shape, axis);
                         format!(
                             "VeriNeural.takeAxis_nonnegative (outer := {outer}) \
                              (width := {width}) (inner := {inner}) {} {} ({})",
@@ -964,7 +965,8 @@ impl LeanProofEngine {
                                 });
                             };
                             let input_node = graph.node(input)?;
-                            if actual.shape != input_node.shape || actual.dtype != input_node.dtype {
+                            if actual.shape != input_node.shape || actual.dtype != input_node.dtype
+                            {
                                 return Err(ProofError::UnsupportedGuarantee {
                                     node: output.index(),
                                 });

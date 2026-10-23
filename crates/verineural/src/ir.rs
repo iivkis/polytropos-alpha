@@ -305,7 +305,11 @@ impl Operation {
                     }
                     seen[axis] = true;
                 }
-                Shape::new(axes.iter().map(|&axis| input.dims()[axis]).collect::<Vec<_>>())
+                Shape::new(
+                    axes.iter()
+                        .map(|&axis| input.dims()[axis])
+                        .collect::<Vec<_>>(),
+                )
             }
             Self::ReverseAxis { axis } => {
                 if *axis >= inputs[0].rank() {
@@ -454,7 +458,10 @@ impl Operation {
             }
             Self::Reshape(_) | Self::Permute { .. } | Self::ReverseAxis { .. } => inputs[0],
             Self::Concat { .. } => {
-                if inputs.iter().all(|domain| domain.satisfies(Domain::NonNegativeFinite)) {
+                if inputs
+                    .iter()
+                    .all(|domain| domain.satisfies(Domain::NonNegativeFinite))
+                {
                     Domain::NonNegativeFinite
                 } else if inputs.iter().all(|domain| domain.satisfies(Domain::Finite)) {
                     Domain::Finite
@@ -501,7 +508,11 @@ impl PortContract {
     }
 
     fn typed(shape: Shape, dtype: DType, domain: Domain) -> Self {
-        Self { shape, dtype, domain }
+        Self {
+            shape,
+            dtype,
+            domain,
+        }
     }
 
     pub fn any(shape: Shape) -> Self {
@@ -1043,9 +1054,7 @@ impl NeuralGraph {
     /// Concatenate one or more tensors by lowering the public variadic API to
     /// the binary semantic primitive. This keeps the core operation minimal.
     pub fn concat(&mut self, axis: usize, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
-        let (&first, rest) = inputs
-            .split_first()
-            .ok_or(NeuralError::EmptyConcat)?;
+        let (&first, rest) = inputs.split_first().ok_or(NeuralError::EmptyConcat)?;
         let first_node = self.node(first)?;
         if axis >= first_node.shape.rank() {
             return Err(NeuralError::InvalidAxis {
@@ -1069,7 +1078,12 @@ impl NeuralGraph {
         self.apply(Operation::ArgMax { axis, tie_break }, &[input])
     }
 
-    pub fn take(&mut self, data: NodeId, index: NodeId, axis: usize) -> Result<NodeId, NeuralError> {
+    pub fn take(
+        &mut self,
+        data: NodeId,
+        index: NodeId,
+        axis: usize,
+    ) -> Result<NodeId, NeuralError> {
         self.apply(Operation::Take { axis }, &[data, index])
     }
 

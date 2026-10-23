@@ -160,10 +160,7 @@ impl fmt::Display for NeuralError {
                 operation,
                 expected,
                 actual,
-            } => write!(
-                f,
-                "{operation} expects {expected:?}, received {actual:?}"
-            ),
+            } => write!(f, "{operation} expects {expected:?}, received {actual:?}"),
             Self::InputCannotBeApplied => write!(f, "create source nodes with graph.input()"),
             Self::DomainNotEstablished { required, actual } => write!(
                 f,

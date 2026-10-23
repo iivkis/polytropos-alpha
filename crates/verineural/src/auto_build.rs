@@ -121,10 +121,7 @@ fn check_port(
     where_: &str,
 ) -> Result<(), AutoBuildError> {
     let node = graph.node(id)?;
-    if node.shape != port.shape
-        || node.dtype != port.dtype
-        || !node.domain.satisfies(port.domain)
-    {
+    if node.shape != port.shape || node.dtype != port.dtype || !node.domain.satisfies(port.domain) {
         return Err(invalid(format!(
             "{where_}: shape/dtype/domain mismatch at node {}",
             id.index()

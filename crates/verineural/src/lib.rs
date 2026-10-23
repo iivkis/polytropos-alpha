@@ -66,8 +66,7 @@ pub use gpu::{
 };
 pub use ir::{
     ArgMaxTieBreak, ContractClaim, DType, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics,
-    MathContract,
-    ModuleInstanceRef, ModuleInvocation, MultiModuleInvocation, MultiOutputContract,
+    MathContract, ModuleInstanceRef, ModuleInvocation, MultiModuleInvocation, MultiOutputContract,
     MultiOutputModule, NamedPortContract, NeuralGraph, NeuralModule, Node, NodeId, Operation,
     OperationSemantics, PortContract, Predicate, ReductionOrder, RoundingMode, SubnormalMode,
     ValueRef,

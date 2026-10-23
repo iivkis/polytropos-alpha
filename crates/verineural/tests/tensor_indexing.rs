@@ -2,8 +2,8 @@
 //! Host references are concrete f32/index calculations; Lean models the ideal
 //! integer structure, while GPU lowering intentionally fails closed for now.
 use verineural::{
-    ArgMaxTieBreak, DType, Domain, GpuEngine, GpuError, LeanProofEngine, NeuralError,
-    NeuralGraph, Operation, ProofError, Shape, Tensor,
+    ArgMaxTieBreak, DType, Domain, GpuEngine, GpuError, LeanProofEngine, NeuralError, NeuralGraph,
+    Operation, ProofError, Shape, Tensor,
 };
 
 #[test]
@@ -45,10 +45,7 @@ fn host_permute_reverse_concat_argmax_and_take_are_row_major() {
     )
     .unwrap();
     assert_eq!(
-        nonfinite
-            .argmax(1, ArgMaxTieBreak::First)
-            .unwrap()
-            .values(),
+        nonfinite.argmax(1, ArgMaxTieBreak::First).unwrap().values(),
         &[1, 0]
     );
 
@@ -67,9 +64,7 @@ fn host_permute_reverse_concat_argmax_and_take_are_row_major() {
 fn graph_uses_a_real_index_dtype_and_rejects_float_indices() {
     let mut graph = NeuralGraph::default();
     let logits = graph.input(Shape::new(vec![1, 4]).unwrap(), Domain::Finite);
-    let action = graph
-        .argmax(logits, 1, ArgMaxTieBreak::First)
-        .unwrap();
+    let action = graph.argmax(logits, 1, ArgMaxTieBreak::First).unwrap();
     assert_eq!(graph.node(action).unwrap().dtype, DType::Index);
     assert_eq!(graph.node(action).unwrap().shape.dims(), &[1]);
 
@@ -102,24 +97,20 @@ fn graph_uses_a_real_index_dtype_and_rejects_float_indices() {
 #[test]
 fn rotating_bank_slice_is_canonical_and_has_lean_structure_but_no_fake_gpu_support() {
     let mut graph = NeuralGraph::default();
-    let core0 = graph.input(
-        Shape::new(vec![2, 2]).unwrap(),
-        Domain::NonNegativeFinite,
-    );
-    let core1 = graph.input(
-        Shape::new(vec![2, 2]).unwrap(),
-        Domain::NonNegativeFinite,
-    );
+    let core0 = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::NonNegativeFinite);
+    let core1 = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::NonNegativeFinite);
     let logits = graph.input(Shape::new(vec![1, 2]).unwrap(), Domain::Finite);
 
     let r0 = graph.permute(core0, &[1, 0]).unwrap();
     let r1 = graph.reverse_axis(core1, 1).unwrap();
-    let r0 = graph.reshape(r0, Shape::new(vec![1, 2, 2]).unwrap()).unwrap();
-    let r1 = graph.reshape(r1, Shape::new(vec![1, 2, 2]).unwrap()).unwrap();
-    let bank = graph.concat(0, &[r0, r1]).unwrap();
-    let action = graph
-        .argmax(logits, 1, ArgMaxTieBreak::First)
+    let r0 = graph
+        .reshape(r0, Shape::new(vec![1, 2, 2]).unwrap())
         .unwrap();
+    let r1 = graph
+        .reshape(r1, Shape::new(vec![1, 2, 2]).unwrap())
+        .unwrap();
+    let bank = graph.concat(0, &[r0, r1]).unwrap();
+    let action = graph.argmax(logits, 1, ArgMaxTieBreak::First).unwrap();
     let selected = graph.take(bank, action, 0).unwrap();
 
     assert!(matches!(
@@ -127,7 +118,10 @@ fn rotating_bank_slice_is_canonical_and_has_lean_structure_but_no_fake_gpu_suppo
         Operation::Take { axis: 0 }
     ));
     assert_eq!(graph.node(selected).unwrap().shape.dims(), &[2, 2]);
-    assert_eq!(graph.node(selected).unwrap().domain, Domain::NonNegativeFinite);
+    assert_eq!(
+        graph.node(selected).unwrap().domain,
+        Domain::NonNegativeFinite
+    );
 
     let canonical = graph.canonical_ir();
     assert!(canonical.starts_with("verineural-semantic-ir-v3\n"));
@@ -138,7 +132,9 @@ fn rotating_bank_slice_is_canonical_and_has_lean_structure_but_no_fake_gpu_suppo
     assert!(canonical.contains("dtype=index"));
     assert!(canonical.contains("take_axis:0"));
 
-    let proof = LeanProofEngine::default().generate(&graph, selected).unwrap();
+    let proof = LeanProofEngine::default()
+        .generate(&graph, selected)
+        .unwrap();
     let source = proof.source();
     assert!(source.contains("VeriNeural.IndexTensor"));
     assert!(source.contains("VeriNeural.transpose2D"));

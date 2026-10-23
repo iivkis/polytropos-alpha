@@ -54,7 +54,10 @@ fn operation(operation: &Operation) -> String {
         Operation::ReduceSum { axis } => format!("reduce_sum_axis:{axis}"),
         Operation::Permute { axes } => format!(
             "permute_axes:{}",
-            axes.iter().map(usize::to_string).collect::<Vec<_>>().join(",")
+            axes.iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
         ),
         Operation::ReverseAxis { axis } => format!("reverse_axis:{axis}"),
         Operation::Concat { axis } => format!("concat_axis:{axis}"),
