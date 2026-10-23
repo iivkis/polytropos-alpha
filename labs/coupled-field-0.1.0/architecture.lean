@@ -611,13 +611,25 @@ theorem module_0_input_0_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_0_input_0_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_0 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_0_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_0_input_1_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_0_input_1_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_1 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_1_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_0_input_2_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
+
+theorem module_0_input_2_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_3 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_3_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_0_output_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
@@ -627,13 +639,25 @@ theorem module_1_input_0_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_1_input_0_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_1 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_1_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_1_input_1_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_1_input_1_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_2 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_2_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_1_input_2_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
+
+theorem module_1_input_2_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_4 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_4_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_1_output_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
@@ -643,21 +667,41 @@ theorem module_2_input_0_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_2_input_0_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_0 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_0_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_2_input_1_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
+
+theorem module_2_input_1_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_1 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_1_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_2_input_2_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_2_input_2_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_2 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_2_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_2_input_3_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
 
+theorem module_2_input_3_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_3 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_3_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_2_input_4_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
+
+theorem module_2_input_4_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_4 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_4_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_2_output_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
@@ -667,13 +711,25 @@ theorem module_3_input_0_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_3_input_0_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_0 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_0_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_3_input_1_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_3_input_1_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_2 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_2_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_3_input_2_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
+
+theorem module_3_input_2_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_4 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_4_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_3_output_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
@@ -683,13 +739,25 @@ theorem module_4_input_0_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_4_input_0_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_2 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_2_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_4_input_1_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_4_input_1_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_1 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_1_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_4_input_2_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
+
+theorem module_4_input_2_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_3 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_3_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_4_output_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
@@ -699,21 +767,41 @@ theorem module_5_input_0_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_5_input_0_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_0 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_0_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_5_input_1_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
+
+theorem module_5_input_1_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_2 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_2_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_5_input_2_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_5_input_2_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_1 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_1_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_5_input_3_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
 
+theorem module_5_input_3_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_4 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_4_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_5_input_4_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
+
+theorem module_5_input_4_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_3 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_3_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_5_output_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
@@ -723,21 +811,41 @@ theorem module_6_input_0_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_6_input_0_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_0 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_0_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_6_input_1_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
+
+theorem module_6_input_1_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_1 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_1_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_6_input_2_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by
   decide
 
+theorem module_6_input_2_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_2 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_2_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_6_input_3_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
 
+theorem module_6_input_3_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_3 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_3_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
+
 theorem module_6_input_4_shape :
   ([4] : List Nat) = ([4] : List Nat) := by
   decide
+
+theorem module_6_input_4_nonnegative (x_0 : VeriNeural.Tensor 4) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 4) (x_3 : VeriNeural.Tensor 4) (x_4 : VeriNeural.Tensor 4) (h_0 : VeriNeural.Nonnegative x_0) (h_1 : VeriNeural.Nonnegative x_1) (h_2 : VeriNeural.Nonnegative x_2) (h_3 : VeriNeural.Nonnegative x_3) (h_4 : VeriNeural.Nonnegative x_4) :
+  VeriNeural.Nonnegative (node_4 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_4_nonnegative x_0 x_1 x_2 x_3 x_4 h_0 h_1 h_2 h_3 h_4
 
 theorem module_6_output_shape :
   ([1, 4] : List Nat) = ([1, 4] : List Nat) := by

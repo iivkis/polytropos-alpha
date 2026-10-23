@@ -121,7 +121,9 @@ impl Lab {
     }
 
     pub fn output(&self) -> NodeId {
-        self.model.output("final").expect("architecture declares final")
+        self.model
+            .output("final")
+            .expect("architecture declares final")
     }
 
     pub fn source_nodes(&self) -> [NodeId; 5] {
@@ -145,9 +147,7 @@ impl Lab {
                 format!(
                     "node={} role={} shape={:?} bits={}\n",
                     id.index(),
-                    roles
-                        .get(&id.index())
-                        .expect("all source roles declared"),
+                    roles.get(&id.index()).expect("all source roles declared"),
                     t.shape().dims(),
                     t.values()
                         .iter()
@@ -162,11 +162,7 @@ impl Lab {
         let roles = self.metadata().input_roles;
         self.inputs
             .iter()
-            .filter(|(id, _)| {
-                roles
-                    .get(&id.index())
-                    .is_some_and(|s| s == "parameter")
-            })
+            .filter(|(id, _)| roles.get(&id.index()).is_some_and(|s| s == "parameter"))
             .map(|(id, t)| {
                 format!(
                     "node={} bits={}\n",
@@ -266,14 +262,20 @@ mod tests {
             LeanProofEngine::default(),
             GpuEngine::default(),
         );
-        let plan = lab.model.plan(&compiler, verineural::GpuRequirement::AllOutputs).unwrap();
+        let plan = lab
+            .model
+            .plan(&compiler, verineural::GpuRequirement::AllOutputs)
+            .unwrap();
         assert_eq!(plan.outputs.len(), 3);
         assert!(plan.outputs.contains(&lab.output()));
         assert_eq!(plan.goals.len(), 1);
         assert_eq!(plan.goals[0].0, "coupled_branch_lower_bound");
-        assert!(plan.goals[0].1.source().contains(
-            "theorem architecture_property_coupled_branch_lower_bound"
-        ));
+        assert!(
+            plan.goals[0]
+                .1
+                .source()
+                .contains("theorem architecture_property_coupled_branch_lower_bound")
+        );
         assert!(plan.shared_gpu.is_some());
         assert_eq!(lab.exact_integer_output().unwrap(), [4, 10, 8, 12]);
         let proof = LeanProofEngine::default()
@@ -318,7 +320,8 @@ mod tests {
             .unwrap();
         assert!(!gpu.translation_plan().unwrap().kernels.is_empty());
         let snapshot =
-            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &lab.metadata()).unwrap();
+            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &lab.metadata())
+                .unwrap();
         assert_eq!(snapshot.dot.matches("subgraph cluster_m").count(), 7);
         assert!(snapshot.dot.contains(r#"vn_role="parameter""#));
         // Module port metadata is stored once per normalized module scope.
@@ -332,7 +335,12 @@ mod tests {
         );
         // The renderer should draw only real IR dependencies. Port identity
         // remains in the cluster label and the explicit typed port mappings.
-        let real_edges: usize = lab.graph().nodes().iter().map(|node| node.inputs.len()).sum();
+        let real_edges: usize = lab
+            .graph()
+            .nodes()
+            .iter()
+            .map(|node| node.inputs.len())
+            .sum();
         assert_eq!(snapshot.dot.matches(" -> ").count(), real_edges);
         assert_eq!(snapshot.dot.matches("vn_semantic_dst=").count(), real_edges);
         // The first boundary module declares x, y and shared parameter p.
@@ -384,8 +392,12 @@ mod tests {
         let x = model.input("x", [1, 3], Domain::NonNegativeFinite).unwrap();
         let y = model.input("y", [1, 4], Domain::NonNegativeFinite).unwrap();
         let z = model.input("z", [1, 4], Domain::NonNegativeFinite).unwrap();
-        let p = model.parameter("p", [4], Domain::NonNegativeFinite).unwrap();
-        let q = model.parameter("q", [4], Domain::NonNegativeFinite).unwrap();
+        let p = model
+            .parameter("p", [4], Domain::NonNegativeFinite)
+            .unwrap();
+        let q = model
+            .parameter("q", [4], Domain::NonNegativeFinite)
+            .unwrap();
         assert!(matches!(
             model.block("coupled_field", &[x, y, z, p, q], coupled_field),
             Err(ModelError::Neural(NeuralError::ShapeMismatch { .. }))

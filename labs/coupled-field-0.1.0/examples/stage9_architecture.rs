@@ -90,7 +90,11 @@ fn verified_bundle(
     program: &GpuProgram,
     expected: &[i64],
 ) -> Result<(), Box<dyn Error>> {
-    let identity = format!("id={}\nversion={}\n", lab.metadata().id, lab.metadata().version);
+    let identity = format!(
+        "id={}\nversion={}\n",
+        lab.metadata().id,
+        lab.metadata().version
+    );
     if fs::read_to_string(root.join("architecture.identity"))? != identity {
         return Err(failed("bundle belongs to another architecture id/version").into());
     }
@@ -163,7 +167,9 @@ fn verified_bundle(
          cuda_jit_sass=trusted-not-proven\n\
          parameter_values=explicitly-pinned-in-manifest\n\
          artifact_root=explicit-lab-local\n",
-        lab.metadata().id, lab.metadata().version, snapshot.ir_sha256,
+        lab.metadata().id,
+        lab.metadata().version,
+        snapshot.ir_sha256,
     );
     if fs::read_to_string(root.join("report.txt"))? != report {
         return Err(failed("assurance report mismatch").into());
@@ -213,7 +219,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     fs::create_dir_all(&root)?;
-    let identity = format!("id={}\nversion={}\n", lab.metadata().id, lab.metadata().version);
+    let identity = format!(
+        "id={}\nversion={}\n",
+        lab.metadata().id,
+        lab.metadata().version
+    );
     if root.join("architecture.identity").exists()
         && fs::read_to_string(root.join("architecture.identity"))? != identity
     {
@@ -298,7 +308,9 @@ fn main() -> Result<(), Box<dyn Error>> {
          cuda_jit_sass=trusted-not-proven\n\
          parameter_values=explicitly-pinned-in-manifest\n\
          artifact_root=explicit-lab-local\n",
-            lab.metadata().id, lab.metadata().version, snapshot.ir_sha256
+            lab.metadata().id,
+            lab.metadata().version,
+            snapshot.ir_sha256
         ),
     )?;
     fs::write(root.join("SHA256SUMS"), checksums(&root)?)?;
