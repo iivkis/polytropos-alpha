@@ -119,3 +119,150 @@ impl NeuralModule for PrimitiveSpec {
         self.expression.lower(graph, inputs)
     }
 }
+
+
+/// A small total elementwise mathematical language. Every argument has the
+/// same shape. This AST, not a Rust callback, is the semantic source of truth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PointwiseExpr {
+    Input(usize),
+    Add(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Relu(Box<Self>),
+}
+
+impl PointwiseExpr {
+    pub fn input(index: usize) -> Self {
+        Self::Input(index)
+    }
+
+    pub fn add(self, rhs: Self) -> Self {
+        Self::Add(Box::new(self), Box::new(rhs))
+    }
+
+    pub fn mul(self, rhs: Self) -> Self {
+        Self::Mul(Box::new(self), Box::new(rhs))
+    }
+
+    pub fn relu(self) -> Self {
+        Self::Relu(Box::new(self))
+    }
+
+    fn valid(&self, arity: usize, remaining_depth: usize) -> bool {
+        if remaining_depth == 0 {
+            return false;
+        }
+        match self {
+            Self::Input(index) => *index < arity,
+            Self::Add(a, b) | Self::Mul(a, b) => {
+                a.valid(arity, remaining_depth - 1) && b.valid(arity, remaining_depth - 1)
+            }
+            Self::Relu(a) => a.valid(arity, remaining_depth - 1),
+        }
+    }
+
+    /// Canonical, unambiguous expression encoding for semantic fingerprints.
+    pub fn canonical(&self) -> String {
+        match self {
+            Self::Input(port) => format!("arg:{port}"),
+            Self::Add(a, b) => format!("add({},{})", a.canonical(), b.canonical()),
+            Self::Mul(a, b) => format!("mul({},{})", a.canonical(), b.canonical()),
+            Self::Relu(a) => format!("relu({})", a.canonical()),
+        }
+    }
+
+    /// The Lean interpretation is derived entirely from this same AST.
+    /// The caller provides graph-specific, validated tensor references.
+    pub(crate) fn lean(&self, input: &impl Fn(usize) -> String) -> String {
+        match self {
+            Self::Input(port) => input(*port),
+            Self::Add(a, b) => {
+                format!("(VeriNeural.add {} {})", a.lean(input), b.lean(input))
+            }
+            Self::Mul(a, b) => {
+                format!("(VeriNeural.mul {} {})", a.lean(input), b.lean(input))
+            }
+            Self::Relu(a) => format!("(VeriNeural.relu {})", a.lean(input)),
+        }
+    }
+
+    /// Independent ideal-Int theorem rule for an unconditional final ReLU.
+    /// All other expressions require a different proof rule: fail closed.
+    pub(crate) fn nonnegative_lean(&self, input: &impl Fn(usize) -> String) -> Option<String> {
+        match self {
+            Self::Relu(inner) => {
+                Some(format!("VeriNeural.relu_nonnegative {}", inner.lean(input)))
+            }
+            _ => None,
+        }
+    }
+
+    fn evaluate(&self, input: &impl Fn(usize) -> f32) -> f32 {
+        match self {
+            Self::Input(port) => input(*port),
+            Self::Add(a, b) => a.evaluate(input) + b.evaluate(input),
+            Self::Mul(a, b) => a.evaluate(input) * b.evaluate(input),
+            Self::Relu(inner) => {
+                let value = inner.evaluate(input);
+                if value.is_nan() || value > 0.0 { value } else { 0.0 }
+            }
+        }
+    }
+}
+
+/// A genuine single IR operation defined by a consumer, not a pre-expanded
+/// neural module. Only supported pointwise AST semantics can be registered.
+/// Lean models the ideal integer expression; GPU and FP32 proof backends reject
+/// this operation until they implement corresponding verified lowerings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PointwiseSpec {
+    id: &'static str,
+    version: &'static str,
+    arity: usize,
+    expression: PointwiseExpr,
+}
+
+impl PointwiseSpec {
+    pub fn new(
+        id: &'static str,
+        version: &'static str,
+        arity: usize,
+        expression: PointwiseExpr,
+    ) -> Result<Self, NeuralError> {
+        if id.is_empty() || version.is_empty() || arity == 0 {
+            return Err(NeuralError::ContractViolation {
+                module: id,
+                detail: "pointwise primitive requires id, version and at least one input",
+            });
+        }
+        // Bounds recursion and artifact sizes; never execute opaque Rust code.
+        if !expression.valid(arity, 64) {
+            return Err(NeuralError::ContractViolation {
+                module: id,
+                detail: "expression refers to an invalid input or exceeds 63 levels",
+            });
+        }
+        Ok(Self { id, version, arity, expression })
+    }
+
+    pub fn id(&self) -> &'static str { self.id }
+    pub fn version(&self) -> &'static str { self.version }
+    pub const fn arity(&self) -> usize { self.arity }
+    pub fn expression(&self) -> &PointwiseExpr { &self.expression }
+
+    pub fn apply(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.apply(Operation::Pointwise(self.clone()), inputs)
+    }
+
+    /// Host reference only, not a floating-point certification or GPU backend.
+    pub fn evaluate_host(&self, inputs: &[crate::Tensor<f32>]) -> Result<crate::Tensor<f32>, NeuralError> {
+        let shapes = inputs.iter().map(|tensor| tensor.shape().clone()).collect::<Vec<_>>();
+        let output_shape = Operation::Pointwise(self.clone()).infer_shape(&shapes)?;
+        let values = (0..output_shape.element_count())
+            .map(|element| {
+                self.expression.evaluate(&|port| inputs[port].values()[element])
+            })
+            .collect::<Vec<_>>();
+        crate::Tensor::new(output_shape, values)
+    }
+}

@@ -282,7 +282,8 @@ impl LeanProofEngine {
                 | Operation::Relu
                 | Operation::PositiveMask
                 | Operation::SelectPositive
-                | Operation::Reshape(_) => {}
+                | Operation::Reshape(_)
+                | Operation::Pointwise(_) => {}
                 _ => {
                     return Err(ProofError::UnsupportedOperation {
                         node: index,
@@ -408,6 +409,9 @@ impl LeanProofEngine {
                 Operation::Reshape(_) => {
                     format!("VeriNeural.reshape {}", call(node.inputs[0].index()))
                 }
+                Operation::Pointwise(spec) => spec.expression().lean(&|port| {
+                    call(node.inputs[port].index())
+                }),
                 _ => unreachable!("checked while collecting ancestors"),
             };
 
@@ -1612,6 +1616,9 @@ fn prove_module_node_nonnegative(
                 call(input)
             )
         }
+        Operation::Pointwise(ref spec) => spec.expression()
+            .nonnegative_lean(&|port| call(node.inputs[port].index()))
+            .ok_or(ProofError::UnsupportedGuarantee { node: index })?,
         _ => return Err(ProofError::UnsupportedGuarantee { node: index }),
     };
     traversal.cache.insert(index, proof.clone());
@@ -1661,6 +1668,9 @@ fn prove_ideal_nonnegative(
             let h = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;
             format!("VeriNeural.reshape_nonnegative {} ({h})", call(input))
         }
+        Operation::Pointwise(ref spec) => spec.expression()
+            .nonnegative_lean(&|port| call(node.inputs[port]))
+            .ok_or(ProofError::UnsupportedGuarantee { node: index })?,
         Operation::Add | Operation::Mul | Operation::MatMul | Operation::BiasAdd => {
             let a = node.inputs[0];
             let b = node.inputs[1];

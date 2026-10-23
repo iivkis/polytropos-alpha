@@ -113,6 +113,7 @@ fn operation_title(operation: &Operation) -> &'static str {
         Operation::MatMul => "MatMul",
         Operation::Sqrt => "Sqrt",
         Operation::Reshape(_) => "Reshape",
+        Operation::Pointwise(_) => "User-defined pointwise",
     }
 }
 
@@ -540,6 +541,13 @@ pub fn snapshot_architecture(
                 ("vn_id", format!("n{index}")),
                 ("vn_kind", kind.into()),
                 ("vn_op", node.operation.name().into()),
+                ("vn_custom_semantics", match &node.operation {
+                    Operation::Pointwise(spec) => format!(
+                        "{}@{}:{}",
+                        spec.id(), spec.version(), spec.expression().canonical()
+                    ),
+                    _ => String::new(),
+                }),
                 (
                     "vn_instance_path",
                     parent.map_or_else(|| "root".to_owned(), |p| paths[p].clone()),
@@ -895,6 +903,13 @@ pub(crate) fn auto_architecture_dot(
                 ("vn_id", format!("n{i}")),
                 ("vn_kind", kind.to_owned()),
                 ("vn_op", node.operation.name().to_owned()),
+                ("vn_custom_semantics", match &node.operation {
+                    Operation::Pointwise(spec) => format!(
+                        "{}@{}:{}",
+                        spec.id(), spec.version(), spec.expression().canonical()
+                    ),
+                    _ => String::new(),
+                }),
                 (
                     "vn_instance_path",
                     parent.map_or_else(|| "root".to_owned(), |p| context.paths[p].clone()),

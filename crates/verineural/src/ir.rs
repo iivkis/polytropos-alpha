@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{NeuralError, Shape};
+use crate::{NeuralError, PointwiseSpec, Shape};
 
 static NEXT_GRAPH_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -108,6 +108,8 @@ pub enum Operation {
     SelectPositive,
     Sqrt,
     Reshape(Shape),
+    /// A versioned external atomic operation with declarative pointwise semantics.
+    Pointwise(PointwiseSpec),
 }
 
 impl Operation {
@@ -123,6 +125,7 @@ impl Operation {
             Self::SelectPositive => "select_positive",
             Self::Sqrt => "sqrt",
             Self::Reshape(_) => "reshape",
+            Self::Pointwise(_) => "pointwise",
         }
     }
 
@@ -132,6 +135,7 @@ impl Operation {
             Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd => 2,
             Self::SelectPositive => 3,
             Self::Relu | Self::PositiveMask | Self::Sqrt | Self::Reshape(_) => 1,
+            Self::Pointwise(spec) => spec.arity(),
         }
     }
 
@@ -148,7 +152,7 @@ impl Operation {
             });
         }
         match self {
-            Self::Add | Self::Mul | Self::SelectPositive => {
+            Self::Add | Self::Mul | Self::SelectPositive | Self::Pointwise(_) => {
                 for other in &inputs[1..] {
                     if inputs[0] != *other {
                         return Err(NeuralError::ShapeMismatch {
@@ -248,7 +252,8 @@ impl Operation {
                 }
             }
             Self::Reshape(_) => inputs[0],
-            Self::Input | Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd => Domain::Any,
+            Self::Input | Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd
+            | Self::Pointwise(_) => Domain::Any,
         }
     }
 }

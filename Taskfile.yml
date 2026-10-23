@@ -185,3 +185,8 @@ tasks:
     desc: Lean kernel and axiom audit acceptance for true and deliberately false consumer relational claims
     cmds:
       - cargo test -p verineural --test relational_predicates -- --ignored
+
+  verify-pointwise-primitive:
+    desc: Kernel-check independent user-defined atomic pointwise semantics and contracts
+    cmds:
+      - cargo test -p verineural --test pointwise_primitive -- --ignored

@@ -44,6 +44,13 @@ fn shape(shape: &Shape) -> String {
 fn operation(operation: &Operation) -> String {
     match operation {
         Operation::Reshape(output) => format!("reshape:{}", shape(output)),
+        Operation::Pointwise(spec) => format!(
+            "pointwise:{}@{}:arity={}:{}",
+            escaped(spec.id()),
+            escaped(spec.version()),
+            spec.arity(),
+            spec.expression().canonical()
+        ),
         other => other.name().to_owned(),
     }
 }

@@ -70,7 +70,7 @@ pub use numeric::{
     ExactFp32Plan, NumericError, RneErrorContract, RneFp32Plan, RneFp32Trace,
     RneModuleErrorContract, RneRangePlan, RneThresholdEvidence, RneThresholdSide,
 };
-pub use primitive::{PrimitiveExpr, PrimitiveSpec};
+pub use primitive::{PointwiseExpr, PointwiseSpec, PrimitiveExpr, PrimitiveSpec};
 pub use proof::{
     CheckedLean, LeanAxiomAudit, LeanProgram, LeanProofEngine, ProofAssumption, ProofError,
     ProofGoal, ProofGoalKind,
