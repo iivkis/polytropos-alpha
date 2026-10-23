@@ -109,10 +109,10 @@ fn run(verify: bool, root: &Path) -> Result<(), Box<dyn Error>> {
     let lab = build()?;
     lab.validate_inputs()?;
     let engine = GpuEngine::default();
-    let program = engine.compile(&lab.graph, lab.output)?;
-    let snapshot = snapshot_architecture(&lab.graph, lab.output, &program, &lab.metadata)?;
+    let program = engine.compile(lab.graph(), lab.output())?;
+    let snapshot = snapshot_architecture(lab.graph(), lab.output(), &program, &lab.metadata())?;
     let lean = LeanProofEngine::default();
-    let proof = lean.generate_global_nonnegative(&lab.graph, lab.output, &[])?;
+    let proof = lean.generate_global_nonnegative(lab.graph(), lab.output(), &[])?;
 
     if verify {
         if root.join("auto-build").exists() {
