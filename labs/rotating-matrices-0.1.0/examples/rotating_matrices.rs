@@ -2,6 +2,7 @@
 use rotating_matrices_lab::{
     ACTIONS, Architectures, Dataset, Dictionary, OP_COUNT, Parameters, Rng, Runner, TrainingConfig,
     evaluate, evaluate_with_route, operation, train,
+    constant_baseline,
 };
 use std::error::Error;
 use std::fs;
@@ -73,6 +74,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 baseline.accuracy(),
                 baseline.mae(),
                 baseline.rmse()
+            );
+            // Train-only median: a non-neural reference using the same held-out cases.
+            let mut train_targets = data.train.iter().map(|case| case.target).collect::<Vec<_>>();
+            train_targets.sort_unstable();
+            let median = train_targets[train_targets.len() / 2];
+            let constant = constant_baseline(&data.validation, 80, median);
+            println!(
+                "train-median constant baseline y={median}: exact={:.3} MAE={:.2} RMSE={:.2}",
+                constant.accuracy(),
+                constant.mae(),
+                constant.rmse()
             );
             let mut config = TrainingConfig::default();
             config.updates = updates;

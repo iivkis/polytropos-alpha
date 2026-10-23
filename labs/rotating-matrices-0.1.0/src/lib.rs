@@ -654,6 +654,16 @@ impl Default for Metrics {
     }
 }
 impl Metrics {
+    fn record(&mut self, case: &Example, prediction: u16) {
+        let difference = prediction as f64 - case.target as f64;
+        self.count += 1;
+        self.exact += usize::from(prediction == case.target);
+        self.absolute_error += difference.abs();
+        self.squared_error += difference * difference;
+        self.per_op_count[case.op] += 1;
+        self.per_op_exact[case.op] += usize::from(prediction == case.target);
+    }
+
     pub fn accuracy(&self) -> f64 {
         self.exact as f64 / self.count.max(1) as f64
     }
@@ -760,6 +770,34 @@ pub fn train(
     Ok(())
 }
 
+/// Stratified held-out sampling: cycle all 40 operators and distribute operand
+/// pairs instead of selecting the all-zero (0,0) pair for each first sample.
+/// For our 52 held-out pairs per operation, stride 19 visits every pair.
+fn validation_case_index(example_count: usize, index: usize) -> usize {
+    let per_op = example_count / OP_COUNT;
+    if per_op > 0 && example_count % OP_COUNT == 0 {
+        let op = index % OP_COUNT;
+        let round = index / OP_COUNT;
+        op * per_op + (7 + 11 * op + 19 * round) % per_op
+    } else {
+        (index * 7919) % example_count
+    }
+}
+
+/// No GPU required. Supply a prediction selected ONLY from training labels,
+/// so the baseline does not tune parameters on the validation partition.
+pub fn constant_baseline(examples: &[Example], limit: usize, prediction: u16) -> Metrics {
+    let mut metrics = Metrics::default();
+    if examples.is_empty() {
+        return metrics;
+    }
+    for index in 0..limit.min(examples.len()) {
+        let case = &examples[validation_case_index(examples.len(), index)];
+        metrics.record(case, prediction);
+    }
+    metrics
+}
+
 pub fn evaluate(
     runner: &mut Runner,
     p: &Parameters,
@@ -787,26 +825,11 @@ pub fn evaluate_with_route(
     }
     let mut rng = Rng::new(seed);
     let mut metrics = Metrics::default();
-    // The standard dataset stores equal-sized, contiguous partitions per op.
-    // Interleave them so 80 samples give two cases per each of the 40 labels.
-    let per_op = examples.len() / OP_COUNT;
+    // Balanced operator coverage with distinct held-out operand pairs.
     for index in 0..limit.min(examples.len()) {
-        let case_index = if per_op > 0 && examples.len() % OP_COUNT == 0 {
-            (index % OP_COUNT) * per_op + ((index / OP_COUNT) * 17) % per_op
-        } else {
-            (index * 7919) % examples.len()
-        };
-        let case = &examples[case_index];
+        let case = &examples[validation_case_index(examples.len(), index)];
         let trace = runner.forward_with_route(p, dict, &case.text, &mut rng, false, fixed)?;
-        let prediction = decoded(trace.normalized);
-        let difference = prediction as f64 - case.target as f64;
-        let correct = prediction == case.target;
-        metrics.count += 1;
-        metrics.exact += usize::from(correct);
-        metrics.absolute_error += difference.abs();
-        metrics.squared_error += difference * difference;
-        metrics.per_op_count[case.op] += 1;
-        metrics.per_op_exact[case.op] += usize::from(correct);
+        metrics.record(case, decoded(trace.normalized));
         for decision in &trace.decisions {
             metrics.action_counts[decision.action] += 1;
         }
@@ -817,6 +840,29 @@ pub fn evaluate_with_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_sampling_is_stratified_and_representative() {
+        let data = Dataset::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut first_window_nonzero = 0;
+        for i in 0..data.validation.len() {
+            let index = validation_case_index(data.validation.len(), i);
+            assert_eq!(data.validation[index].op, i % OP_COUNT);
+            assert!(seen.insert(index), "repeated held-out sample {index}");
+            if i < OP_COUNT && data.validation[index].target != 0 {
+                first_window_nonzero += 1;
+            }
+        }
+        assert_eq!(seen.len(), data.validation.len());
+        assert!(first_window_nonzero >= OP_COUNT / 2);
+        let mut targets = data.train.iter().map(|case| case.target).collect::<Vec<_>>();
+        targets.sort_unstable();
+        let baseline = constant_baseline(&data.validation, 80, targets[targets.len() / 2]);
+        assert_eq!(baseline.count, 80);
+        assert_eq!(baseline.per_op_count, [2; OP_COUNT]);
+        assert_eq!(baseline.action_counts, [0; ACTIONS]);
+    }
 
     #[test]
     fn requested_examples_and_40_operations() {
