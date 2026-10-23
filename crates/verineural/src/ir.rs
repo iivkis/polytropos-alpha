@@ -998,6 +998,56 @@ impl NeuralGraph {
         Ok(output)
     }
 
+
+    /// Structural composition without a caller-written duplicate MathContract.
+    /// Only shapes and conservative domains are inferred, never mathematical
+    /// claims or Lean certification. Failed bodies leave this graph unchanged.
+    pub fn compose_inferred<F>(
+        &mut self,
+        name: &'static str,
+        semantic_version: &'static str,
+        inputs: &[NodeId],
+        build: F,
+    ) -> Result<NodeId, NeuralError>
+    where
+        F: FnOnce(&mut NeuralGraph, &[NodeId]) -> Result<NodeId, NeuralError>,
+    {
+        let requires = inputs
+            .iter()
+            .map(|&id| {
+                let node = self.node(id)?;
+                Ok(PortContract::new(node.shape.clone(), node.domain))
+            })
+            .collect::<Result<Vec<_>, NeuralError>>()?;
+        let body_start = self.nodes.len();
+        let module_start = self.modules.len();
+        let multi_start = self.multi_modules.len();
+        let mut candidate = self.clone();
+        let output = build(&mut candidate, inputs)?;
+        candidate.validate_body(body_start, module_start, multi_start, inputs, &[output], name)?;
+        let result = candidate.node(output)?;
+        let contract = MathContract::new(
+            requires,
+            PortContract::new(result.shape.clone(), result.domain),
+        );
+        let module_index = candidate.modules.len();
+        let body_end = candidate.nodes.len();
+        candidate.modules.push(ModuleInvocation {
+            name,
+            inputs: inputs.to_vec(),
+            body_start,
+            body_end,
+            output,
+            contract,
+            semantic_version,
+        });
+        candidate
+            .module_order
+            .push(ModuleInstanceKey::Single(module_index));
+        *self = candidate;
+        Ok(output)
+    }
+
     /// Unroll a statically bounded state transition, without introducing a
     /// built-in recurrent architecture or an implicit GPU execution mode.
     /// The transition's interface must be exactly:

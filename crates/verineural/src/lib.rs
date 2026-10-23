@@ -38,6 +38,7 @@ mod cuda;
 mod error;
 mod gpu;
 mod ir;
+mod model;
 mod modules;
 mod numeric;
 mod primitive;
@@ -68,6 +69,7 @@ pub use ir::{
     OperationSemantics, PortContract, Predicate, ReductionOrder, RoundingMode, SubnormalMode,
     ValueRef,
 };
+pub use model::{Model, ModelBuilder, ModelError, SourceRole};
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
 pub use numeric::{
     ExactFp32Plan, NumericError, RneErrorContract, RneFp32Plan, RneFp32Trace,
