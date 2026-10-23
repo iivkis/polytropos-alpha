@@ -86,7 +86,9 @@ theorem pointwise_le_relu_add_of_nonnegative {n : Nat} (a b : Tensor n)
   have hsum : a i ≤ a i + b i := by
     have := hb i
     omega
-  exact le_trans hsum (Int.le_max_left (a i + b i) 0)
+  have hmax : a i + b i ≤ max (a i + b i) 0 :=
+    Int.le_max_left (a i + b i) 0
+  omega
 
 theorem add_pointwise {n : Nat} (a b : Tensor n) (i : Fin n) :
     add a b i = a i + b i := by

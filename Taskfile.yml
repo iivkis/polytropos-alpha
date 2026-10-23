@@ -13,6 +13,14 @@ tasks:
     cmds:
       - cargo fmt --all
 
+  # Safe local preflight: format workspace sources, never commit or push.
+  # Every lab generation/replay and workspace/lab test task depends on this.
+  prepare:
+    desc: Format Rust before laboratory runs and tests (no git changes beyond formatting)
+    cmds:
+      - task: fmt
+      - cargo fmt --all -- --check
+
   fmt-check:
     desc: Format and verify Rust; auto-commit and fast-forward push rustfmt-only changes (clean checkout required)
     cmds:
@@ -62,6 +70,7 @@ tasks:
 
   test:
     desc: Run workspace tests (developer-run)
+    deps: [prepare]
     cmds:
       - cargo test --workspace
 
@@ -162,40 +171,48 @@ tasks:
 
   lab-stage9:
     desc: Build Stage 9 independent coupled-field research lab, Lean, CUDA Graph and DOT/PNG evidence
+    deps: [prepare]
     cmds:
       - cargo run -p coupled-field-lab --example stage9_architecture
 
   verify-lab-stage9:
     desc: Offline reconstruct Stage 9 Semantic IR/DOT and check Lean, LLVM/PTX and SHA-256
+    deps: [prepare]
     cmds:
       - cargo run -p coupled-field-lab --example stage9_architecture -- --verify
 
   lab-xor:
     desc: Check XOR MLP truth table via VeriNeural, Lean, NVPTX and CUDA Graph; write lab evidence
+    deps: [prepare]
     cmds:
       - cargo run -p xor-lab --example xor_lab -- {{.CLI_ARGS}}
 
   verify-lab-xor:
     desc: Recheck XOR lab artifacts, Lean, translation and hashes without GPU
+    deps: [prepare]
     cmds:
       - cargo run -p xor-lab --example xor_lab -- --verify {{.CLI_ARGS}}
 
   test-lab-xor:
     desc: Run CPU-only XOR consumer tests including one global proof and GPU compilation planning
+    deps: [prepare]
     cmds:
       - cargo test -p xor-lab --all-targets
 
   verify-relational-predicates:
     desc: Lean kernel and axiom audit acceptance for true and deliberately false consumer relational claims
+    deps: [prepare]
     cmds:
       - cargo test -p verineural --test relational_predicates -- --ignored
 
   verify-pointwise-primitive:
     desc: Kernel-check independent user-defined atomic pointwise semantics and contracts
+    deps: [prepare]
     cmds:
       - cargo test -p verineural --test pointwise_primitive -- --ignored
 
   verify-tensor-reductions:
     desc: Lean-check axis-sum ideal semantics, nonnegative fold, and consumer contracts
+    deps: [prepare]
     cmds:
       - cargo test -p verineural --test tensor_reductions -- --ignored

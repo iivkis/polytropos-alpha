@@ -9,6 +9,9 @@ pub enum PrimitiveExpr {
     Apply(Operation, Vec<PrimitiveExpr>),
 }
 
+// Inherent fluent methods are part of the consumer DSL's stable API.
+// std::ops traits would require consumers to import the traits for method syntax.
+#[allow(clippy::should_implement_trait)]
 impl PrimitiveExpr {
     pub const fn port(index: usize) -> Self {
         Self::Port(index)
@@ -135,6 +138,8 @@ pub enum PointwiseExpr {
     Relu(Box<Self>),
 }
 
+// Preserve the same fluent expression-building API as PrimitiveExpr.
+#[allow(clippy::should_implement_trait)]
 impl PointwiseExpr {
     pub fn input(index: usize) -> Self {
         Self::Input(index)

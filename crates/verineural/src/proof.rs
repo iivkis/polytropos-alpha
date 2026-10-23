@@ -686,8 +686,7 @@ impl LeanProofEngine {
                             &mut theorems,
                             name,
                             predicate,
-                            &module.inputs,
-                            module.output,
+                            (&module.inputs, module.output),
                             &claim_context,
                         )?;
                     }
@@ -810,8 +809,7 @@ impl LeanProofEngine {
                                 &mut theorems,
                                 name,
                                 predicate,
-                                &module.inputs,
-                                output,
+                                (&module.inputs, output),
                                 &claim_context,
                             )?;
                         }
@@ -1865,10 +1863,10 @@ fn emit_module_predicate(
     theorems: &mut Vec<String>,
     name: String,
     predicate: &Predicate,
-    inputs: &[NodeId],
-    output: NodeId,
+    module: (&[NodeId], NodeId),
     context: &IdealNonnegativeClaimContext<'_>,
 ) -> Result<(), ProofError> {
+    let (inputs, output) = module;
     match predicate {
         Predicate::Nonnegative(value) => {
             let target = resolve_module_value(graph, value, inputs, output)?;

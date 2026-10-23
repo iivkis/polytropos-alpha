@@ -175,7 +175,7 @@ pub(crate) fn graph_ir(graph: &NeuralGraph) -> String {
                     ports(module.contract.requires.iter().enumerate().map(|(index, port_contract)| {
                         format!("input_{index}:{}", port(port_contract))
                     })),
-                    format!("output:{}!{}", port(&module.contract.ensures), claims(&module.contract.claims)),
+                    format_args!("output:{}!{}", port(&module.contract.ensures), claims(&module.contract.claims)),
                 )
                 .expect("writing to String");
             }
