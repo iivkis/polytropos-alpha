@@ -180,12 +180,12 @@ mod tests {
             .contains("theorem architecture_property_xor_output_nonnegative"));
 
         let gpu = GpuEngine::default()
-            .compile(&lab.graph(), lab.output())
+            .compile(lab.graph(), lab.output())
             .unwrap();
         assert!(!gpu.translation_plan().unwrap().kernels.is_empty());
 
         let snapshot =
-            verineural::snapshot_architecture(&lab.graph(), lab.output(), &gpu, &lab.metadata()).unwrap();
+            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &lab.metadata()).unwrap();
         assert!(
             snapshot
                 .dot
@@ -193,7 +193,7 @@ mod tests {
         );
 
         let proof = LeanProofEngine::default()
-            .generate_global_nonnegative(&lab.graph(), lab.output(), &[])
+            .generate_global_nonnegative(lab.graph(), lab.output(), &[])
             .unwrap();
         assert!(
             proof
@@ -204,7 +204,7 @@ mod tests {
         let mut invalid_meta = lab.metadata().clone();
         invalid_meta.global_property = "xor_output_nonnegative".into();
         assert!(
-            verineural::snapshot_architecture(&lab.graph(), lab.output(), &gpu, &invalid_meta).is_err()
+            verineural::snapshot_architecture(lab.graph(), lab.output(), &gpu, &invalid_meta).is_err()
         );
     }
 
