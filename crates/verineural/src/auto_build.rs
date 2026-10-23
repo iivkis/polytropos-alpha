@@ -789,15 +789,8 @@ impl ArchitectureAutoCompiler {
         root: &Path,
         pinned_sha256: Option<&str>,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        self.verify_with_identity(
-            graph,
-            outputs,
-            tasks,
-            gpu_requirement,
-            root,
-            pinned_sha256,
-            None,
-        )
+        let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
+        self.verify_planned_bundle(graph, plan, root, pinned_sha256)
     }
 
     /// Offline replay of an identified certified build, without a GPU.
@@ -810,32 +803,23 @@ impl ArchitectureAutoCompiler {
         pinned_sha256: Option<&str>,
         identity: &str,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        self.verify_with_identity(
-            graph,
-            outputs,
-            tasks,
-            GpuRequirement::AllOutputs,
-            root,
-            pinned_sha256,
-            Some(identity),
-        )
+        let mut plan = self.plan(graph, outputs, tasks, GpuRequirement::AllOutputs)?;
+        plan.identity = Some(identity.to_owned());
+        self.verify_planned_bundle(graph, plan, root, pinned_sha256)
     }
 
-    fn verify_with_identity(
+    // Verification consumes the *same* planned evidence shape as the build
+    // path, without an extra public identity/proof-policy argument bundle.
+    fn verify_planned_bundle(
         &self,
         graph: &NeuralGraph,
-        outputs: &[NodeId],
-        tasks: &[ArchitectureProofTask],
-        gpu_requirement: GpuRequirement,
+        plan: AutoBuildPlan,
         root: &Path,
         pinned_sha256: Option<&str>,
-        identity: Option<&str>,
     ) -> Result<AutoBuildReport, AutoBuildError> {
         let directory = root.join("auto-build");
-        let mut plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
-        if let Some(identity) = identity {
+        if let Some(identity) = plan.identity.as_deref() {
             auto_bundle::check_existing_identity(&directory, identity)?;
-            plan.identity = Some(identity.to_owned());
         }
         let digest = auto_bundle::verify_manifest(&directory, &plan, pinned_sha256)?;
         auto_bundle::verify_current_ir(&directory, &graph.canonical_ir())?;

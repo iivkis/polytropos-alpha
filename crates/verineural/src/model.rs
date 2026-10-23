@@ -503,7 +503,11 @@ mod tests {
     #[test]
     fn certified_plan_rejects_unsupported_gpu_operations() {
         let mut builder = ModelBuilder::new("unsupported", "1");
-        let x = builder.input("x", [2], Domain::Finite).unwrap();
+        // Sqrt requires a nonnegative input; the test targets GPU lowering,
+        // not the independent input-domain contract.
+        let x = builder
+            .input("x", [2], Domain::NonNegativeFinite)
+            .unwrap();
         let y = builder.graph_mut().sqrt(x).unwrap();
         builder.output("y", y).unwrap();
         let model = builder.finish().unwrap();

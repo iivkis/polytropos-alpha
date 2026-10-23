@@ -323,11 +323,11 @@ Architecture-composition slice локально подтверждён поль�
 
 A finished consumer `Model` can now call `model.certify(CertifiedBuildConfig::new(package_root))` or `model.verify_certified(config, externally_pinned_sha256)`. This reuses `ArchitectureAutoCompiler`, checks all declared Lean proof goals with axiom audit, requires GPU lowering for all outputs, and hashes the canonical IR, deterministic DOT, Graphviz PNG, Lean files, LLVM/PTX and declaration identity. Guarantees apply to ideal-Int math and structurally audited translation, **not** GPU hardware/IEEE-754 equivalence.
 
-Developer-run acceptance commands (inside the pinned Nix shell): `task certified-xor`, `task verify-certified-xor`, `task certified-coupled`, `task verify-certified-coupled`. Optional per-lab override: `task certified-xor -- --artifact-root generated/case1`; relative paths are resolved against the lab package directory. `--pinned-sha256 <digest>` may be passed to verification; a SHA256SUMS file alone is not an external signature. Current output is `<artifact-root>/auto-build/`; top-level publication and the future `cargo verineural build --certified` subcommand remain pending under Stage 10.
+Developer-run acceptance commands (inside the pinned Nix shell): `task certified-xor`, `task verify-certified-xor`, `task certified-coupled`, `task verify-certified-coupled`. Optional per-lab override: `task certified-xor -- --artifact-root generated/case1`; relative paths are resolved against the lab package directory. `--pinned-sha256 <digest>` may be passed to verification; a SHA256SUMS file alone is not an external signature. Proof evidence is stored in `<artifact-root>/auto-build/`; root-level Unix aliases point to it. The external Cargo subcommand is implemented as `cargo-verineural`, available directly through `task certified-build` without installation; first-time root alias migration is not one atomic transaction.
 
 ### Certified build dispatcher (Stage 10, developer-run)
 
-For selected consumer packages with src/lib.rs and a thin examples/certified.rs,
+For selected consumer packages with `src/lib.rs` and exactly one thin `examples/<name>_certified.rs`,
 use the pinned Nix shell and run:
 
 `task certified-build -- --manifest-path labs/xor-0.1.0/Cargo.toml`
@@ -358,3 +358,5 @@ WARNING: existing Stage9 package-root artifact files are Git-tracked; the defaul
     task verify-certified-build -- --manifest-path labs/xor-0.1.0/Cargo.toml --artifact-root /tmp/verineural-stage10-xor
 
 Cargo/Lean/LLVM/Graphviz and hardware checks must still be run in the pinned Nix shell. No external-tool passes are claimed from this source patch.
+
+**Stage 10 local acceptance:** `task check` and the three tool-dependent `verify-certified-stage10` tests passed on 2026-10-23. Full workspace tests exposed a sqrt test setup error (incorrect input domain); Clippy rejected an eight-argument internal helper; Cargo warned about two `certified` examples colliding. The follow-up patch corrects the test input contract, reuses a previously constructed build plan to reduce verification arguments, and gives consumers distinct `xor_certified` / `coupled_field_certified` example targets. Re-run local acceptance to confirm; no proof of CUDA/FP32/SASS follows from the green Rust suite.

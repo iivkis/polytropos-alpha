@@ -218,25 +218,25 @@ tasks:
     desc: Stage 10 proof-gated certified model build for XOR (CPU tools only, no GPU run)
     deps: [prepare]
     cmds:
-      - cargo run -p xor-lab --example certified -- {{.CLI_ARGS}}
+      - cargo run -p xor-lab --example xor_certified -- {{.CLI_ARGS}}
 
   verify-certified-xor:
     desc: Offline Stage 10 replay for XOR (optional --pinned-sha256 <digest>)
     deps: [prepare]
     cmds:
-      - cargo run -p xor-lab --example certified -- --verify {{.CLI_ARGS}}
+      - cargo run -p xor-lab --example xor_certified -- --verify {{.CLI_ARGS}}
 
   certified-coupled:
     desc: Stage 10 proof-gated certified model build for CoupledField (no GPU execution)
     deps: [prepare]
     cmds:
-      - cargo run -p coupled-field-lab --example certified -- {{.CLI_ARGS}}
+      - cargo run -p coupled-field-lab --example coupled_field_certified -- {{.CLI_ARGS}}
 
   verify-certified-coupled:
     desc: Offline Stage 10 replay for CoupledField (optional --pinned-sha256 <digest>)
     deps: [prepare]
     cmds:
-      - cargo run -p coupled-field-lab --example certified -- --verify {{.CLI_ARGS}}
+      - cargo run -p coupled-field-lab --example coupled_field_certified -- --verify {{.CLI_ARGS}}
 
   test-lab-xor:
     desc: Run CPU-only XOR consumer tests including one global proof and GPU compilation planning

@@ -89,6 +89,37 @@ fn parse(args: impl IntoIterator<Item = String>, cwd: &Path) -> Result<Cli, CliE
     })
 }
 
+// Cargo's workspace example binaries share one target directory. Select the
+// consumer-specific `<name>_certified.rs` target without hardcoding a lab.
+fn certified_example(package: &Path) -> Result<String, CliError> {
+    let entries = std::fs::read_dir(package.join("examples"))
+        .map_err(|error| fail(&format!("cannot list consumer examples: {error}")))?;
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| fail(&format!("cannot read example: {error}")))?;
+        if !entry
+            .file_type()
+            .map_err(|error| fail(&format!("cannot stat example: {error}")))?
+            .is_file()
+        {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(stem) = name.to_str().and_then(|name| name.strip_suffix("_certified.rs")) else {
+            continue;
+        };
+        if !stem.is_empty() && stem.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+            matches.push(format!("{stem}_certified"));
+        }
+    }
+    matches.sort();
+    match matches.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(fail("consumer must provide exactly one examples/<name>_certified.rs")),
+        _ => Err(fail("multiple certified entrypoints; select a package with exactly one")),
+    }
+}
+
 fn run() -> Result<ExitCode, Box<dyn Error>> {
     let opts = parse(env::args().skip(1), &env::current_dir()?)?;
     let manifest = opts.manifest.canonicalize().map_err(|e| {
@@ -104,16 +135,17 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     if !manifest_text.lines().any(|line| line.trim() == "[package]") {
         return Err(fail("select a Cargo package, not the workspace root").into());
     }
-    if !package.join("src/lib.rs").is_file() || !package.join("examples/certified.rs").is_file() {
-        return Err(fail("package must implement src/lib.rs and examples/certified.rs").into());
+    if !package.join("src/lib.rs").is_file() {
+        return Err(fail("package must define an architecture in src/lib.rs").into());
     }
+    let example = certified_example(package)?;
     let mut cargo = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cargo
         .arg("run")
         .arg("--manifest-path")
         .arg(&manifest)
         .arg("--example")
-        .arg("certified")
+        .arg(example)
         .arg("--");
     if opts.verify {
         cargo.arg("--verify");
@@ -165,6 +197,24 @@ mod tests {
         assert_eq!(cli.manifest, Path::new("/repo/labs/x/Cargo.toml"));
         assert_eq!(cli.artifact_root.as_deref(), Some(Path::new("out")));
         assert!(!cli.verify);
+    }
+
+    #[test]
+    fn certified_entrypoint_is_unique_and_architecture_neutral() {
+        let root = std::env::temp_dir().join(format!(
+            "verineural-example-selection-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("examples")).unwrap();
+        assert!(certified_example(&root).is_err());
+        std::fs::write(root.join("examples/xor_certified.rs"), "").unwrap();
+        std::fs::write(root.join("examples/other.rs"), "").unwrap();
+        assert_eq!(certified_example(&root).unwrap(), "xor_certified");
+        std::fs::write(root.join("examples/other_certified.rs"), "").unwrap();
+        assert!(certified_example(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
