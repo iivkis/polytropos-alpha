@@ -75,7 +75,7 @@ theorem pointwise_le_relu {n : Nat} (a : Tensor n) :
     PointwiseLe a (relu a) := by
   intro i
   change a i ≤ max (a i) 0
-  exact le_max_left _ _
+  exact Int.le_max_left (a i) 0
 
 theorem add_pointwise {n : Nat} (a b : Tensor n) (i : Fin n) :
     add a b i = a i + b i := by
