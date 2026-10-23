@@ -1,12 +1,12 @@
 //! Run with `task lab-rotating` or `task train-lab-rotating -- <updates>`.
 use rotating_matrices_lab::{
-    ACTIONS, Architectures, Dataset, Dictionary, OP_COUNT, Parameters, Rng, Runner, TrainingConfig,
-    evaluate, evaluate_with_route, operation, train,
-    constant_baseline,
+    ACTIONS, Architectures, ArtifactWorkspace, Dataset, Dictionary, OP_COUNT, Parameters, Rng,
+    Runner, TrainingConfig, constant_baseline, evaluate, evaluate_with_route, operation, train,
 };
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use verineural::CertifiedBuildConfig;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -19,39 +19,96 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match mode.as_str() {
         "--inspect" => {
+            let mut inspect = String::from(
+                "two canonical 64x64 cores, R0/R90/R180/R270 => 8 actions\n",
+            );
             println!("two canonical 64x64 cores, R0/R90/R180/R270 => 8 actions");
             println!("UTF-8 byte vocabulary={} (train-only)", dictionary.len());
+            inspect.push_str(&format!(
+                "UTF-8 byte vocabulary={} (train-only)\n",
+                dictionary.len()
+            ));
             println!(
                 "40 operations; train={} validation={}",
                 data.train.len(),
                 data.validation.len()
             );
+            inspect.push_str(&format!(
+                "40 operations; train={} validation={}\n",
+                data.train.len(),
+                data.validation.len()
+            ));
+            fs::create_dir_all(&root)?;
             for (name, graph) in [
                 ("core", architectures.core.graph()),
                 ("router", architectures.router.graph()),
                 ("head", architectures.head.graph()),
             ] {
                 println!("{name}: {} Semantic IR nodes", graph.nodes().len());
-                fs::create_dir_all(&root)?;
+                inspect.push_str(&format!("{name}: {} Semantic IR nodes\n", graph.nodes().len()));
                 fs::write(root.join(format!("{name}.ir")), graph.canonical_ir())?;
             }
             for &(op, a, b) in &[(0, 10, 9), (3, 1, 0)] {
                 let case = operation(op, a, b)?;
                 println!("x={:?} y={}", case.text, case.target);
+                inspect.push_str(&format!("x={:?} y={}\n", case.text, case.target));
             }
             println!("Only inspect/IR export performed; no Lean check, GPU run or training.");
+            inspect.push_str("Only inspect/IR export performed; no Lean check, GPU run or training.\n");
+            fs::write(root.join("inspect.txt"), inspect)?;
         }
         "--certify-primitives" => {
-            // Three independent model-level certificates. This does NOT
-            // certify argmax, matrix rotations, recurrence or optimization.
+            // Three independent certified bundles remain intact *inside*
+            // three .tar files, so SHA256SUMS and local relative symlinks are
+            // still verifiable after extraction. No persistent subdirectories.
+            // This does NOT certify rotation, selection, recurrence or training.
+            let workspace = ArtifactWorkspace::new()?;
+            let staged = workspace.path().join("flat");
+            fs::create_dir_all(&staged)?;
             for (name, model) in [
                 ("core", &architectures.core),
                 ("router", &architectures.router),
                 ("head", &architectures.head),
             ] {
-                let path = root.join(format!("certified-{name}"));
+                let folder = format!("certified-{name}");
+                let path = workspace.path().join(&folder);
                 model.certify(CertifiedBuildConfig::new(&path))?;
-                println!("Certified primitive graph: {name} ({})", path.display());
+                let archive = staged.join(format!("{name}.certified.tar"));
+                let status = Command::new("tar")
+                    .args([
+                        "--sort=name",
+                        "--mtime=@0",
+                        "--owner=0",
+                        "--group=0",
+                        "--numeric-owner",
+                        "-cf",
+                    ])
+                    .arg(&archive)
+                    .arg("-C")
+                    .arg(workspace.path())
+                    .arg(&folder)
+                    .status()?;
+                if !status.success() {
+                    return Err(format!("tar failed for certified model {name}").into());
+                }
+                let bundle = path.join("auto-build");
+                for (source, extension) in [
+                    ("semantic.ir", "certified.ir"),
+                    ("architecture.dot", "dot"),
+                    ("architecture.png", "png"),
+                    ("lean/architecture.lean", "lean"),
+                    ("lean/audit.txt", "audit.txt"),
+                    ("report.txt", "certification.txt"),
+                ] {
+                    fs::copy(bundle.join(source), staged.join(format!("{name}.{extension}")))?;
+                }
+                println!("Certified primitive graph: {name} ({} in archive)", archive.display());
+            }
+            // Do not publish partial certificates if one of the three fails.
+            fs::create_dir_all(&root)?;
+            for entry in fs::read_dir(&staged)? {
+                let entry = entry?;
+                fs::copy(entry.path(), root.join(entry.file_name()))?;
             }
         }
         "--train" => {
@@ -60,7 +117,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None => TrainingConfig::default().updates,
             };
             let mut parameters = Parameters::new(0x51A7_E5);
-            let mut runner = Runner::new(&root.join("gpu"), &parameters)?;
+            let mut runner = Runner::new(&root, &parameters)?;
             let baseline = evaluate(
                 &mut runner,
                 &parameters,

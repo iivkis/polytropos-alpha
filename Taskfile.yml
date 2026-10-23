@@ -275,7 +275,15 @@ tasks:
       - cargo test -p verineural-consumer-acceptance --all-targets -- --ignored
 
   lab-rotating:
-    desc: Inspect two rotating 64x64 cores, 40-operation dataset and Semantic IR (CPU only)
+    desc: Run full rotating-matrices laboratory and generate one Git-trackable artifacts/ folder
+    deps: [prepare]
+    cmds:
+      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --inspect
+      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --train 128
+      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-primitives
+
+  inspect-lab-rotating:
+    desc: Inspect rotating cores and export Semantic IR without GPU or Lean
     deps: [prepare]
     cmds:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --inspect

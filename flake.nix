@@ -24,6 +24,7 @@
 
           go-task
           coreutils # sha256sum for evidence manifests
+          gnutar # preserve each certified graph's SHA256 manifest in one flat artifacts dir
           binutils
           graphviz # dot renderer for architecture.dot -> architecture.png
 

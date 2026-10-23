@@ -57,7 +57,10 @@ Readout: `scalar = h_final × head_weights + head_bias`; итог один **ц�
 
 ```sh
 task lab-rotating
-# Не требует GPU/Lean: схема, формы, примеры и три semantic IR файла
+# Полный запуск: inspect, train 128 updates, certify; нужен GPU + Lean
+
+task inspect-lab-rotating
+# Только inspect: схема, формы, словарь и три semantic IR без GPU/Lean
 
 task test-lab-rotating
 # Разработчик локально запускает CPU-only тесты
@@ -69,7 +72,26 @@ task certify-lab-rotating
 # Lean + NVPTX: сертификаты трёх *локальных* вычислительных графов
 ```
 
-`artifacts/` игнорируется Git; после обучения содержит `training-report.txt`
+`artifacts/` — **единственная папка выходных данных лаборатории; не игнорируется Git**.
+Она создаётся при запуске и должна попадать в коммит вместе с кодом.
+Файлы лежат непосредственно в ней, без `gpu/core`, `certified-core` и других
+подкаталогов: `inspect.txt`, `core.ir`, `router.ir`, `head.ir`,
+`core.graph.ptx`, `router.graph.ptx`, `head.graph.ptx`,
+`core.certified.tar`, `router.certified.tar`, `head.certified.tar`,
+`core.dot`, `router.dot`, `head.dot`, соответствующие PNG/Lean и отчёты.
+Три tar-файла сохраняют неизменённую внутреннюю структуру сертифицирующего
+VeriNeural bundle и его SHA256SUMS для последующего аудита; временные
+рабочие каталоги автоматически удаляются. Внешний `tar` определён в Nix.
+
+Для публикации реальных результатов после запуска:
+
+```sh
+git add labs/rotating-matrices-0.1.0/artifacts/
+git commit -m "lab(rotating-matrices): publish local run artifacts"
+git push origin dev
+```
+
+После обучения `artifacts/` также содержит `training-report.txt`
 с FP32 bit-level параметрами, accuracy/MAE/RMSE, распределением действий и
 количеством верных ответов по операциям. До/после обучения оцениваются одни
 и те же validation-примеры. Сэмплер распределяет проверочные пары по всем

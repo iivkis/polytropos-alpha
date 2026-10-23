@@ -9,7 +9,8 @@
 
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use verineural::{Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError, Shape, Tensor};
 
 pub const WIDTH: usize = 64;
@@ -29,6 +30,38 @@ impl fmt::Display for LabError {
     }
 }
 impl Error for LabError {}
+
+/// Temporary backend workspace. The only persistent laboratory output lives
+/// directly in labs/rotating-matrices-0.1.0/artifacts/.
+/// The staged backend trees are deleted even when an operation fails.
+pub struct ArtifactWorkspace {
+    path: PathBuf,
+}
+
+impl ArtifactWorkspace {
+    pub fn new() -> std::io::Result<Self> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "verineural-rotating-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&path)?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ArtifactWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
 
 /// The declared 40-operation grammar. Operations and compositions work on
 /// nonnegative eight-bit integer values, with an explicit modulo-256 policy
@@ -376,6 +409,7 @@ pub struct Runner {
 }
 impl Runner {
     pub fn new(output_dir: &Path, p: &Parameters) -> Result<Self, Box<dyn Error>> {
+        let workspace = ArtifactWorkspace::new()?;
         let models = Architectures::new()?;
         let gpu = GpuEngine::default();
         let core_program = gpu.compile(
@@ -398,7 +432,7 @@ impl Runner {
                 ("rotated_weight", tensor(&[WIDTH, WIDTH], &p.cores[0])?),
                 ("bias", tensor(&[WIDTH], &p.core_bias)?),
             ])?,
-            &output_dir.join("core"),
+            &workspace.path().join("core"),
         )?;
         let router = gpu.prepare(
             &router_program,
@@ -408,7 +442,7 @@ impl Runner {
                 ("weights", tensor(&[WIDTH, ACTIONS], &p.router)?),
                 ("bias", tensor(&[ACTIONS], &p.router_bias)?),
             ])?,
-            &output_dir.join("router"),
+            &workspace.path().join("router"),
         )?;
         let head = gpu.prepare(
             &head_program,
@@ -417,8 +451,20 @@ impl Runner {
                 ("weights", tensor(&[WIDTH, 1], &p.head)?),
                 ("bias", tensor(&[1], &[p.head_bias])?),
             ])?,
-            &output_dir.join("head"),
+            &workspace.path().join("head"),
         )?;
+        // VeriNeural keeps PTX in the prepared CUDA module. Copy audited
+        // lowering evidence into ONE flat, Git-trackable lab artifact folder.
+        // The per-program build directories stay only in temporary storage.
+        fs::create_dir_all(output_dir)?;
+        for name in ["core", "router", "head"] {
+            for file in ["graph.ll", "graph.ptx", "translation.plan", "translation.report"] {
+                fs::copy(
+                    workspace.path().join(name).join(file),
+                    output_dir.join(format!("{name}.{file}")),
+                )?;
+            }
+        }
         Ok(Self {
             models,
             core,
