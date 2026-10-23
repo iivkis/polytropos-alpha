@@ -346,21 +346,32 @@ mod tests {
             verineural::snapshot_architecture(&lab.graph, lab.output, &gpu, &lab.metadata).unwrap();
         assert_eq!(snapshot.dot.matches("subgraph cluster_m").count(), 7);
         assert!(snapshot.dot.contains(r#"vn_role="parameter""#));
-        assert!(snapshot.dot.contains("vn_module_inputs="));
+        // Module port metadata is stored once per normalized module scope.
+        assert_eq!(
+            snapshot.dot.matches("vn_input_ports=").count(),
+            lab.graph.modules().len()
+        );
+        assert_eq!(
+            snapshot.dot.matches("vn_output_ports=").count(),
+            lab.graph.modules().len()
+        );
         // The renderer should draw only real IR dependencies. Port identity
-        // still exists in the cluster's label and vn_input_port_* attributes.
+        // remains in the cluster label and the explicit typed port mappings.
         let real_edges: usize = lab.graph.nodes().iter().map(|node| node.inputs.len()).sum();
-        let ports: usize = lab.graph.modules().iter().map(|m| m.inputs.len()).sum();
         assert_eq!(snapshot.dot.matches(" -> ").count(), real_edges);
         assert_eq!(snapshot.dot.matches("vn_semantic_dst=").count(), real_edges);
-        assert_eq!(snapshot.dot.matches("vn_input_port_").count(), ports);
+        // The first boundary module declares x, y and shared parameter p.
+        // Quoted names are escaped because this metadata lives inside DOT.
+        assert!(snapshot.dot.contains(
+            r#"vn_input_ports="[(\"input_0\", 0), (\"input_1\", 1), (\"input_2\", 3)]""#
+        ));
         assert!(!snapshot.dot.contains("module_interface"));
         assert!(!snapshot.dot.contains("module_input_port"));
-        assert!(snapshot.dot.contains(r#"vn_input_port_0="n0""#));
+        assert!(snapshot.dot.contains(r#"vn_output_ports="[(\"output\", 7)]""#));
         assert!(
             snapshot
                 .dot
-                .contains(r#"label="BOUNDARY RESPONSE  ·  m0\np0:n0"#)
+                .contains(r#"label="BOUNDARY RESPONSE  ·  m0\ninput_0:n0"#)
         );
         let has_edge = |source: &str, destination: &str| {
             let prefix = format!("{source} -> {destination} [");
