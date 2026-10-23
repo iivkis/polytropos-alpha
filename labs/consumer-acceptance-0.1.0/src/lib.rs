@@ -130,6 +130,7 @@ pub fn tensor_heavy() -> (NeuralGraph, NodeId, ProofGoal) {
     let matrix = graph.input(shape(&[2, 2]), Domain::NonNegativeFinite);
     let values = graph.input(shape(&[2, 2]), Domain::NonNegativeFinite);
     let gates = graph.input(shape(&[2, 2]), Domain::NonNegativeFinite);
+<<<<<<< Updated upstream
     // The global nonnegativity prover composes verified module obligations:
     // a bare graph output is not an architecture-level module theorem.
     // Keep the input/output domains conservative; this is an ideal-Int claim,
@@ -161,6 +162,21 @@ pub fn tensor_heavy() -> (NeuralGraph, NodeId, ProofGoal) {
             },
         )
         .unwrap();
+=======
+    let product = graph.matmul(matrix, values).unwrap();
+    let spec = PointwiseSpec::new(
+        "fixture.consumer.relu_scores",
+        "1.0.0",
+        1,
+        PointwiseExpr::input(0).relu(),
+    )
+    .unwrap();
+    let custom = spec.apply(&mut graph, &[product]).unwrap();
+    let mask = graph.positive_mask(gates).unwrap();
+    let gated = graph.select_positive(mask, custom, product).unwrap();
+    let reduced = graph.reduce_sum(gated, 1).unwrap();
+    let output = graph.relu(reduced).unwrap();
+>>>>>>> Stashed changes
     let goal = ProofGoal::nonnegative("tensor_heavy_output", output, vec![matrix, values, gates]);
     (graph, output, goal)
 }
@@ -338,7 +354,10 @@ mod tests {
         let (graph, output, goal) = tensor_heavy();
         let (same, _, _) = tensor_heavy();
         assert_eq!(graph.canonical_ir(), same.canonical_ir());
+<<<<<<< Updated upstream
         assert_eq!(graph.modules().len(), 1);
+=======
+>>>>>>> Stashed changes
         assert!(
             graph
                 .nodes()
