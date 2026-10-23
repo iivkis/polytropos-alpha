@@ -11,7 +11,7 @@ node=7;op=relu;inputs=6;shape=4x2;domain=any;requires=4x2@any;ensures=4x2@any;cl
 node=8;op=matmul;inputs=7,3;shape=4x1;domain=any;requires=4x2@any,2x1@any;ensures=4x1@any;claims=-;ideal=matmul;gpu=not_lowered
 node=9;op=bias_add;inputs=8,4;shape=4x1;domain=any;requires=4x1@any,1@any;ensures=4x1@any;claims=-;ideal=bias_add;gpu=not_lowered
 node=10;op=relu;inputs=9;shape=4x1;domain=any;requires=4x1@any;ensures=4x1@any;claims=-;ideal=relu;gpu=not_lowered
-module=0;kind=single;name=xor_affine;version=1.0;inputs=0,1,2;body=5..7;outputs=6;input_ports=input_0:4x2@any,input_1:2x2@any,input_2:2@any;output_ports=output:4x2@any!-
-module=1;kind=single;name=xor_activated_affine;version=1.0;inputs=0,1,2;body=5..8;outputs=7;input_ports=input_0:4x2@any,input_1:2x2@any,input_2:2@any;output_ports=output:4x2@any!nonnegative
-module=2;kind=single;name=xor_affine;version=1.0;inputs=7,3,4;body=8..10;outputs=9;input_ports=input_0:4x2@any,input_1:2x1@any,input_2:1@any;output_ports=output:4x1@any!-
-module=3;kind=single;name=xor_mlp;version=0.1.0;inputs=0,1,2,3,4;body=5..11;outputs=10;input_ports=input_0:4x2@any,input_1:2x2@any,input_2:2@any,input_3:2x1@any,input_4:1@any;output_ports=output:4x1@any!nonnegative
+module=0;kind=single;name=xor_affine;version=1.0;inputs=0,1,2;body=5..7;outputs=6;input_ports=input_0:4x2@nonnegative_finite,input_1:2x2@finite,input_2:2@finite;output_ports=output:4x2@any!-
+module=1;kind=single;name=xor_activated_affine;version=1.0;inputs=0,1,2;body=5..8;outputs=7;input_ports=input_0:4x2@nonnegative_finite,input_1:2x2@finite,input_2:2@finite;output_ports=output:4x2@any!-
+module=2;kind=single;name=xor_affine;version=1.0;inputs=7,3,4;body=8..10;outputs=9;input_ports=input_0:4x2@any,input_1:2x1@finite,input_2:1@finite;output_ports=output:4x1@any!-
+module=3;kind=single;name=xor_mlp;version=model-block-v1;inputs=0,1,2,3,4;body=5..11;outputs=10;input_ports=input_0:4x2@nonnegative_finite,input_1:2x2@finite,input_2:2@finite,input_3:2x1@finite,input_4:1@finite;output_ports=output:4x1@any!-

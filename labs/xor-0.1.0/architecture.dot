@@ -11,7 +11,7 @@ digraph verineural {
   vn_export_version="3";
   vn_architecture_id="xor-mlp";
   vn_architecture_version="0.1.0";
-  vn_ir_sha256="8c0a0b9e64f7fbe4f2703c771e7ab80a98a454f19e9894d5b8fe21b9e134e255";
+  vn_ir_sha256="c0d5c1e2aab3e2fe62a5aaa0f1168ebb9b6c9a81163c9077d6f15a5649a2b9fe";
   vn_fp32_profile="FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }";
   vn_global_property="architecture_global_nonnegative";
   vn_global_proof="Lean-check-required";
@@ -41,10 +41,10 @@ digraph verineural {
     vn_definition_id="xor_mlp";
     vn_input_ports="[(\"input_0\", 0), (\"input_1\", 1), (\"input_2\", 2), (\"input_3\", 3), (\"input_4\", 4)]";
     vn_output_ports="[(\"output\", 10)]";
-    vn_requires="[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Any }, PortContract { shape: Shape([1]), domain: Any }]";
+    vn_requires="[PortContract { shape: Shape([4, 2]), domain: NonNegativeFinite }, PortContract { shape: Shape([2, 2]), domain: Finite }, PortContract { shape: Shape([2]), domain: Finite }, PortContract { shape: Shape([2, 1]), domain: Finite }, PortContract { shape: Shape([1]), domain: Finite }]";
     vn_ensures="PortContract { shape: Shape([4, 1]), domain: Any }";
-    vn_claims="[Nonnegative]";
-    vn_semantic_version="0.1.0";
+    vn_claims="[]";
+    vn_semantic_version="model-block-v1";
     vn_proof_status="conditional-ideal-Int;Lean-check-required";
     n10 [label="OUTPUT · ReLU  ·  n10\n[4, 1]", fillcolor="#DDF8E9", color="#26805A", tooltip="node 10: relu", vn_id="n10", vn_kind="architecture_output", vn_op="relu", vn_reduction_axis="", vn_custom_semantics="", vn_instance_path="m3_xor_mlp", vn_inputs="[9]", vn_shape="[4, 1]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Any", vn_semantics="OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_requires="[PortContract { shape: Shape([4, 1]), domain: Any }]", vn_ensures="PortContract { shape: Shape([4, 1]), domain: Any }", vn_claims="[]", vn_fp32_policy="FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }", vn_reachable_from_output="true", vn_gpu_lowering="kernel", vn_gpu_kernel="vn_node_10", vn_gpu_memory="reads=[(9, 4)],writes=4", vn_assurance="ideal-Int-Lean-conditional;FP32-test-only;JIT-trusted"];
     subgraph cluster_m1 {
@@ -63,9 +63,9 @@ digraph verineural {
       vn_definition_id="xor_activated_affine";
       vn_input_ports="[(\"input_0\", 0), (\"input_1\", 1), (\"input_2\", 2)]";
       vn_output_ports="[(\"output\", 7)]";
-      vn_requires="[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }]";
+      vn_requires="[PortContract { shape: Shape([4, 2]), domain: NonNegativeFinite }, PortContract { shape: Shape([2, 2]), domain: Finite }, PortContract { shape: Shape([2]), domain: Finite }]";
       vn_ensures="PortContract { shape: Shape([4, 2]), domain: Any }";
-      vn_claims="[Nonnegative]";
+      vn_claims="[]";
       vn_semantic_version="1.0";
       vn_proof_status="conditional-ideal-Int;Lean-check-required";
       n7 [label="ReLU  ·  n7\n[4, 2]", fillcolor="#F0EDFF", color="#8160BF", tooltip="node 7: relu", vn_id="n7", vn_kind="primitive", vn_op="relu", vn_reduction_axis="", vn_custom_semantics="", vn_instance_path="m3_xor_mlp/m1_xor_activated_affine", vn_inputs="[6]", vn_shape="[4, 2]", vn_dtype="binary32", vn_layout="row-major", vn_domain="Any", vn_semantics="OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered }", vn_requires="[PortContract { shape: Shape([4, 2]), domain: Any }]", vn_ensures="PortContract { shape: Shape([4, 2]), domain: Any }", vn_claims="[]", vn_fp32_policy="FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }", vn_reachable_from_output="true", vn_gpu_lowering="kernel", vn_gpu_kernel="vn_node_7", vn_gpu_memory="reads=[(6, 8)],writes=8", vn_assurance="ideal-Int-Lean-conditional;FP32-test-only;JIT-trusted"];
@@ -85,7 +85,7 @@ digraph verineural {
         vn_definition_id="xor_affine";
         vn_input_ports="[(\"input_0\", 0), (\"input_1\", 1), (\"input_2\", 2)]";
         vn_output_ports="[(\"output\", 6)]";
-        vn_requires="[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 2]), domain: Any }, PortContract { shape: Shape([2]), domain: Any }]";
+        vn_requires="[PortContract { shape: Shape([4, 2]), domain: NonNegativeFinite }, PortContract { shape: Shape([2, 2]), domain: Finite }, PortContract { shape: Shape([2]), domain: Finite }]";
         vn_ensures="PortContract { shape: Shape([4, 2]), domain: Any }";
         vn_claims="[]";
         vn_semantic_version="1.0";
@@ -110,7 +110,7 @@ digraph verineural {
       vn_definition_id="xor_affine";
       vn_input_ports="[(\"input_0\", 7), (\"input_1\", 3), (\"input_2\", 4)]";
       vn_output_ports="[(\"output\", 9)]";
-      vn_requires="[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Any }, PortContract { shape: Shape([1]), domain: Any }]";
+      vn_requires="[PortContract { shape: Shape([4, 2]), domain: Any }, PortContract { shape: Shape([2, 1]), domain: Finite }, PortContract { shape: Shape([1]), domain: Finite }]";
       vn_ensures="PortContract { shape: Shape([4, 1]), domain: Any }";
       vn_claims="[]";
       vn_semantic_version="1.0";

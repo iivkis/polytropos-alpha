@@ -387,6 +387,10 @@ theorem module_0_input_0_shape :
   ([4, 2] : List Nat) = ([4, 2] : List Nat) := by
   decide
 
+theorem module_0_input_0_nonnegative (x_0 : VeriNeural.Tensor 8) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 2) (x_3 : VeriNeural.Tensor 2) (x_4 : VeriNeural.Tensor 1) (h_0 : VeriNeural.Nonnegative x_0) :
+  VeriNeural.Nonnegative (node_0 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_0_nonnegative x_0 x_1 x_2 x_3 x_4 h_0
+
 theorem module_0_input_1_shape :
   ([2, 2] : List Nat) = ([2, 2] : List Nat) := by
   decide
@@ -403,6 +407,10 @@ theorem module_1_input_0_shape :
   ([4, 2] : List Nat) = ([4, 2] : List Nat) := by
   decide
 
+theorem module_1_input_0_nonnegative (x_0 : VeriNeural.Tensor 8) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 2) (x_3 : VeriNeural.Tensor 2) (x_4 : VeriNeural.Tensor 1) (h_0 : VeriNeural.Nonnegative x_0) :
+  VeriNeural.Nonnegative (node_0 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_0_nonnegative x_0 x_1 x_2 x_3 x_4 h_0
+
 theorem module_1_input_1_shape :
   ([2, 2] : List Nat) = ([2, 2] : List Nat) := by
   decide
@@ -414,10 +422,6 @@ theorem module_1_input_2_shape :
 theorem module_1_output_shape :
   ([4, 2] : List Nat) = ([4, 2] : List Nat) := by
   decide
-
-theorem module_1_claim_0 (x_0 : VeriNeural.Tensor 8) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 2) (x_3 : VeriNeural.Tensor 2) (x_4 : VeriNeural.Tensor 1) (_h_0 : VeriNeural.Nonnegative x_0) :
-  VeriNeural.Nonnegative (node_7 x_0 x_1 x_2 x_3 x_4) := by
-  exact VeriNeural.relu_nonnegative (node_6 x_0 x_1 x_2 x_3 x_4)
 
 theorem module_2_input_0_shape :
   ([4, 2] : List Nat) = ([4, 2] : List Nat) := by
@@ -439,6 +443,10 @@ theorem module_3_input_0_shape :
   ([4, 2] : List Nat) = ([4, 2] : List Nat) := by
   decide
 
+theorem module_3_input_0_nonnegative (x_0 : VeriNeural.Tensor 8) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 2) (x_3 : VeriNeural.Tensor 2) (x_4 : VeriNeural.Tensor 1) (h_0 : VeriNeural.Nonnegative x_0) :
+  VeriNeural.Nonnegative (node_0 x_0 x_1 x_2 x_3 x_4) := by
+  exact node_0_nonnegative x_0 x_1 x_2 x_3 x_4 h_0
+
 theorem module_3_input_1_shape :
   ([2, 2] : List Nat) = ([2, 2] : List Nat) := by
   decide
@@ -458,10 +466,6 @@ theorem module_3_input_4_shape :
 theorem module_3_output_shape :
   ([4, 1] : List Nat) = ([4, 1] : List Nat) := by
   decide
-
-theorem module_3_claim_0 (x_0 : VeriNeural.Tensor 8) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 2) (x_3 : VeriNeural.Tensor 2) (x_4 : VeriNeural.Tensor 1) (_h_0 : VeriNeural.Nonnegative x_0) :
-  VeriNeural.Nonnegative (node_10 x_0 x_1 x_2 x_3 x_4) := by
-  exact VeriNeural.relu_nonnegative (node_9 x_0 x_1 x_2 x_3 x_4)
 
 -- Ideal-Int module property; this is not an FP32/GPU guarantee.
 theorem module_3_global_nonnegative (x_0 : VeriNeural.Tensor 8) (x_1 : VeriNeural.Tensor 4) (x_2 : VeriNeural.Tensor 2) (x_3 : VeriNeural.Tensor 2) (x_4 : VeriNeural.Tensor 1) :
