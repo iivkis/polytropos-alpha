@@ -77,6 +77,17 @@ theorem pointwise_le_relu {n : Nat} (a : Tensor n) :
   change a i ≤ max (a i) 0
   exact Int.le_max_left (a i) 0
 
+/-- Nontrivial composition property: adding a proven nonnegative branch
+    cannot push the other branch below its value, even through final ReLU. -/
+theorem pointwise_le_relu_add_of_nonnegative {n : Nat} (a b : Tensor n)
+    (hb : Nonnegative b) : PointwiseLe a (relu (add a b)) := by
+  intro i
+  change a i ≤ max (a i + b i) 0
+  have hsum : a i ≤ a i + b i := by
+    have := hb i
+    omega
+  exact le_trans hsum (Int.le_max_left (a i + b i) 0)
+
 theorem add_pointwise {n : Nat} (a b : Tensor n) (i : Fin n) :
     add a b i = a i + b i := by
   rfl

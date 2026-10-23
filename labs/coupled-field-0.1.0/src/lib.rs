@@ -385,7 +385,7 @@ mod tests {
         assert!(!has_edge("n0", "m6_in0"));
         assert!(snapshot.dot.contains("vn_semantic_src=\"n0\""));
         assert!(snapshot.dot.contains("vn_visual_src=\"n0\""));
-        assert!(snapshot.dot.contains("rank=same; n0; n1; n2;"));
+        assert!(!snapshot.dot.contains("rank=same;"));
         assert!(snapshot.dot.contains("fillcolor=\"#FFF1DB\""));
         assert!(snapshot.dot.contains(r#"style="rounded,filled""#));
         assert!(snapshot.dot.contains("dpi=180"));
@@ -394,7 +394,7 @@ mod tests {
         assert!(snapshot.dot.contains("mclimit=4"));
         assert!(!snapshot.dot.contains("headport="));
         assert!(!snapshot.dot.contains("tailport="));
-        assert!(!snapshot.dot.contains("constraint=\"false\""));
+        assert!(snapshot.dot.contains("constraint=\"false\""));
         assert!(snapshot.dot.contains("constraint=\"true\""));
         assert!(snapshot.dot.contains("vn_ir_sha256="));
     }

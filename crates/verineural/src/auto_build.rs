@@ -708,19 +708,13 @@ impl ArchitectureAutoCompiler {
                 "architecture.dot does not match current Semantic IR and output status".into(),
             ));
         }
-        // Re-render the exact saved DOT with the pinned Nix Graphviz tool.
-        // A PNG that was swapped while retaining the manifest is rejected.
-        let rerendered = directory.join("architecture.replay.png");
-        crate::architecture::render_dot_png(&dot_file, &rerendered)?;
-        let image_check = (|| -> Result<bool, AutoBuildError> {
-            Ok(fs::read(&rerendered)? == fs::read(directory.join("architecture.png"))?)
-        })();
-        let _ = fs::remove_file(&rerendered);
-        if !image_check? {
-            return Err(AutoBuildError::Integrity(
-                "saved architecture.png differs from pinned Graphviz render of DOT".into(),
-            ));
-        }
+        // The standalone snapshot and auto-build use the same strict,
+        // render-and-compare verification, including cleanup on failure.
+        crate::architecture::verify_rendered_dot_png(
+            &dot_file,
+            &directory.join("architecture.png"),
+        )
+        .map_err(|error| AutoBuildError::Integrity(error.to_string()))?;
         let lean_dir = directory.join("lean");
         let mut axiom_dependencies = BTreeMap::new();
         let (lean_version, architecture_theorems) = {

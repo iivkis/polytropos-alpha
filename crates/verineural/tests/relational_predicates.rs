@@ -99,6 +99,76 @@ fn rejects_foreign_or_unscoped_predicate_references() {
     ));
 }
 
+/// Two independent ReLU branches merge through Add and a final ReLU.
+/// The statement constrains the whole composition, not the final ReLU alone.
+fn composed_case() -> (NeuralGraph, ProofGoal) {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![4]).unwrap();
+    let x = graph.input(shape.clone(), Domain::Finite);
+    let y = graph.input(shape, Domain::Finite);
+    let left = graph.relu(x).unwrap();
+    let right = graph.relu(y).unwrap();
+    let sum = graph.add(left, right).unwrap();
+    let output = graph.relu(sum).unwrap();
+    (
+        graph,
+        ProofGoal {
+            name: "merged_branch_lower_bound".into(),
+            output,
+            kind: ProofGoalKind::Predicate(Predicate::pointwise_le(
+                ValueRef::Node(left),
+                ValueRef::Output,
+            )),
+        },
+    )
+}
+
+#[test]
+fn proves_bound_using_nonnegative_sibling_not_just_output_relu() {
+    let (graph, goal) = composed_case();
+    let source = LeanProofEngine::default()
+        .generate_goal(&graph, &goal)
+        .unwrap()
+        .source()
+        .to_owned();
+    assert!(source.contains("VeriNeural.pointwise_le_relu_add_of_nonnegative"));
+    assert!(source.contains("VeriNeural.relu_nonnegative"));
+    assert!(source.contains("architecture_property_merged_branch_lower_bound"));
+    assert!(!source.contains("sorry"));
+}
+
+/// Without a nonnegative sibling, this statement is mathematically false.
+fn invalid_composition() -> (NeuralGraph, ProofGoal) {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![4]).unwrap();
+    let x = graph.input(shape.clone(), Domain::Finite);
+    let y = graph.input(shape, Domain::Finite);
+    let left = graph.relu(x).unwrap();
+    let output = graph.add(left, y).and_then(|sum| graph.relu(sum)).unwrap();
+    (
+        graph,
+        ProofGoal {
+            name: "unjustified_branch_bound".into(),
+            output,
+            kind: ProofGoalKind::Predicate(Predicate::pointwise_le(
+                ValueRef::Node(left),
+                ValueRef::Output,
+            )),
+        },
+    )
+}
+
+#[test]
+fn composition_prover_does_not_claim_bound_without_nonnegative_sibling() {
+    let (graph, goal) = invalid_composition();
+    let source = LeanProofEngine::default()
+        .generate_goal(&graph, &goal)
+        .unwrap()
+        .source()
+        .to_owned();
+    assert!(!source.contains("VeriNeural.pointwise_le_relu_add_of_nonnegative"));
+}
+
 fn certify(graph: &NeuralGraph, goal: &ProofGoal, path: &Path) -> Result<(), ProofError> {
     let lean = LeanProofEngine::default();
     let generated = lean.generate_goal(graph, goal)?;
@@ -121,6 +191,18 @@ fn lean_accepts_true_relation_and_rejects_false_one() {
     let (bad_graph, bad_goal) = case(true);
     assert!(matches!(
         certify(&bad_graph, &bad_goal, &dir.join("false.lean")),
+        Err(ProofError::LeanRejected { .. })
+    ));
+    let (composed_graph, composed_goal) = composed_case();
+    certify(
+        &composed_graph,
+        &composed_goal,
+        &dir.join("composed_true.lean"),
+    )
+    .unwrap();
+    let (invalid_graph, invalid_goal) = invalid_composition();
+    assert!(matches!(
+        certify(&invalid_graph, &invalid_goal, &dir.join("composed_false.lean")),
         Err(ProofError::LeanRejected { .. })
     ));
     std::fs::remove_dir_all(dir).unwrap();

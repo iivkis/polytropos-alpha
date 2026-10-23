@@ -9,17 +9,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use verineural::{
-    GpuEngine, GpuLaunchConfig, GpuProgram, LeanProgram, LeanProofEngine, ReluFusion,
-    TranslationPlan,
+    GpuEngine, GpuLaunchConfig, GpuProgram, LeanProgram, LeanProofEngine, Operation,
+    Predicate, ProofGoal, ProofGoalKind, ReluFusion, TranslationPlan, ValueRef,
     snapshot_architecture,
 };
 
-const FILES: [&str; 17] = [
+const FILES: [&str; 18] = [
     "architecture.identity",
     "semantic.ir",
     "architecture.dot",
     "architecture.png",
     "architecture.lean",
+    "composition.lean",
     "parameters.bits",
     "inputs.bits",
     "output.bits",
@@ -60,8 +61,12 @@ fn checksums(root: &Path) -> Result<String, Box<dyn Error>> {
 
 // Do not accept a syntactically valid, but unrelated, Lean theorem.
 // Both the source and the transitive axiom dependencies are rechecked.
-fn verify_lean_evidence(root: &Path, expected: &LeanProgram) -> Result<(), Box<dyn Error>> {
-    let path = root.join("architecture.lean");
+fn verify_lean_evidence(
+    root: &Path,
+    file: &str,
+    expected: &LeanProgram,
+) -> Result<(), Box<dyn Error>> {
+    let path = root.join(file);
     if fs::read_to_string(&path)? != expected.source() {
         return Err(failed("saved Lean source differs from current Rust architecture").into());
     }
@@ -69,6 +74,29 @@ fn verify_lean_evidence(root: &Path, expected: &LeanProgram) -> Result<(), Box<d
     proof.check_file(&path)?;
     proof.audit_file(&path, expected.theorem_names())?;
     Ok(())
+}
+
+/// Global ideal-Int relationship involving two independent graph branches.
+fn composition_goal(lab: &coupled_field_lab::Lab) -> Result<ProofGoal, Box<dyn Error>> {
+    let output = lab.graph.node(lab.output)?;
+    if !matches!(output.operation, Operation::Relu) {
+        return Err(failed("coupled field output is not a ReLU").into());
+    }
+    let merge = lab.graph.node(output.inputs[0])?;
+    if !matches!(merge.operation, Operation::Add) || merge.inputs.len() != 2 {
+        return Err(failed("coupled field output is not a two-branch merge").into());
+    }
+    if !matches!(lab.graph.node(merge.inputs[1])?.operation, Operation::Relu) {
+        return Err(failed("merged sibling lacks a proven nonnegative ReLU").into());
+    }
+    Ok(ProofGoal {
+        name: "coupled_branch_lower_bound".into(),
+        output: lab.output,
+        kind: ProofGoalKind::Predicate(Predicate::pointwise_le(
+            ValueRef::Node(merge.inputs[0]),
+            ValueRef::Output,
+        )),
+    })
 }
 
 fn verified_bundle(
@@ -107,7 +135,10 @@ fn verified_bundle(
     {
         return Err(failed("architecture-level Lean obligation absent").into());
     }
-    verify_lean_evidence(root, &proof)?;
+    verify_lean_evidence(root, "architecture.lean", &proof)?;
+    let relational = LeanProofEngine::default()
+        .generate_goal(&lab.graph, &composition_goal(lab)?)?;
+    verify_lean_evidence(root, "composition.lean", &relational)?;
     for label in ["baseline", "fused"] {
         let dir = root.join("gpu").join(label);
         let llvm = fs::read_to_string(dir.join("graph.ll"))?;
@@ -139,6 +170,8 @@ fn verified_bundle(
         "architecture={}\nversion={}\nsemantic_ir_sha256={}\n\
          global_property=architecture_global_nonnegative\n\
          lean=proven-under-declared-nonnegative-input-assumptions\n\
+         composition_property=architecture_property_coupled_branch_lower_bound\n\
+         composition_lean=proven-ideal-Int-two-branch-bound\n\
          numeric_oracle=checked-integer-within-2^24\n\
          gpu=baseline-fused-bitwise-tested\n\
          translation=per-kernel-llvm-ptx-structural-validated\n\
@@ -154,7 +187,7 @@ fn verified_bundle(
         return Err(failed("SHA-256 manifest is missing, incomplete or stale").into());
     }
     println!(
-        "Stage 9 offline verification: Semantic IR, DOT, 15+ metadata attributes, Lean, baseline/fused translation, exact integer outputs and 17 SHA-256 artifacts PASS"
+        "Stage 9 offline verification: Semantic IR, DOT, 15+ metadata attributes, Lean, baseline/fused translation, exact integer outputs and 18 SHA-256 artifacts PASS"
     );
     Ok(())
 }
@@ -221,6 +254,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     if checked.theorem_names.is_empty() {
         return Err(failed("Lean returned no checked theorems").into());
     }
+    let relational = LeanProofEngine::default()
+        .generate_goal(&lab.graph, &composition_goal(&lab)?)?;
+    LeanProofEngine::default().verify_certified(
+        &relational,
+        &root.join("composition.lean"),
+    )?;
     let snapshot = snapshot_architecture(&lab.graph, lab.output, &base_plan, &lab.metadata)?;
     snapshot.write(&root)?;
     fs::write(root.join("architecture.identity"), identity)?;
@@ -269,6 +308,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             "architecture={}\nversion={}\nsemantic_ir_sha256={}\n\
          global_property=architecture_global_nonnegative\n\
          lean=proven-under-declared-nonnegative-input-assumptions\n\
+         composition_property=architecture_property_coupled_branch_lower_bound\n\
+         composition_lean=proven-ideal-Int-two-branch-bound\n\
          numeric_oracle=checked-integer-within-2^24\n\
          gpu=baseline-fused-bitwise-tested\n\
          translation=per-kernel-llvm-ptx-structural-validated\n\
@@ -310,7 +351,7 @@ mod tests {
             .unwrap();
         // No Lean installation is needed for this negative case: comparing
         // against the independently regenerated Rust proof fails first.
-        assert!(verify_lean_evidence(&root, &expected).is_err());
+        assert!(verify_lean_evidence(&root, "architecture.lean", &expected).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

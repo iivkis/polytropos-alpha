@@ -11,6 +11,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{GpuProgram, ModuleInstanceRef, NeuralGraph, NodeId, Operation};
 
@@ -307,6 +308,26 @@ pub(crate) fn render_dot_png(dot: &Path, png: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Re-render from saved DOT and compare bytes, not just presence or checksums.
+/// The unique sibling path avoids trampling another verifier's temporary image.
+pub(crate) fn verify_rendered_dot_png(dot: &Path, png: &Path) -> io::Result<()> {
+    static NEXT_REPLAY: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_REPLAY.fetch_add(1, Ordering::Relaxed);
+    let replay = dot.with_file_name(format!(
+        ".verineural-png-replay-{}-{id}.png",
+        std::process::id()
+    ));
+    let result = (|| {
+        render_dot_png(dot, &replay)?;
+        if fs::read(&replay)? != fs::read(png)? {
+            return Err(bad("architecture.png differs from Graphviz rendering of saved DOT"));
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_file(&replay);
+    result
+}
+
 impl ArchitectureSnapshot {
     /// Re-render the pinned DOT with Graphviz into architecture.png.
     /// Only the configured artifact root receives writes.
@@ -338,10 +359,7 @@ impl ArchitectureSnapshot {
                 "architecture DOT lacks matching Semantic IR fingerprint",
             ));
         }
-        if !root.join("architecture.png").is_file() {
-            return Err(bad("rendered architecture PNG is missing"));
-        }
-        Ok(())
+        verify_rendered_dot_png(&root.join("architecture.dot"), &root.join("architecture.png"))
     }
 }
 
@@ -442,7 +460,7 @@ pub fn snapshot_architecture(
     )
     .expect("writing to string");
     for (key, value) in [
-        ("vn_export_version", "2".to_owned()),
+        ("vn_export_version", "3".to_owned()),
         ("vn_architecture_id", metadata.id.clone()),
         ("vn_architecture_version", metadata.version.clone()),
         ("vn_ir_sha256", digest.clone()),
@@ -684,29 +702,8 @@ pub fn snapshot_architecture(
         output,
     };
     render_scope(None, &context, 0, &mut dot);
-    // Only external data inputs share the leftmost rank. Shared parameters
-    // can sit nearer their consumers instead of drawing long diagonal wires.
-    let sources = graph
-        .nodes()
-        .iter()
-        .enumerate()
-        .filter_map(|(i, node)| {
-            (matches!(node.operation, Operation::Input)
-                && metadata
-                    .input_roles
-                    .get(&i)
-                    .is_some_and(|role| role.as_str() == "input"))
-            .then_some(i)
-        })
-        .collect::<Vec<_>>();
-    if !sources.is_empty() {
-        let positions = sources
-            .iter()
-            .map(|i| format!("n{i};"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        writeln!(dot, "  {{ rank=same; {positions} }}").expect("writing to string");
-    }
+    // Let dot choose input ranks: hard rank=same constraints create crossing
+    // bundles when shared inputs and parameters feed distant submodules.
     // Validate the nested capture chain without adding visual relay edges.
     for (i, scope) in scopes.iter().enumerate() {
         for (port, (_, source_id)) in scope.inputs.iter().enumerate() {
@@ -766,19 +763,35 @@ pub fn snapshot_architecture(
             }
             // Emphasize local chains, but still rank all cross-module data
             // and parameter dependencies in the correct direction.
-            let weight = if owners[i] == owners[source.index()] {
+            let weight = if role == "parameter" { "1" } else if owners[i] == owners[source.index()] {
                 "5"
             } else {
                 "2"
             };
+            let src_module_port = owners[source.index()]
+                .and_then(|owner| {
+                    scopes[owner].outputs.iter()
+                        .find(|(_, index)| *index == source.index())
+                })
+                .map_or("none", |(name, _)| name.as_str());
+            let dst_module_port = owners[i]
+                .and_then(|owner| {
+                    let scope = &scopes[owner];
+                    source_is_outside_scope(source.index(), scope)
+                        .then(|| scope.inputs.iter().find(|(_, index)| *index == source.index()))
+                        .flatten()
+                })
+                .map_or("none", |(name, _)| name.as_str());
             let data = [
                 ("color", edge_color.into()),
                 ("penwidth", edge_width.into()),
                 ("weight", weight.into()),
                 ("minlen", "1".into()),
-                ("constraint", "true".into()),
+                ("constraint", if role == "parameter" { "false" } else { "true" }.into()),
                 ("vn_src_port", "output".into()),
                 ("vn_dst_port", format!("input_{port}")),
+                ("vn_module_src_port", src_module_port.into()),
+                ("vn_module_dst_port", dst_module_port.into()),
                 ("vn_semantic_src", format!("n{}", source.index())),
                 ("vn_semantic_dst", format!("n{i}")),
                 ("vn_visual_src", format!("n{}", source.index())),
@@ -861,7 +874,7 @@ pub(crate) fn auto_architecture_dot(
                 plan.outputs.len()
             ),
         ),
-        ("vn_export_version", "auto-v2".into()),
+        ("vn_export_version", "auto-v3".into()),
         ("vn_ir_sha256", semantic_ir_sha256.to_owned()),
         ("vn_fp32_profile", format!("{:?}", graph.policy())),
         ("vn_selected_outputs", format!("{:?}", selected)),
@@ -1057,30 +1070,35 @@ pub(crate) fn auto_architecture_dot(
         0,
         &mut dot,
     );
-    let inputs = graph
-        .nodes()
-        .iter()
-        .enumerate()
-        .filter_map(|(i, node)| matches!(node.operation, Operation::Input).then_some(i))
-        .collect::<Vec<_>>();
-    if !inputs.is_empty() {
-        writeln!(
-            dot,
-            "  {{ rank=same; {} }}",
-            inputs
-                .iter()
-                .map(|i| format!("n{i};"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-        .expect("writing DOT");
-    }
+    // Inputs are not forced onto a single rank; semantic input identity is
+    // recorded in vn_kind, independently of the visual layout.
     // Exactly one rendered edge for every real Semantic IR dependency.
     // Module port mappings are attributes, never extra visual relay edges.
     for (i, node) in graph.nodes().iter().enumerate() {
         for (port, input) in node.inputs.iter().enumerate() {
             let source = graph.node(*input).map_err(|err| bad(err.to_string()))?;
             let (color, width) = edge_theme("data", port);
+            let transform = match node.operation {
+                Operation::BiasAdd if port == 1 => "row-wise-broadcast",
+                Operation::Reshape(_) => "zero-copy-reshape",
+                Operation::MatMul => "matrix-product-indexing",
+                _ => "identity",
+            };
+            let module_dst_port = owners[i]
+                .and_then(|owner| {
+                    let scope = &scopes[owner];
+                    source_is_outside_scope(input.index(), scope).then(|| {
+                        scope.inputs.iter().find(|(_, id)| *id == input.index())
+                    })
+                })
+                .flatten()
+                .map_or("none", |(name, _)| name.as_str());
+            let module_src_port = owners[input.index()]
+                .and_then(|owner| {
+                    scopes[owner].outputs.iter()
+                        .find(|(_, index)| *index == input.index())
+                })
+                .map_or("none", |(name, _)| name.as_str());
             let properties = [
                 ("color", color.into()),
                 ("penwidth", width.into()),
@@ -1094,13 +1112,19 @@ pub(crate) fn auto_architecture_dot(
                 ),
                 ("minlen", "1".into()),
                 ("constraint", "true".into()),
+                ("vn_src_port", "output".into()),
+                ("vn_dst_port", format!("input_{port}")),
+                ("vn_module_src_port", module_src_port.into()),
+                ("vn_module_dst_port", module_dst_port.into()),
                 ("vn_semantic_src", format!("n{}", input.index())),
                 ("vn_semantic_dst", format!("n{i}")),
-                ("vn_dst_port", format!("input_{port}")),
+                ("vn_visual_src", format!("n{}", input.index())),
                 ("vn_order", port.to_string()),
                 ("vn_shape", format!("{:?}", source.shape.dims())),
                 ("vn_dtype", "binary32".into()),
                 ("vn_role", "data".into()),
+                ("vn_transform", transform.into()),
+                ("vn_constraint", "source-shape-checked".into()),
             ];
             writeln!(
                 dot,
@@ -1205,6 +1229,10 @@ mod tests {
         assert!(dot.contains("subgraph cluster_m1"));
         assert!(dot.contains("next_state"));
         assert!(dot.contains("readout"));
+        assert!(dot.contains("vn_src_port=\"output\""));
+        assert!(dot.contains("vn_module_src_port="));
+        assert!(dot.contains("vn_module_dst_port="));
+        assert!(!dot.contains("rank=same;"));
         assert!(dot.contains("vn_input_ports"));
         assert!(dot.contains("vn_output_ports"));
         assert!(dot.contains(r#"vn_reachable_from_outputs="false""#));
@@ -1252,7 +1280,7 @@ mod tests {
         assert!(!a.dot.contains("module-input-port"));
         assert!(!a.dot.contains(r#"style="dashed""#));
         assert!(!a.dot.contains("vn_input_port_")); // no modules in this graph
-        assert!(a.dot.contains("rank=same; n0;"));
+        assert!(!a.dot.contains("rank=same;"));
         assert!(a.dot.contains("splines=spline"));
         assert!(a.dot.contains("concentrate=false"));
         assert!(a.dot.contains("mclimit=4"));
@@ -1260,7 +1288,7 @@ mod tests {
         assert!(a.dot.contains("ranksep=1.15"));
         assert!(!a.dot.contains("tailport="));
         assert!(!a.dot.contains("headport="));
-        assert!(!a.dot.contains("constraint=\"false\""));
+        assert!(a.dot.contains("constraint=\"false\""));
         assert!(a.dot.contains("constraint=\"true\""));
         assert!(a.dot.contains("minlen=\"1\""));
         assert!(a.dot.contains("vn_visual_src=\"n0\""));
@@ -1277,4 +1305,34 @@ mod tests {
         changed.input_roles.insert(20, "parameter".into());
         assert!(snapshot_architecture(&g1, o1, &p1, &changed).is_err());
     }
+    #[test]
+    fn snapshot_png_replay_detects_image_tampering() {
+        if Command::new("dot").arg("-V").output().is_err() {
+            // Graphviz is supplied by the project's pinned Nix shell.
+            return;
+        }
+        let mut graph = NeuralGraph::default();
+        let input = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        let output = graph.relu(input).unwrap();
+        let program = GpuEngine::default().compile(&graph, output).unwrap();
+        let metadata = ArchitectureMetadata {
+            id: "png-replay".into(),
+            version: "0.1.0".into(),
+            input_roles: BTreeMap::from([(input.index(), "input".into())]),
+            global_property: "architecture_global_nonnegative".into(),
+        };
+        let snapshot = snapshot_architecture(&graph, output, &program, &metadata).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "verineural-png-replay-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        snapshot.write(&root).unwrap();
+        snapshot.verify(&root).unwrap();
+        fs::write(root.join("architecture.png"), b"not the Graphviz image").unwrap();
+        assert!(snapshot.verify(&root).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
 }

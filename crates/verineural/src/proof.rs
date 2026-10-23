@@ -1178,10 +1178,49 @@ impl LeanProofEngine {
                                 format!("{} = {}", term(left), term(right)),
                                 "  rfl".to_owned(),
                             ),
-                            Predicate::PointwiseLe(_, _) => (
-                                format!("VeriNeural.PointwiseLe {} {}", term(left), term(right)),
-                                format!("  exact VeriNeural.pointwise_le_relu {}", term(left)),
-                            ),
+                            Predicate::PointwiseLe(_, _) => {
+                                // A compositional branch bound, not merely a
+                                // restatement of the final ReLU theorem:
+                                // lower <= relu(add(lower, relu(other))).
+                                let upper = graph.node(right)?;
+                                let composed = if matches!(upper.operation, Operation::Relu) {
+                                    let sum = graph.node(upper.inputs[0])?;
+                                    if matches!(sum.operation, Operation::Add)
+                                        && sum.inputs[0] == left
+                                    {
+                                        let other = sum.inputs[1];
+                                        let branch = graph.node(other)?;
+                                        if matches!(branch.operation, Operation::Relu) {
+                                            let pre_relu = branch.inputs[0];
+                                            Some(format!(
+                                                "  change VeriNeural.PointwiseLe {} (VeriNeural.relu (VeriNeural.add {} {}))\n  exact VeriNeural.pointwise_le_relu_add_of_nonnegative {} {} (VeriNeural.relu_nonnegative {})",
+                                                term(left),
+                                                term(left),
+                                                term(other),
+                                                term(left),
+                                                term(other),
+                                                term(pre_relu)
+                                            ))
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                (
+                                    format!(
+                                        "VeriNeural.PointwiseLe {} {}",
+                                        term(left),
+                                        term(right)
+                                    ),
+                                    composed.unwrap_or_else(|| {
+                                        format!("  exact VeriNeural.pointwise_le_relu {}", term(left))
+                                    }),
+                                )
+                            },
                             Predicate::Nonnegative(_) => unreachable!(),
                         };
                         program.source.push_str(&format!(
