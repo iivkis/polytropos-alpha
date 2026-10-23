@@ -21,47 +21,50 @@ tasks:
       - task: fmt
       - cargo fmt --all -- --check
 
-  fmt-check:
-    desc: Format and verify Rust; auto-commit and fast-forward push rustfmt-only changes (clean checkout required)
+  check:
+    desc: Autoformat Rust, type-check the workspace, and publish rustfmt-only changes safely on dev
     cmds:
       - |
         set -eu
-        # A dirty tree could mix an existing edit with rustfmt's changes.
-        if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
-          echo "fmt-check: dirty working tree; commit or stash changes before auto-push." >&2
-          exit 1
+        # Snapshot dirty source/index state before running rustfmt. Existing
+        # developer edits must never become an automatic formatting commit.
+        prior_rust="$(git status --porcelain --untracked-files=all -- '*.rs')"
+        prior_index="$(git diff --cached --name-only)"
+        task prepare
+        cargo check --workspace --all-targets
+        if git diff --quiet HEAD -- '*.rs'; then
+          echo "check: no tracked Rust changes to publish."
+          exit 0
+        fi
+        if [ -n "$prior_rust" ] || [ -n "$prior_index" ]; then
+          echo "check: existing Rust edits or staged changes; formatted and checked, but not auto-pushing user work." >&2
+          exit 0
         fi
         branch="$(git symbolic-ref --quiet --short HEAD)" || {
-          echo "fmt-check: detached HEAD; refusing auto-push." >&2
-          exit 1
+          echo "check: detached HEAD; skipping automatic push." >&2
+          exit 0
         }
         if [ "$branch" != "dev" ]; then
-          echo "fmt-check: only dev may be automatically committed and pushed (current: $branch)." >&2
-          exit 1
-        fi
-        git remote get-url origin >/dev/null
-        cargo fmt --all
-        cargo fmt --all -- --check
-        if git diff --quiet HEAD -- '*.rs'; then
-          echo "fmt-check: no formatting changes; nothing to push."
+          echo "check: only dev allows automatic formatting commits (current: $branch)." >&2
           exit 0
         fi
         git diff --check
-        # Refuse to publish other local commits or overwrite a newer remote.
-        git fetch --quiet origin "$branch"
-        remote_head="$(git rev-parse --verify "refs/remotes/origin/$branch")"
+        git remote get-url origin >/dev/null
+        git fetch --quiet origin dev
+        remote_head="$(git rev-parse --verify refs/remotes/origin/dev)"
         if [ "$(git rev-parse HEAD)" != "$remote_head" ]; then
-          echo "fmt-check: branch differs from origin/$branch; synchronize manually." >&2
+          echo "check: dev differs from origin/dev; refusing to auto-push." >&2
           exit 1
         fi
-        git add -- '*.rs'
+        # Tracked .rs files only. Untracked sources and existing staged work
+        # are never silently added to a formatting commit.
+        git add -u -- '*.rs'
+        if git diff --cached --quiet; then
+          echo "check: no tracked Rust changes to commit."
+          exit 0
+        fi
         git commit -m "style(verineural): apply cargo fmt"
-        git push origin "HEAD:refs/heads/$branch"
-
-  check:
-    desc: Type-check the Rust workspace (developer-run)
-    cmds:
-      - cargo check --workspace --all-targets
+        git push origin HEAD:refs/heads/dev
 
   build:
     desc: Build the Rust workspace (developer-run)

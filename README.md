@@ -102,7 +102,6 @@ task --list
 task check
 task test
 task clippy
-task fmt-check # cargo fmt + проверка; если .rs изменились, отдельный commit и git push origin
 task example-stage2
 task proof-stage3
 task gpu-stage4
@@ -114,7 +113,7 @@ task verify-gpu-stage7
 task gpu-stage7-bench
 ```
 
-**Поведение `task fmt-check`:** только при полностью чистом рабочем дереве запускаются `cargo fmt --all` и `cargo fmt --all -- --check`. Если rustfmt изменил отслеживаемые `.rs`, команда проверяет `origin/<текущая-ветка>`, добавляет только Rust-файлы, создаёт коммит `style(verineural): apply cargo fmt` и выполняет обычный fast-forward `git push` без `--force`. При грязном дереве, отставшей/опережающей ветке, ошибке форматирования или push происходит отказ; при отсутствии изменений коммит и push не выполняются. Прямой вызов `cargo fmt` и `task fmt` ничего автоматически не отправляет. При отказе push созданный локальный коммит сохраняется.
+**Поведение `task check`:** сначала вызывается `task prepare` (`cargo fmt --all` и проверка rustfmt), затем `cargo check --workspace --all-targets`. Если проверка прошла и rustfmt изменил отслеживаемые `.rs`, команда автоматически создаёт форматирующий коммит и fast-forward push **только в `dev`**, предварительно сравнив HEAD с `origin/dev`. Если до запуска были пользовательские изменения Rust или staged-файлы, проверка выполняется, но автоматическая публикация пропускается. Изменения других файлов в коммит не включаются. `task fmt` и лабораторный `prepare` сами по себе ничего не публикуют. При ошибке `cargo check` коммит и push не выполняются. В случае неудачного push локальный форматирующий коммит сохраняется.
 
 Согласно [AGENTS.md](AGENTS.md), сборка, тесты и другие тяжёлые команды выполняются **пользователем локально**, а не ИИ-агентом без отдельного разрешения. Для будущего GPU-исполнения необходим совместимый NVIDIA GPU и системный NVIDIA-драйвер.
 
@@ -147,7 +146,6 @@ task proof-stage3
 
 ```sh
 nix develop
-task fmt-check
 task check
 task test
 task clippy
@@ -164,7 +162,6 @@ task gpu-stage4
 
 ```sh
 nix develop
-task fmt-check
 task check
 task test
 task clippy
@@ -188,7 +185,6 @@ Rust DSL расширен rank-2 row-major MatMul (`graph.matmul`) и приба
 
 ```sh
 git pull --ff-only
-task fmt-check
 task check
 task test
 task clippy

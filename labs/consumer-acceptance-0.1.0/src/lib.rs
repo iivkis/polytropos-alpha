@@ -101,18 +101,37 @@ pub fn tensor_heavy() -> (NeuralGraph, NodeId, ProofGoal) {
     let matrix = graph.input(shape(&[2, 2]), Domain::NonNegativeFinite);
     let values = graph.input(shape(&[2, 2]), Domain::NonNegativeFinite);
     let gates = graph.input(shape(&[2, 2]), Domain::NonNegativeFinite);
-    let product = graph.matmul(matrix, values).unwrap();
-    let spec = PointwiseSpec::new(
-        "fixture.consumer.relu_scores",
-        "1.0.0",
-        1,
-        PointwiseExpr::input(0).relu(),
-    ).unwrap();
-    let custom = spec.apply(&mut graph, &[product]).unwrap();
-    let mask = graph.positive_mask(gates).unwrap();
-    let gated = graph.select_positive(mask, custom, product).unwrap();
-    let reduced = graph.reduce_sum(gated, 1).unwrap();
-    let output = graph.relu(reduced).unwrap();
+    // The global nonnegativity prover composes verified module obligations:
+    // a bare graph output is not an architecture-level module theorem.
+    // Keep the input/output domains conservative; this is an ideal-Int claim,
+    // not a claim that floating-point reductions can never overflow.
+    let contract = MathContract::new(
+        vec![PortContract::any(shape(&[2, 2])); 3],
+        PortContract::any(shape(&[2])),
+    )
+    .nonnegative();
+    let output = graph
+        .compose(
+            "fixture_tensor_heavy",
+            "1",
+            &contract,
+            &[matrix, values, gates],
+            |graph, inputs| {
+                let product = graph.matmul(inputs[0], inputs[1])?;
+                let spec = PointwiseSpec::new(
+                    "fixture.consumer.relu_scores",
+                    "1.0.0",
+                    1,
+                    PointwiseExpr::input(0).relu(),
+                )?;
+                let custom = spec.apply(graph, &[product])?;
+                let mask = graph.positive_mask(inputs[2])?;
+                let gated = graph.select_positive(mask, custom, product)?;
+                let reduced = graph.reduce_sum(gated, 1)?;
+                graph.relu(reduced)
+            },
+        )
+        .unwrap();
     let goal = ProofGoal::nonnegative(
         "tensor_heavy_output",
         output,
@@ -254,6 +273,7 @@ mod tests {
         let (graph, output, goal) = tensor_heavy();
         let (same, _, _) = tensor_heavy();
         assert_eq!(graph.canonical_ir(), same.canonical_ir());
+        assert_eq!(graph.modules().len(), 1);
         assert!(graph.nodes().iter().any(|node| matches!(node.operation, Operation::Pointwise(_))));
         let tasks = [ArchitectureProofTask::Goal(goal)];
         let plan = ArchitectureAutoCompiler::default().plan(

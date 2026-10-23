@@ -159,10 +159,8 @@ impl ComponentBinder<'_> {
         for required in ports {
             let mut found = None;
             for &(name, id) in bindings {
-                if name == required.name {
-                    if found.replace(id).is_some() {
-                        return Err(self.failed(name, "duplicate port binding", None));
-                    }
+                if name == required.name && found.replace(id).is_some() {
+                    return Err(self.failed(name, "duplicate port binding", None));
                 }
             }
             let id = found.ok_or_else(|| {
