@@ -193,6 +193,11 @@ impl Dictionary {
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
     pub fn byte_order(&self) -> &[u8] {
         &self.bytes
     }
@@ -787,14 +792,14 @@ pub fn train(
         let op = iteration % OP_COUNT;
         let a = (rng.next_u64() % 16) as u16;
         let b = (rng.next_u64() % 16) as u16;
-        let case = if (a * 17 + b * 31) % 5 != 0 {
+        let case = if !(a * 17 + b * 31).is_multiple_of(5) {
             operation(op, a, b)?
         } else {
             // Deterministic rejection sampling: never train on a held-out pair.
             let mut found = None;
             for offset in 1..=16u16 {
                 let candidate = (b + offset) % 16;
-                if (a * 17 + candidate * 31) % 5 != 0 {
+                if !(a * 17 + candidate * 31).is_multiple_of(5) {
                     found = Some(operation(op, a, candidate)?);
                     break;
                 }
@@ -813,22 +818,22 @@ pub fn train(
                     .map(|_| if rng.next_u64() & 1 == 0 { -1.0 } else { 1.0 })
                     .collect()
             });
-            for core in 0..CORES {
-                for (weight, sign) in p.cores[core].iter_mut().zip(&signs[core]) {
+            for (weights, core_signs) in p.cores.iter_mut().zip(&signs) {
+                for (weight, sign) in weights.iter_mut().zip(core_signs) {
                     *weight += config.spsa_epsilon * sign;
                 }
             }
             let plus = runner.replay_decisions(p, dict, &case.text, &trace.decisions)?;
-            for core in 0..CORES {
-                for (weight, sign) in p.cores[core].iter_mut().zip(&signs[core]) {
+            for (weights, core_signs) in p.cores.iter_mut().zip(&signs) {
+                for (weight, sign) in weights.iter_mut().zip(core_signs) {
                     *weight -= 2.0 * config.spsa_epsilon * sign;
                 }
             }
             let minus = runner.replay_decisions(p, dict, &case.text, &trace.decisions)?;
             let gradient =
                 ((plus - target).powi(2) - (minus - target).powi(2)) / (4.0 * config.spsa_epsilon);
-            for core in 0..CORES {
-                for (weight, sign) in p.cores[core].iter_mut().zip(&signs[core]) {
+            for (weights, core_signs) in p.cores.iter_mut().zip(&signs) {
+                for (weight, sign) in weights.iter_mut().zip(core_signs) {
                     // We are currently at W - epsilon*S; restore W first.
                     *weight = (*weight + config.spsa_epsilon * sign
                         - config.core_lr * gradient.clamp(-1.0, 1.0) * sign)
@@ -866,7 +871,7 @@ pub fn train(
 /// For our 52 held-out pairs per operation, stride 19 visits every pair.
 fn validation_case_index(example_count: usize, index: usize) -> usize {
     let per_op = example_count / OP_COUNT;
-    if per_op > 0 && example_count % OP_COUNT == 0 {
+    if per_op > 0 && example_count.is_multiple_of(OP_COUNT) {
         let op = index % OP_COUNT;
         let round = index / OP_COUNT;
         op * per_op + (7 + 11 * op + 19 * round) % per_op
