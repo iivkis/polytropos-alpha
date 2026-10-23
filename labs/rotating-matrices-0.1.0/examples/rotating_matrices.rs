@@ -1,0 +1,120 @@
+//! Run with `task lab-rotating` or `task train-lab-rotating -- <updates>`.
+use std::error::Error;
+use std::fs;
+use std::path::PathBuf;
+use rotating_matrices_lab::{
+    Architectures, Dataset, Dictionary, Parameters, Rng, Runner, TrainingConfig, evaluate,
+    operation, train, evaluate_with_route, OP_COUNT, ACTIONS,
+};
+use verineural::CertifiedBuildConfig;
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = std::env::args().skip(1);
+    let mode = args.next().unwrap_or_else(|| "--inspect".into());
+    let data = Dataset::new();
+    let dictionary = Dictionary::fit(&data.train);
+    let architectures = Architectures::new()?;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts");
+
+    match mode.as_str() {
+        "--inspect" => {
+            println!("two canonical 64x64 cores, R0/R90/R180/R270 => 8 actions");
+            println!("UTF-8 byte vocabulary={} (train-only)", dictionary.len());
+            println!("40 operations; train={} validation={}", data.train.len(), data.validation.len());
+            for (name, graph) in [
+                ("core", architectures.core.graph()),
+                ("router", architectures.router.graph()),
+                ("head", architectures.head.graph()),
+            ] {
+                println!("{name}: {} Semantic IR nodes", graph.nodes().len());
+                fs::create_dir_all(&root)?;
+                fs::write(root.join(format!("{name}.ir")), graph.canonical_ir())?;
+            }
+            for &(op, a, b) in &[(0, 10, 9), (3, 1, 0)] {
+                let case = operation(op, a, b)?;
+                println!("x={:?} y={}", case.text, case.target);
+            }
+            println!("Only inspect/IR export performed; no Lean check, GPU run or training.");
+        }
+        "--certify-primitives" => {
+            // Three independent model-level certificates. This does NOT
+            // certify argmax, matrix rotations, recurrence or optimization.
+            for (name, model) in [
+                ("core", &architectures.core),
+                ("router", &architectures.router),
+                ("head", &architectures.head),
+            ] {
+                let path = root.join(format!("certified-{name}"));
+                model.certify(CertifiedBuildConfig::new(&path))?;
+                println!("Certified primitive graph: {name} ({})", path.display());
+            }
+        }
+        "--train" => {
+            let updates = match args.next() {
+                Some(raw) => raw.parse::<usize>()?,
+                None => TrainingConfig::default().updates,
+            };
+            let mut parameters = Parameters::new(0x51A7_E5);
+            let mut runner = Runner::new(&root.join("gpu"), &parameters)?;
+            let baseline = evaluate(&mut runner, &parameters, &dictionary, &data.validation, 80, 11)?;
+            println!("before training: exact={:.3} MAE={:.2} RMSE={:.2}",
+                baseline.accuracy(), baseline.mae(), baseline.rmse());
+            let mut config = TrainingConfig::default();
+            config.updates = updates;
+            train(&mut runner, &mut parameters, &data, &dictionary, config, 1009)?;
+            let metrics = evaluate(&mut runner, &parameters, &dictionary, &data.validation, 80, 11)?;
+            println!("after {updates} updates: exact={:.3} MAE={:.2} RMSE={:.2}",
+                metrics.accuracy(), metrics.mae(), metrics.rmse());
+            println!("routes (core0 R0/R90/R180/R270, core1 R0/R90/R180/R270): {:?}",
+                metrics.action_counts);
+            for op in 0..OP_COUNT {
+                if metrics.per_op_count[op] != 0 {
+                    println!("op_{op:02}: {}/{} exact", metrics.per_op_exact[op], metrics.per_op_count[op]);
+                }
+            }
+            println!("fixed-route ablations (40 held-out examples each):");
+            for action in 0..ACTIONS {
+                let ablation = evaluate_with_route(&mut runner, &parameters, &dictionary,
+                    &data.validation, 40, 11, Some(action))?;
+                println!("core={} R{}: exact={:.3} MAE={:.2}",
+                    action / 4, (action % 4) * 90, ablation.accuracy(), ablation.mae());
+            }
+            // Stable plain-text FP32 bit serialization, including model seed
+            // and every trained parameter. No unverified claims of accuracy.
+            fs::create_dir_all(&root)?;
+            let mut report = format!(
+                "seed=0x51A7E5\nupdates={updates}\nvalidation_samples={}\nexact={}\nmae={}\nrmse={}\nroutes={:?}\n",
+                metrics.count, metrics.exact, metrics.mae(), metrics.rmse(), metrics.action_counts,
+            );
+            report.push_str(&format!("dictionary_bytes={:?}\n", dictionary.byte_order()));
+            for op in 0..OP_COUNT {
+                report.push_str(&format!("op_{op:02}={}/{}\n",
+                    metrics.per_op_exact[op], metrics.per_op_count[op]));
+            }
+            for (name, values) in [
+                ("core0", parameters.cores[0].as_slice()),
+                ("core1", parameters.cores[1].as_slice()),
+                ("router", parameters.router.as_slice()),
+                ("router_bias", parameters.router_bias.as_slice()),
+                ("core_bias", parameters.core_bias.as_slice()),
+                ("head", parameters.head.as_slice()),
+                ("head_bias", std::slice::from_ref(&parameters.head_bias)),
+            ] {
+                report.push_str(name);
+                report.push('=');
+                report.push_str(&values.iter().map(|v| format!("{:08x}", v.to_bits())).collect::<Vec<_>>().join(","));
+                report.push('\n');
+            }
+            fs::write(root.join("training-report.txt"), report)?;
+            for sample in ["10 + 9", "1 AND 0"] {
+                let mut rng = Rng::new(11);
+                let trace = runner.forward(&parameters, &dictionary, sample, &mut rng, false)?;
+                println!("x={sample:?}, predicted={} (unrounded={:.4})",
+                    rotating_matrices_lab::decoded(trace.normalized), trace.normalized * 256.0);
+            }
+            println!("Experimental training, not evidence of arithmetic generalization or Lean-verified learning.");
+        }
+        _ => return Err(format!("unknown mode {mode}; use --inspect, --train [updates] or --certify-primitives").into()),
+    }
+    Ok(())
+}

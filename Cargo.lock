@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rotating-matrices-lab"
+version = "0.1.0"
+dependencies = [
+ "verineural",
+]
+
+[[package]]
 name = "verineural"
 version = "0.1.0"
 

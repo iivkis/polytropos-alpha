@@ -11,3 +11,6 @@
 **/.auto-build.staging-*/
 **/.auto-build.previous-*/
 **/.verineural-pre-stage10/
+
+# Reproducible local rotating-matrices evidence (GPU / Lean / learned weights)
+/labs/rotating-matrices-0.1.0/artifacts/

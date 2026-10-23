@@ -4,6 +4,7 @@ members = [
     "labs/coupled-field-0.1.0",
     "labs/xor-0.1.0",
     "labs/consumer-acceptance-0.1.0",
+    "labs/rotating-matrices-0.1.0",
 ]
 resolver = "3"
 

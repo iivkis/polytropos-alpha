@@ -273,3 +273,27 @@ tasks:
     deps: [prepare]
     cmds:
       - cargo test -p verineural-consumer-acceptance --all-targets -- --ignored
+
+  lab-rotating:
+    desc: Inspect two rotating 64x64 cores, 40-operation dataset and Semantic IR (CPU only)
+    deps: [prepare]
+    cmds:
+      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --inspect
+
+  test-lab-rotating:
+    desc: Developer-run CPU tests for 40 operations, byte dictionary, rotation and IR shapes
+    deps: [prepare]
+    cmds:
+      - cargo test -p rotating-matrices-lab --all-targets
+
+  train-lab-rotating:
+    desc: Train rotating cores and eight-way router with CUDA Graph and report held-out accuracy
+    deps: [prepare]
+    cmds:
+      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --train {{.CLI_ARGS}}
+
+  certify-lab-rotating:
+    desc: Lean kernel proof and NVPTX translation of local core/router/head graphs (not full recurrence)
+    deps: [prepare]
+    cmds:
+      - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-primitives
