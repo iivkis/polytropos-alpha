@@ -458,7 +458,12 @@ impl Runner {
         // The per-program build directories stay only in temporary storage.
         fs::create_dir_all(output_dir)?;
         for name in ["core", "router", "head"] {
-            for file in ["graph.ll", "graph.ptx", "translation.plan", "translation.report"] {
+            for file in [
+                "graph.ll",
+                "graph.ptx",
+                "translation.plan",
+                "translation.report",
+            ] {
                 fs::copy(
                     workspace.path().join(name).join(file),
                     output_dir.join(format!("{name}.{file}")),
@@ -902,7 +907,11 @@ mod tests {
         }
         assert_eq!(seen.len(), data.validation.len());
         assert!(first_window_nonzero >= OP_COUNT / 2);
-        let mut targets = data.train.iter().map(|case| case.target).collect::<Vec<_>>();
+        let mut targets = data
+            .train
+            .iter()
+            .map(|case| case.target)
+            .collect::<Vec<_>>();
         targets.sort_unstable();
         let baseline = constant_baseline(&data.validation, 80, targets[targets.len() / 2]);
         assert_eq!(baseline.count, 80);

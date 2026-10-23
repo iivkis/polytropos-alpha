@@ -1,0 +1,10 @@
+verineural-semantic-ir-v2
+policy=rounding=nearest_ties_to_even,fma=separate_operations,subnormals=preserve,reduction=left_to_right
+node=0;op=input;inputs=-;shape=1x64;domain=nonnegative_finite;requires=-;ensures=1x64@nonnegative_finite;claims=-;ideal=input;gpu=not_lowered
+node=1;op=input;inputs=-;shape=1x64;domain=nonnegative_finite;requires=-;ensures=1x64@nonnegative_finite;claims=-;ideal=input;gpu=not_lowered
+node=2;op=input;inputs=-;shape=64x8;domain=finite;requires=-;ensures=64x8@finite;claims=-;ideal=input;gpu=not_lowered
+node=3;op=input;inputs=-;shape=8;domain=finite;requires=-;ensures=8@finite;claims=-;ideal=input;gpu=not_lowered
+node=4;op=add;inputs=0,1;shape=1x64;domain=any;requires=1x64@any,1x64@any;ensures=1x64@any;claims=-;ideal=add;gpu=not_lowered
+node=5;op=matmul;inputs=4,2;shape=1x8;domain=any;requires=1x64@any,64x8@any;ensures=1x8@any;claims=-;ideal=matmul;gpu=not_lowered
+node=6;op=bias_add;inputs=5,3;shape=1x8;domain=any;requires=1x8@any,8@any;ensures=1x8@any;claims=-;ideal=bias_add;gpu=not_lowered
+module=0;kind=single;name=routing_logits;version=model-block-v1;inputs=0,1,2,3;body=4..7;outputs=6;input_ports=input_0:1x64@nonnegative_finite,input_1:1x64@nonnegative_finite,input_2:64x8@finite,input_3:8@finite;output_ports=output:1x8@any!-

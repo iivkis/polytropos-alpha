@@ -1,0 +1,12 @@
+assurance=structural-translation-validation
+semantic_fp32_equivalence=not-proven
+llvm_ptx_memory_execution=not-proven
+cuda_jit_sass_hardware=trusted
+kernels=4
+rounded_adds=3
+rounded_muls=1
+relu_guards=1
+node=4 kind=add reads=0:64,1:64 writes=64 add.rn.f32=1 mul.rn.f32=0 relu=0 status=structural-pass
+node=5 kind=matmul reads=4:64,2:4096 writes=64 add.rn.f32=1 mul.rn.f32=1 relu=0 status=structural-pass
+node=6 kind=bias_add reads=5:64,3:64 writes=64 add.rn.f32=1 mul.rn.f32=0 relu=0 status=structural-pass
+node=7 kind=relu reads=6:64 writes=64 add.rn.f32=0 mul.rn.f32=0 relu=1 status=structural-pass

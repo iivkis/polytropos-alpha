@@ -1,0 +1,6 @@
+vn-translation-plan-v1
+threads=256
+kernel	4	add	64	0:64,1:64	0	0
+kernel	5	matmul	64	4:64,2:4096	64	64
+kernel	6	bias_add	64	5:64,3:64	64	0
+kernel	7	relu	64	6:64	0	0

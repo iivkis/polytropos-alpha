@@ -19,9 +19,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match mode.as_str() {
         "--inspect" => {
-            let mut inspect = String::from(
-                "two canonical 64x64 cores, R0/R90/R180/R270 => 8 actions\n",
-            );
+            let mut inspect =
+                String::from("two canonical 64x64 cores, R0/R90/R180/R270 => 8 actions\n");
             println!("two canonical 64x64 cores, R0/R90/R180/R270 => 8 actions");
             println!("UTF-8 byte vocabulary={} (train-only)", dictionary.len());
             inspect.push_str(&format!(
@@ -45,7 +44,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ("head", architectures.head.graph()),
             ] {
                 println!("{name}: {} Semantic IR nodes", graph.nodes().len());
-                inspect.push_str(&format!("{name}: {} Semantic IR nodes\n", graph.nodes().len()));
+                inspect.push_str(&format!(
+                    "{name}: {} Semantic IR nodes\n",
+                    graph.nodes().len()
+                ));
                 fs::write(root.join(format!("{name}.ir")), graph.canonical_ir())?;
             }
             for &(op, a, b) in &[(0, 10, 9), (3, 1, 0)] {
@@ -102,9 +104,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     ("lean/audit.txt", "audit.txt"),
                     ("report.txt", "certification.txt"),
                 ] {
-                    fs::copy(bundle.join(source), staged.join(format!("{name}.{extension}")))?;
+                    fs::copy(
+                        bundle.join(source),
+                        staged.join(format!("{name}.{extension}")),
+                    )?;
                 }
-                println!("Certified primitive graph: {name} ({} in archive)", archive.display());
+                println!(
+                    "Certified primitive graph: {name} ({} in archive)",
+                    archive.display()
+                );
             }
             // Do not publish partial certificates if one of the three fails.
             fs::create_dir_all(&root)?;
@@ -114,7 +122,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             // Remove exactly the legacy generated directories only after all
             // three new proof archives have been published successfully.
-            for name in ["gpu", "certified-core", "certified-router", "certified-head"] {
+            for name in [
+                "gpu",
+                "certified-core",
+                "certified-router",
+                "certified-head",
+            ] {
                 let legacy = root.join(name);
                 if legacy.exists() {
                     fs::remove_dir_all(&legacy)?;
@@ -143,7 +156,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 baseline.rmse()
             );
             // Train-only median: a non-neural reference using the same held-out cases.
-            let mut train_targets = data.train.iter().map(|case| case.target).collect::<Vec<_>>();
+            let mut train_targets = data
+                .train
+                .iter()
+                .map(|case| case.target)
+                .collect::<Vec<_>>();
             train_targets.sort_unstable();
             let median = train_targets[train_targets.len() / 2];
             let constant = constant_baseline(&data.validation, 80, median);
