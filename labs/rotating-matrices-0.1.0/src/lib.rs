@@ -490,7 +490,7 @@ impl Default for TrainingConfig {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Metrics {
     pub count: usize,
     pub exact: usize,
@@ -499,6 +499,19 @@ pub struct Metrics {
     pub action_counts: [usize; ACTIONS],
     pub per_op_exact: [usize; OP_COUNT],
     pub per_op_count: [usize; OP_COUNT],
+}
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            exact: 0,
+            absolute_error: 0.0,
+            squared_error: 0.0,
+            action_counts: [0; ACTIONS],
+            per_op_exact: [0; OP_COUNT],
+            per_op_count: [0; OP_COUNT],
+        }
+    }
 }
 impl Metrics {
     pub fn accuracy(&self) -> f64 { self.exact as f64 / self.count.max(1) as f64 }
