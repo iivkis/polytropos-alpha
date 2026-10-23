@@ -25,6 +25,15 @@ def mul {n : Nat} (a b : Tensor n) : Tensor n :=
 def relu {n : Nat} (a : Tensor n) : Tensor n :=
   fun i => max (a i) 0
 
+/-- Ideal integer mask: strict positivity becomes 1, everything else 0.
+    Finite integer values have no NaN, unlike the separate f32 host profile. -/
+def positiveMask {n : Nat} (a : Tensor n) : Tensor n :=
+  fun i => if 0 < a i then 1 else 0
+
+/-- Elementwise conditional selection, no broadcasting or mutation. -/
+def selectPositive {n : Nat} (mask yes no : Tensor n) : Tensor n :=
+  fun i => if 0 < mask i then yes i else no i
+
 /-- Reshape keeps the flat element order, after proving equal element counts. -/
 def reshape {n : Nat} (a : Tensor n) : Tensor n := a
 
@@ -32,6 +41,16 @@ def reshape {n : Nat} (a : Tensor n) : Tensor n := a
     lie in range; proving that correspondence is a separate obligation. -/
 def flatGet {n : Nat} (a : Tensor n) (index : Nat) : Int :=
   if h : index < n then a ⟨index, h⟩ else 0
+
+/-- Row-major sum across an arbitrary axis, encoded by prefix, width and
+    suffix element counts. The sum is a left fold starting at zero. -/
+def reduceSumAxis {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) : Tensor (outer * inner) :=
+  fun i =>
+    (List.range width).foldl
+      (fun acc j =>
+        acc + flatGet a ((i.val / inner) * width * inner + j * inner + i.val % inner))
+      0
 
 /-- Ideal integer row-major matrix multiplication. -/
 def matmul {m k n : Nat} (a : Tensor (m * k))
@@ -47,6 +66,30 @@ def biasAdd {m n : Nat} (a : Tensor (m * n))
 def Nonnegative {n : Nat} (a : Tensor n) : Prop :=
   ∀ i : Fin n, 0 ≤ a i
 
+/-- Independent relational specification; not the definition of a kernel. -/
+def PointwiseLe {n : Nat} (lower upper : Tensor n) : Prop :=
+  ∀ i : Fin n, lower i ≤ upper i
+
+/-- ReLU never decreases an ideal integer value. -/
+theorem pointwise_le_relu {n : Nat} (a : Tensor n) :
+    PointwiseLe a (relu a) := by
+  intro i
+  change a i ≤ max (a i) 0
+  exact Int.le_max_left (a i) 0
+
+/-- Nontrivial composition property: adding a proven nonnegative branch
+    cannot push the other branch below its value, even through final ReLU. -/
+theorem pointwise_le_relu_add_of_nonnegative {n : Nat} (a b : Tensor n)
+    (hb : Nonnegative b) : PointwiseLe a (relu (add a b)) := by
+  intro i
+  change a i ≤ max (a i + b i) 0
+  have hsum : a i ≤ a i + b i := by
+    have := hb i
+    omega
+  have hmax : a i + b i ≤ max (a i + b i) 0 :=
+    Int.le_max_left (a i + b i) 0
+  omega
+
 theorem add_pointwise {n : Nat} (a b : Tensor n) (i : Fin n) :
     add a b i = a i + b i := by
   rfl
@@ -57,6 +100,14 @@ theorem mul_pointwise {n : Nat} (a b : Tensor n) (i : Fin n) :
 
 theorem relu_pointwise {n : Nat} (a : Tensor n) (i : Fin n) :
     relu a i = max (a i) 0 := by
+  rfl
+
+theorem positiveMask_pointwise {n : Nat} (a : Tensor n) (i : Fin n) :
+    positiveMask a i = (if 0 < a i then 1 else 0) := by
+  rfl
+
+theorem selectPositive_pointwise {n : Nat} (mask yes no : Tensor n) (i : Fin n) :
+    selectPositive mask yes no i = (if 0 < mask i then yes i else no i) := by
   rfl
 
 theorem reshape_pointwise {n : Nat} (a : Tensor n) (i : Fin n) :
@@ -83,6 +134,32 @@ theorem flatGet_nonnegative {n : Nat} (a : Tensor n)
   · rename_i h
     exact ha ⟨index, h⟩
   · decide
+
+/-- Every intermediate accumulator stays nonnegative when the input is
+    nonnegative; unlike a post-hoc range assertion, this is kernel checked. -/
+theorem reduceSumAxis_nonnegative {outer width inner : Nat}
+    (a : Tensor (outer * width * inner)) (ha : Nonnegative a) :
+    Nonnegative (reduceSumAxis a) := by
+  intro i
+  have hfold :
+      ∀ xs : List Nat, ∀ acc : Int, 0 ≤ acc →
+        0 ≤ xs.foldl
+          (fun sum j =>
+            sum + flatGet a ((i.val / inner) * width * inner + j * inner + i.val % inner))
+          acc := by
+    intro xs
+    induction xs with
+    | nil =>
+        intro acc hacc
+        exact hacc
+    | cons j rest ih =>
+        intro acc hacc
+        change 0 ≤ rest.foldl
+          (fun sum lane =>
+            sum + flatGet a ((i.val / inner) * width * inner + lane * inner + i.val % inner))
+          (acc + flatGet a ((i.val / inner) * width * inner + j * inner + i.val % inner))
+        exact ih _ (Int.add_nonneg hacc (flatGet_nonnegative a ha _))
+  exact hfold (List.range width) 0 (by decide)
 
 /-- Every left-to-right partial sum of row-major MatMul is nonnegative. -/
 theorem matmul_nonnegative {m k n : Nat} (a : Tensor (m * k))
@@ -119,6 +196,21 @@ theorem relu_nonnegative {n : Nat} (a : Tensor n) :
     Nonnegative (relu a) := by
   intro i
   exact Int.le_max_right (a i) 0
+
+theorem positiveMask_nonnegative {n : Nat} (a : Tensor n) :
+    Nonnegative (positiveMask a) := by
+  intro i
+  unfold positiveMask
+  split <;> decide
+
+theorem selectPositive_nonnegative {n : Nat} (mask yes no : Tensor n)
+    (hy : Nonnegative yes) (hn : Nonnegative no) :
+    Nonnegative (selectPositive mask yes no) := by
+  intro i
+  unfold selectPositive
+  split
+  · exact hy i
+  · exact hn i
 
 theorem reshape_nonnegative {n : Nat} (a : Tensor n)
     (ha : Nonnegative a) : Nonnegative (reshape a) := by

@@ -1,6 +1,6 @@
 architecture=xor-mlp
 version=0.1.0
-semantic_ir_sha256=fa56d7709c2b6c47c2f65a9023db38b8887a102f1779ea2a99c9cf94859ee484
+semantic_ir_sha256=8c0a0b9e64f7fbe4f2703c771e7ab80a98a454f19e9894d5b8fe21b9e134e255
 global_property=architecture_global_nonnegative
 lean=ideal-Int-nonnegative-kernel-checked
 xor_truth_table=4-of-4-bitwise-gpu-tested

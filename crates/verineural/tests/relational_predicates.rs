@@ -202,7 +202,11 @@ fn lean_accepts_true_relation_and_rejects_false_one() {
     .unwrap();
     let (invalid_graph, invalid_goal) = invalid_composition();
     assert!(matches!(
-        certify(&invalid_graph, &invalid_goal, &dir.join("composed_false.lean")),
+        certify(
+            &invalid_graph,
+            &invalid_goal,
+            &dir.join("composed_false.lean")
+        ),
         Err(ProofError::LeanRejected { .. })
     ));
     std::fs::remove_dir_all(dir).unwrap();

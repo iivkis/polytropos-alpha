@@ -1215,10 +1215,13 @@ impl LeanProofEngine {
                                         term(right)
                                     ),
                                     composed.unwrap_or_else(|| {
-                                        format!("  exact VeriNeural.pointwise_le_relu {}", term(left))
+                                        format!(
+                                            "  exact VeriNeural.pointwise_le_relu {}",
+                                            term(left)
+                                        )
                                     }),
                                 )
-                            },
+                            }
                             Predicate::Nonnegative(_) => unreachable!(),
                         };
                         program.source.push_str(&format!(

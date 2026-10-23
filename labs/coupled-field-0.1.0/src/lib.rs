@@ -367,7 +367,11 @@ mod tests {
         ));
         assert!(!snapshot.dot.contains("module_interface"));
         assert!(!snapshot.dot.contains("module_input_port"));
-        assert!(snapshot.dot.contains(r#"vn_output_ports="[(\"output\", 7)]""#));
+        assert!(
+            snapshot
+                .dot
+                .contains(r#"vn_output_ports="[(\"output\", 7)]""#)
+        );
         assert!(
             snapshot
                 .dot

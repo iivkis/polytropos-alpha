@@ -883,7 +883,10 @@ mod staged_build_tests {
             staged.directory.clone()
         }; // Simulate a proof/backend failure before publication.
         assert!(!staging_path.exists());
-        assert_eq!(fs::read(old.join("SHA256SUMS")).unwrap(), b"old-valid-bundle");
+        assert_eq!(
+            fs::read(old.join("SHA256SUMS")).unwrap(),
+            b"old-valid-bundle"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

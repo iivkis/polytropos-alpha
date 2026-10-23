@@ -320,7 +320,9 @@ pub(crate) fn verify_rendered_dot_png(dot: &Path, png: &Path) -> io::Result<()> 
     let result = (|| {
         render_dot_png(dot, &replay)?;
         if fs::read(&replay)? != fs::read(png)? {
-            return Err(bad("architecture.png differs from Graphviz rendering of saved DOT"));
+            return Err(bad(
+                "architecture.png differs from Graphviz rendering of saved DOT",
+            ));
         }
         Ok(())
     })();
@@ -359,7 +361,10 @@ impl ArchitectureSnapshot {
                 "architecture DOT lacks matching Semantic IR fingerprint",
             ));
         }
-        verify_rendered_dot_png(&root.join("architecture.dot"), &root.join("architecture.png"))
+        verify_rendered_dot_png(
+            &root.join("architecture.dot"),
+            &root.join("architecture.png"),
+        )
     }
 }
 
@@ -763,14 +768,18 @@ pub fn snapshot_architecture(
             }
             // Emphasize local chains, but still rank all cross-module data
             // and parameter dependencies in the correct direction.
-            let weight = if role == "parameter" { "1" } else if owners[i] == owners[source.index()] {
+            let weight = if role == "parameter" {
+                "1"
+            } else if owners[i] == owners[source.index()] {
                 "5"
             } else {
                 "2"
             };
             let src_module_port = owners[source.index()]
                 .and_then(|owner| {
-                    scopes[owner].outputs.iter()
+                    scopes[owner]
+                        .outputs
+                        .iter()
                         .find(|(_, index)| *index == source.index())
                 })
                 .map_or("none", |(name, _)| name.as_str());
@@ -778,7 +787,12 @@ pub fn snapshot_architecture(
                 .and_then(|owner| {
                     let scope = &scopes[owner];
                     source_is_outside_scope(source.index(), scope)
-                        .then(|| scope.inputs.iter().find(|(_, index)| *index == source.index()))
+                        .then(|| {
+                            scope
+                                .inputs
+                                .iter()
+                                .find(|(_, index)| *index == source.index())
+                        })
                         .flatten()
                 })
                 .map_or("none", |(name, _)| name.as_str());
@@ -787,7 +801,10 @@ pub fn snapshot_architecture(
                 ("penwidth", edge_width.into()),
                 ("weight", weight.into()),
                 ("minlen", "1".into()),
-                ("constraint", if role == "parameter" { "false" } else { "true" }.into()),
+                (
+                    "constraint",
+                    if role == "parameter" { "false" } else { "true" }.into(),
+                ),
                 ("vn_src_port", "output".into()),
                 ("vn_dst_port", format!("input_{port}")),
                 ("vn_module_src_port", src_module_port.into()),
@@ -1087,15 +1104,16 @@ pub(crate) fn auto_architecture_dot(
             let module_dst_port = owners[i]
                 .and_then(|owner| {
                     let scope = &scopes[owner];
-                    source_is_outside_scope(input.index(), scope).then(|| {
-                        scope.inputs.iter().find(|(_, id)| *id == input.index())
-                    })
+                    source_is_outside_scope(input.index(), scope)
+                        .then(|| scope.inputs.iter().find(|(_, id)| *id == input.index()))
                 })
                 .flatten()
                 .map_or("none", |(name, _)| name.as_str());
             let module_src_port = owners[input.index()]
                 .and_then(|owner| {
-                    scopes[owner].outputs.iter()
+                    scopes[owner]
+                        .outputs
+                        .iter()
                         .find(|(_, index)| *index == input.index())
                 })
                 .map_or("none", |(name, _)| name.as_str());
@@ -1334,5 +1352,4 @@ mod tests {
         assert!(snapshot.verify(&root).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
-
 }
