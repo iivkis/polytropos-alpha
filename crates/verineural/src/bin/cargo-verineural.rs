@@ -105,7 +105,10 @@ fn certified_example(package: &Path) -> Result<String, CliError> {
             continue;
         }
         let name = entry.file_name();
-        let Some(stem) = name.to_str().and_then(|name| name.strip_suffix("_certified.rs")) else {
+        let Some(stem) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix("_certified.rs"))
+        else {
             continue;
         };
         if !stem.is_empty() && stem.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
@@ -115,8 +118,12 @@ fn certified_example(package: &Path) -> Result<String, CliError> {
     matches.sort();
     match matches.as_slice() {
         [only] => Ok(only.clone()),
-        [] => Err(fail("consumer must provide exactly one examples/<name>_certified.rs")),
-        _ => Err(fail("multiple certified entrypoints; select a package with exactly one")),
+        [] => Err(fail(
+            "consumer must provide exactly one examples/<name>_certified.rs",
+        )),
+        _ => Err(fail(
+            "multiple certified entrypoints; select a package with exactly one",
+        )),
     }
 }
 

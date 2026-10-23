@@ -505,9 +505,7 @@ mod tests {
         let mut builder = ModelBuilder::new("unsupported", "1");
         // Sqrt requires a nonnegative input; the test targets GPU lowering,
         // not the independent input-domain contract.
-        let x = builder
-            .input("x", [2], Domain::NonNegativeFinite)
-            .unwrap();
+        let x = builder.input("x", [2], Domain::NonNegativeFinite).unwrap();
         let y = builder.graph_mut().sqrt(x).unwrap();
         builder.output("y", y).unwrap();
         let model = builder.finish().unwrap();
