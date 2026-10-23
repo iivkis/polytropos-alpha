@@ -33,6 +33,7 @@ mod auto_build;
 mod auto_bundle;
 mod canonical;
 mod certificate;
+mod consumer;
 mod cuda;
 mod error;
 mod gpu;
@@ -54,6 +55,7 @@ pub use auto_build::{
     check_architecture_connectivity,
 };
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
+pub use consumer::{BindingError, ComponentBinder, ObligationError};
 pub use error::NeuralError;
 pub use gpu::{
     Fp32PtxAudit, GpuBenchmark, GpuEngine, GpuError, GpuExecution, GpuLaunchConfig,

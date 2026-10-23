@@ -216,3 +216,15 @@ tasks:
     deps: [prepare]
     cmds:
       - cargo test -p verineural --test tensor_reductions -- --ignored
+
+  p2-consumers:
+    desc: Exercise three independent P2 consumer architectures, positive/negative contracts and honest GPU profiles
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural-consumer-acceptance --all-targets
+
+  verify-p2-consumers:
+    desc: Kernel-check P2 nested, bounded recurrent, custom primitive, tensor-heavy and deliberately false goals
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural-consumer-acceptance --all-targets -- --ignored
