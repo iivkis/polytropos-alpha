@@ -6,7 +6,7 @@ use std::fmt;
 use crate::{
     ArchitectureAutoCompiler, ArchitectureMetadata, ArchitectureProofTask,
     AutoBuildError, AutoBuildPlan, Domain, FP32Policy, GpuRequirement,
-    NeuralError, NeuralGraph, NodeId, ProofGoal, Shape, Tensor,
+    NeuralError, NeuralGraph, NodeId, Operation, ProofGoal, Shape, Tensor,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +170,17 @@ impl ModelBuilder {
         if self.outputs.is_empty() {
             return Err(ModelError::Invalid("at least one output is required".into()));
         }
+        let registered: BTreeSet<_> = self.sources.values()
+            .map(|(id, _)| id.index())
+            .collect();
+        if self.graph.nodes().iter().any(|node| {
+            matches!(node.operation, Operation::Input)
+                && !registered.contains(&node.id.index())
+        }) {
+            return Err(ModelError::Invalid(
+                "all graph source inputs must have a registered model name".into(),
+            ));
+        }
         let roots: Vec<_> = self.outputs.values().copied().collect();
         let scope = self.graph.dependency_scope(&roots)?;
         for goal in self.goals.values() {
@@ -293,7 +304,8 @@ mod tests {
         builder.proof_goal(ProofGoal::nonnegative("positive", y, vec![])).unwrap();
         let model = builder.finish().unwrap();
         assert_eq!(model.graph().node(y).unwrap().shape.dims(), &[4, 3]);
-        assert_eq!(model.graph().node(y).unwrap().domain, Domain::NonNegativeFinite);
+        // A finite-input MatMul may overflow FP32; ReLU cannot promise finite output.
+        assert_eq!(model.graph().node(y).unwrap().domain, Domain::Any);
         assert_eq!(model.graph().modules().len(), 1);
         assert_eq!(model.metadata("architecture_global_nonnegative").input_roles[&w.index()], "parameter");
         let bound = model.bind([
@@ -317,6 +329,17 @@ mod tests {
         let y = builder.block("good", &[x], |g, p| g.relu(p[0])).unwrap();
         builder.output("out", y).unwrap();
         assert!(builder.finish().is_ok());
+    }
+
+    #[test]
+    fn graph_mut_cannot_sneak_unnamed_sources_past_binding_checks() {
+        let mut builder = ModelBuilder::new("source_registry", "1");
+        builder.input("x", [1], Domain::Finite).unwrap();
+        let rogue = builder.graph_mut().input(
+            Shape::new(vec![1]).unwrap(), Domain::Finite
+        );
+        builder.output("out", rogue).unwrap();
+        assert!(matches!(builder.finish(), Err(ModelError::Invalid(_))));
     }
 
     #[test]
