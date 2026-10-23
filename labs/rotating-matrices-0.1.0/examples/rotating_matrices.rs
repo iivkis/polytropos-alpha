@@ -54,7 +54,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 inspect.push_str(&format!("x={:?} y={}\n", case.text, case.target));
             }
             println!("Only inspect/IR export performed; no Lean check, GPU run or training.");
-            inspect.push_str("Only inspect/IR export performed; no Lean check, GPU run or training.\n");
+            inspect.push_str(
+                "Only inspect/IR export performed; no Lean check, GPU run or training.\n",
+            );
             fs::write(root.join("inspect.txt"), inspect)?;
         }
         "--certify-primitives" => {
@@ -109,6 +111,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             for entry in fs::read_dir(&staged)? {
                 let entry = entry?;
                 fs::copy(entry.path(), root.join(entry.file_name()))?;
+            }
+            // Remove exactly the legacy generated directories only after all
+            // three new proof archives have been published successfully.
+            for name in ["gpu", "certified-core", "certified-router", "certified-head"] {
+                let legacy = root.join(name);
+                if legacy.exists() {
+                    fs::remove_dir_all(&legacy)?;
+                }
             }
         }
         "--train" => {
