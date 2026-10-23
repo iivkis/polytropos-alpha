@@ -104,9 +104,7 @@ pub(super) fn verify_current_ir(dir: &Path, source: &str) -> Result<(), AutoBuil
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ArchitectureAutoCompiler, Domain, GpuRequirement, NeuralGraph, NodeId, Shape,
-    };
+    use crate::{ArchitectureAutoCompiler, Domain, GpuRequirement, NeuralGraph, NodeId, Shape};
 
     fn graph() -> (NeuralGraph, NodeId) {
         let mut graph = NeuralGraph::default();

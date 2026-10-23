@@ -111,7 +111,9 @@ pub enum Operation {
     /// A versioned external atomic operation with declarative pointwise semantics.
     Pointwise(PointwiseSpec),
     /// Reduce one row-major tensor axis with an explicit left-to-right sum.
-    ReduceSum { axis: usize },
+    ReduceSum {
+        axis: usize,
+    },
 }
 
 impl Operation {
@@ -214,7 +216,10 @@ impl Operation {
             Self::ReduceSum { axis } => {
                 let input = &inputs[0];
                 if *axis >= input.rank() {
-                    return Err(NeuralError::InvalidAxis { axis: *axis, rank: input.rank() });
+                    return Err(NeuralError::InvalidAxis {
+                        axis: *axis,
+                        rank: input.rank(),
+                    });
                 }
                 let mut dims = input.dims().to_vec();
                 dims.remove(*axis);
@@ -265,8 +270,13 @@ impl Operation {
                 }
             }
             Self::Reshape(_) => inputs[0],
-            Self::Input | Self::Add | Self::Mul | Self::MatMul | Self::BiasAdd
-            | Self::Pointwise(_) | Self::ReduceSum { .. } => Domain::Any,
+            Self::Input
+            | Self::Add
+            | Self::Mul
+            | Self::MatMul
+            | Self::BiasAdd
+            | Self::Pointwise(_)
+            | Self::ReduceSum { .. } => Domain::Any,
         }
     }
 }
@@ -659,9 +669,7 @@ impl NeuralGraph {
     pub fn module_instances(&self) -> impl Iterator<Item = ModuleInstanceRef<'_>> {
         self.module_order.iter().map(|key| match *key {
             ModuleInstanceKey::Single(index) => ModuleInstanceRef::Single(&self.modules[index]),
-            ModuleInstanceKey::Multi(index) => {
-                ModuleInstanceRef::Multi(&self.multi_modules[index])
-            }
+            ModuleInstanceKey::Multi(index) => ModuleInstanceRef::Multi(&self.multi_modules[index]),
         })
     }
 
@@ -1201,7 +1209,6 @@ impl NeuralGraph {
         *self = candidate;
         Ok(outputs)
     }
-
 }
 
 impl Default for NeuralGraph {

@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{
-    ContractClaim, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation,
-    Predicate, Shape, ValueRef,
+    ContractClaim, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation, Predicate,
+    Shape, ValueRef,
 };
 
 const LEAN_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Basic.lean");
@@ -115,8 +115,12 @@ struct ModuleNonnegativeProof {
 /// A requested independent ideal-integer property (not a shape theorem).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProofGoalKind {
-    Nonnegative { assumptions: Vec<NodeId> },
-    EqualTo { other: NodeId },
+    Nonnegative {
+        assumptions: Vec<NodeId>,
+    },
+    EqualTo {
+        other: NodeId,
+    },
     /// A single independent, explicitly typed mathematical relation.
     Predicate(Predicate),
 }
@@ -410,9 +414,9 @@ impl LeanProofEngine {
                 Operation::Reshape(_) => {
                     format!("VeriNeural.reshape {}", call(node.inputs[0].index()))
                 }
-                Operation::Pointwise(spec) => spec.expression().lean(&|port| {
-                    call(node.inputs[port].index())
-                }),
+                Operation::Pointwise(spec) => spec
+                    .expression()
+                    .lean(&|port| call(node.inputs[port].index())),
                 Operation::ReduceSum { axis } => {
                     let input = graph.node(node.inputs[0])?;
                     let dims = input.shape.dims();
@@ -424,7 +428,7 @@ impl LeanProofEngine {
                          (inner := {inner}) {}",
                         call(node.inputs[0].index())
                     )
-                },
+                }
                 _ => unreachable!("checked while collecting ancestors"),
             };
 
@@ -677,8 +681,13 @@ impl LeanProofEngine {
                     }
                     ContractClaim::Predicate(predicate) => {
                         emit_module_predicate(
-                            graph, &mut source, &mut theorems, name,
-                            predicate, &module.inputs, module.output,
+                            graph,
+                            &mut source,
+                            &mut theorems,
+                            name,
+                            predicate,
+                            &module.inputs,
+                            module.output,
                             &claim_context,
                         )?;
                     }
@@ -796,8 +805,13 @@ impl LeanProofEngine {
                         }
                         ContractClaim::Predicate(predicate) => {
                             emit_module_predicate(
-                                graph, &mut source, &mut theorems, name,
-                                predicate, &module.inputs, output,
+                                graph,
+                                &mut source,
+                                &mut theorems,
+                                name,
+                                predicate,
+                                &module.inputs,
+                                output,
                                 &claim_context,
                             )?;
                         }
@@ -1075,14 +1089,17 @@ impl LeanProofEngine {
             }
             // Legacy public constructors are adapters to the same predicate
             // proof path, rather than maintaining another theorem generator.
-            ProofGoalKind::EqualTo { other } => self.generate_goal(graph, &ProofGoal {
-                name: goal.name.clone(),
-                output: goal.output,
-                kind: ProofGoalKind::Predicate(Predicate::equal(
-                    ValueRef::Output,
-                    ValueRef::Node(*other),
-                )),
-            }),
+            ProofGoalKind::EqualTo { other } => self.generate_goal(
+                graph,
+                &ProofGoal {
+                    name: goal.name.clone(),
+                    output: goal.output,
+                    kind: ProofGoalKind::Predicate(Predicate::equal(
+                        ValueRef::Output,
+                        ValueRef::Node(*other),
+                    )),
+                },
+            ),
             ProofGoalKind::Predicate(predicate) => {
                 let resolve = |value: &ValueRef| -> Result<NodeId, ProofError> {
                     let id = match value {
@@ -1104,11 +1121,16 @@ impl LeanProofEngine {
                                 node: goal.output.index(),
                             });
                         }
-                        self.generate_goal(graph, &ProofGoal {
-                            name: goal.name.clone(),
-                            output: goal.output,
-                            kind: ProofGoalKind::Nonnegative { assumptions: vec![] },
-                        })
+                        self.generate_goal(
+                            graph,
+                            &ProofGoal {
+                                name: goal.name.clone(),
+                                output: goal.output,
+                                kind: ProofGoalKind::Nonnegative {
+                                    assumptions: vec![],
+                                },
+                            },
+                        )
                     }
                     Predicate::Equal(a, b) | Predicate::PointwiseLe(a, b) => {
                         let left = resolve(a)?;
@@ -1146,7 +1168,9 @@ impl LeanProofEngine {
                             .collect::<Vec<_>>()
                             .join(" ");
                         let terminator = "end VeriNeural.Generated\n";
-                        program.source.truncate(program.source.len() - terminator.len());
+                        program
+                            .source
+                            .truncate(program.source.len() - terminator.len());
                         let name = format!("architecture_property_{}", goal.name);
                         let term = |id: NodeId| format!("(node_{} {args})", id.index());
                         let (proposition, proof) = match predicate {
@@ -1155,10 +1179,7 @@ impl LeanProofEngine {
                                 "  rfl".to_owned(),
                             ),
                             Predicate::PointwiseLe(_, _) => (
-                                format!(
-                                    "VeriNeural.PointwiseLe {} {}",
-                                    term(left), term(right)
-                                ),
+                                format!("VeriNeural.PointwiseLe {} {}", term(left), term(right)),
                                 format!("  exact VeriNeural.pointwise_le_relu {}", term(left)),
                             ),
                             Predicate::Nonnegative(_) => unreachable!(),
@@ -1642,7 +1663,8 @@ fn prove_module_node_nonnegative(
                 call(input)
             )
         }
-        Operation::Pointwise(ref spec) => spec.expression()
+        Operation::Pointwise(ref spec) => spec
+            .expression()
             .nonnegative_lean(&|port| call(node.inputs[port].index()))
             .ok_or(ProofError::UnsupportedGuarantee { node: index })?,
         Operation::ReduceSum { .. } => {
@@ -1656,7 +1678,13 @@ fn prove_module_node_nonnegative(
             let width = dims[axis];
             let inner = dims[axis + 1..].iter().product::<usize>();
             let input_proof = prove_module_node_nonnegative(
-                graph, module_index, input, arguments, boundary, traversal, module_proofs,
+                graph,
+                module_index,
+                input,
+                arguments,
+                boundary,
+                traversal,
+                module_proofs,
             )?;
             format!(
                 "VeriNeural.reduceSumAxis_nonnegative (outer := {outer}) \
@@ -1713,7 +1741,8 @@ fn prove_ideal_nonnegative(
             let h = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;
             format!("VeriNeural.reshape_nonnegative {} ({h})", call(input))
         }
-        Operation::Pointwise(ref spec) => spec.expression()
+        Operation::Pointwise(ref spec) => spec
+            .expression()
             .nonnegative_lean(&|port| call(node.inputs[port]))
             .ok_or(ProofError::UnsupportedGuarantee { node: index })?,
         Operation::ReduceSum { axis } => {
@@ -1722,9 +1751,7 @@ fn prove_ideal_nonnegative(
             let outer = dims[..axis].iter().product::<usize>();
             let width = dims[axis];
             let inner = dims[axis + 1..].iter().product::<usize>();
-            let proof = prove_ideal_nonnegative(
-                graph, input, arguments, source_hypotheses, cache,
-            )?;
+            let proof = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;
             format!(
                 "VeriNeural.reduceSumAxis_nonnegative (outer := {outer}) \
                  (width := {width}) (inner := {inner}) {} ({proof})",
@@ -1786,7 +1813,9 @@ fn resolve_module_value(
         ValueRef::Output => Some(output),
         ValueRef::Node(_) => None,
     }
-    .ok_or(ProofError::UnsupportedGuarantee { node: output.index() })?;
+    .ok_or(ProofError::UnsupportedGuarantee {
+        node: output.index(),
+    })?;
     graph.node(id)?;
     Ok(id)
 }
@@ -1810,7 +1839,9 @@ fn emit_module_predicate(
             let left = resolve_module_value(graph, a, inputs, output)?;
             let right = resolve_module_value(graph, b, inputs, output)?;
             if graph.node(left)?.shape != graph.node(right)?.shape {
-                return Err(ProofError::UnsupportedGuarantee { node: output.index() });
+                return Err(ProofError::UnsupportedGuarantee {
+                    node: output.index(),
+                });
             }
             let call = |id: NodeId| format!("(node_{} {})", id.index(), context.arguments);
             let (proposition, proof) = match predicate {

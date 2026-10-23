@@ -125,7 +125,6 @@ impl NeuralModule for PrimitiveSpec {
     }
 }
 
-
 /// A small total elementwise mathematical language. Every argument has the
 /// same shape. This AST, not a Rust callback, is the semantic source of truth.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,9 +194,7 @@ impl PointwiseExpr {
     /// All other expressions require a different proof rule: fail closed.
     pub(crate) fn nonnegative_lean(&self, input: &impl Fn(usize) -> String) -> Option<String> {
         match self {
-            Self::Relu(inner) => {
-                Some(format!("VeriNeural.relu_nonnegative {}", inner.lean(input)))
-            }
+            Self::Relu(inner) => Some(format!("VeriNeural.relu_nonnegative {}", inner.lean(input))),
             _ => None,
         }
     }
@@ -209,7 +206,11 @@ impl PointwiseExpr {
             Self::Mul(a, b) => a.evaluate(input) * b.evaluate(input),
             Self::Relu(inner) => {
                 let value = inner.evaluate(input);
-                if value.is_nan() || value > 0.0 { value } else { 0.0 }
+                if value.is_nan() || value > 0.0 {
+                    value
+                } else {
+                    0.0
+                }
             }
         }
     }
@@ -247,25 +248,45 @@ impl PointwiseSpec {
                 detail: "expression refers to an invalid input or exceeds 63 levels",
             });
         }
-        Ok(Self { id, version, arity, expression })
+        Ok(Self {
+            id,
+            version,
+            arity,
+            expression,
+        })
     }
 
-    pub fn id(&self) -> &'static str { self.id }
-    pub fn version(&self) -> &'static str { self.version }
-    pub const fn arity(&self) -> usize { self.arity }
-    pub fn expression(&self) -> &PointwiseExpr { &self.expression }
+    pub fn id(&self) -> &'static str {
+        self.id
+    }
+    pub fn version(&self) -> &'static str {
+        self.version
+    }
+    pub const fn arity(&self) -> usize {
+        self.arity
+    }
+    pub fn expression(&self) -> &PointwiseExpr {
+        &self.expression
+    }
 
     pub fn apply(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
         graph.apply(Operation::Pointwise(self.clone()), inputs)
     }
 
     /// Host reference only, not a floating-point certification or GPU backend.
-    pub fn evaluate_host(&self, inputs: &[crate::Tensor<f32>]) -> Result<crate::Tensor<f32>, NeuralError> {
-        let shapes = inputs.iter().map(|tensor| tensor.shape().clone()).collect::<Vec<_>>();
+    pub fn evaluate_host(
+        &self,
+        inputs: &[crate::Tensor<f32>],
+    ) -> Result<crate::Tensor<f32>, NeuralError> {
+        let shapes = inputs
+            .iter()
+            .map(|tensor| tensor.shape().clone())
+            .collect::<Vec<_>>();
         let output_shape = Operation::Pointwise(self.clone()).infer_shape(&shapes)?;
         let values = (0..output_shape.element_count())
             .map(|element| {
-                self.expression.evaluate(&|port| inputs[port].values()[element])
+                self.expression
+                    .evaluate(&|port| inputs[port].values()[element])
             })
             .collect::<Vec<_>>();
         crate::Tensor::new(output_shape, values)

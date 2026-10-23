@@ -2,9 +2,8 @@
 //! Proofs concern ideal Int sums; host f32 left-fold is not an FP32 guarantee.
 use std::path::Path;
 use verineural::{
-    Domain, GpuEngine, GpuError, LeanProofEngine, MathContract, NeuralError,
-    NeuralGraph, NodeId, Operation, PointwiseExpr, PointwiseSpec, PortContract,
-    PrimitiveExpr, PrimitiveSpec,
+    Domain, GpuEngine, GpuError, LeanProofEngine, MathContract, NeuralError, NeuralGraph, NodeId,
+    Operation, PointwiseExpr, PointwiseSpec, PortContract, PrimitiveExpr, PrimitiveSpec,
     ProofError, Shape, Tensor,
 };
 
@@ -26,10 +25,16 @@ fn consumer(positive: bool) -> (NeuralGraph, NodeId) {
     .nonnegative();
 
     let result = graph
-        .compose("consumer_middle_axis_sum", "1", &contract, &[source], |g, ports| {
-            let transformed = spec.apply(g, ports)?;
-            g.reduce_sum(transformed, 1)
-        })
+        .compose(
+            "consumer_middle_axis_sum",
+            "1",
+            &contract,
+            &[source],
+            |g, ports| {
+                let transformed = spec.apply(g, ports)?;
+                g.reduce_sum(transformed, 1)
+            },
+        )
         .unwrap();
     (graph, result)
 }
@@ -58,11 +63,8 @@ fn every_axis_and_scalar_output_have_explicit_row_major_reference() {
 
     // Observable IEEE-754 order: ((0 + 1e20) + (-1e20)) + 1 = 1,
     // whereas silently grouping the last two terms can produce 0.
-    let sensitive = Tensor::new(
-        Shape::new(vec![3]).unwrap(),
-        vec![1e20f32, -1e20f32, 1.0],
-    )
-    .unwrap();
+    let sensitive =
+        Tensor::new(Shape::new(vec![3]).unwrap(), vec![1e20f32, -1e20f32, 1.0]).unwrap();
     assert_eq!(sensitive.reduce_sum(0).unwrap().values(), &[1.0]);
 }
 
@@ -88,7 +90,10 @@ fn invalid_axis_is_rejected_before_mutating_ir() {
 fn external_pointwise_then_reduce_has_one_int_model_and_checked_claim() {
     let (graph, output) = consumer(true);
     assert_eq!(graph.nodes().len(), 3);
-    assert!(matches!(graph.node(output).unwrap().operation, Operation::ReduceSum { axis: 1 }));
+    assert!(matches!(
+        graph.node(output).unwrap().operation,
+        Operation::ReduceSum { axis: 1 }
+    ));
     assert!(graph.canonical_ir().contains("reduce_sum_axis:1"));
     let (other, _) = {
         let mut g = NeuralGraph::default();
@@ -100,7 +105,11 @@ fn external_pointwise_then_reduce_has_one_int_model_and_checked_claim() {
 
     let proof = LeanProofEngine::default().generate(&graph, output).unwrap();
     assert!(proof.source().contains("VeriNeural.reduceSumAxis"));
-    assert!(proof.source().contains("VeriNeural.reduceSumAxis_nonnegative"));
+    assert!(
+        proof
+            .source()
+            .contains("VeriNeural.reduceSumAxis_nonnegative")
+    );
     assert!(proof.source().contains("module_0_claim_0"));
     assert!(!proof.source().contains("sorry"));
     assert!(matches!(

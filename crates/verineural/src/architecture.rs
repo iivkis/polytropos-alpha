@@ -538,21 +538,32 @@ pub fn snapshot_architecture(
                 ("label", label),
                 ("fillcolor", fill.into()),
                 ("color", outline.into()),
-                ("tooltip", format!("node {index}: {}", node.operation.name())),
+                (
+                    "tooltip",
+                    format!("node {index}: {}", node.operation.name()),
+                ),
                 ("vn_id", format!("n{index}")),
                 ("vn_kind", kind.into()),
                 ("vn_op", node.operation.name().into()),
-                ("vn_reduction_axis", match node.operation {
-                    Operation::ReduceSum { axis } => axis.to_string(),
-                    _ => String::new(),
-                }),
-                ("vn_custom_semantics", match &node.operation {
-                    Operation::Pointwise(spec) => format!(
-                        "{}@{}:{}",
-                        spec.id(), spec.version(), spec.expression().canonical()
-                    ),
-                    _ => String::new(),
-                }),
+                (
+                    "vn_reduction_axis",
+                    match node.operation {
+                        Operation::ReduceSum { axis } => axis.to_string(),
+                        _ => String::new(),
+                    },
+                ),
+                (
+                    "vn_custom_semantics",
+                    match &node.operation {
+                        Operation::Pointwise(spec) => format!(
+                            "{}@{}:{}",
+                            spec.id(),
+                            spec.version(),
+                            spec.expression().canonical()
+                        ),
+                        _ => String::new(),
+                    },
+                ),
                 (
                     "vn_instance_path",
                     parent.map_or_else(|| "root".to_owned(), |p| paths[p].clone()),
@@ -748,7 +759,8 @@ pub fn snapshot_architecture(
                 {
                     return Err(bad(format!(
                         "node n{i} captures n{} outside module {} without a declared input",
-                        source.index(), scope.id
+                        source.index(),
+                        scope.id
                     )));
                 }
             }
@@ -908,17 +920,25 @@ pub(crate) fn auto_architecture_dot(
                 ("vn_id", format!("n{i}")),
                 ("vn_kind", kind.to_owned()),
                 ("vn_op", node.operation.name().to_owned()),
-                ("vn_reduction_axis", match node.operation {
-                    Operation::ReduceSum { axis } => axis.to_string(),
-                    _ => String::new(),
-                }),
-                ("vn_custom_semantics", match &node.operation {
-                    Operation::Pointwise(spec) => format!(
-                        "{}@{}:{}",
-                        spec.id(), spec.version(), spec.expression().canonical()
-                    ),
-                    _ => String::new(),
-                }),
+                (
+                    "vn_reduction_axis",
+                    match node.operation {
+                        Operation::ReduceSum { axis } => axis.to_string(),
+                        _ => String::new(),
+                    },
+                ),
+                (
+                    "vn_custom_semantics",
+                    match &node.operation {
+                        Operation::Pointwise(spec) => format!(
+                            "{}@{}:{}",
+                            spec.id(),
+                            spec.version(),
+                            spec.expression().canonical()
+                        ),
+                        _ => String::new(),
+                    },
+                ),
                 (
                     "vn_instance_path",
                     parent.map_or_else(|| "root".to_owned(), |p| context.paths[p].clone()),

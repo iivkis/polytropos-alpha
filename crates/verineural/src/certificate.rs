@@ -366,7 +366,11 @@ impl CertificateEngine {
 /// Certificate selection layered over the one canonical graph serialization.
 /// Graph identity and process-global IDs do not contribute to the fingerprint.
 fn ir_snapshot(graph: &NeuralGraph, output: NodeId) -> String {
-    format!("{}certificate_output={}\n", graph.canonical_ir(), output.index())
+    format!(
+        "{}certificate_output={}\n",
+        graph.canonical_ir(),
+        output.index()
+    )
 }
 
 fn input_snapshot(graph: &NeuralGraph, inputs: &[(NodeId, Tensor<f32>)]) -> String {

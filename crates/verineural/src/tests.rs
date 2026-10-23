@@ -2025,8 +2025,7 @@ fn p1_mask_select_lean_contract_and_numeric_gpu_profiles_fail_closed() {
         "incorrect_gated_claim",
         "v1",
         invalid_contract,
-        PrimitiveExpr::port(0)
-            .select_positive(PrimitiveExpr::port(1), PrimitiveExpr::port(2)),
+        PrimitiveExpr::port(0).select_positive(PrimitiveExpr::port(1), PrimitiveExpr::port(2)),
     )
     .unwrap();
     let result = bad_module

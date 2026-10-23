@@ -70,9 +70,7 @@ fn policy(graph: &NeuralGraph) -> String {
     let reduction = match policy.reduction {
         ReductionOrder::LeftToRight => "left_to_right",
     };
-    format!(
-        "rounding={rounding},fma={fma},subnormals={subnormals},reduction={reduction}"
-    )
+    format!("rounding={rounding},fma={fma},subnormals={subnormals},reduction={reduction}")
 }
 
 fn nodes(ids: impl IntoIterator<Item = usize>) -> String {
@@ -81,7 +79,11 @@ fn nodes(ids: impl IntoIterator<Item = usize>) -> String {
         .map(|id| id.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    if text.is_empty() { "-".to_owned() } else { text }
+    if text.is_empty() {
+        "-".to_owned()
+    } else {
+        text
+    }
 }
 
 fn port(port: &PortContract) -> String {
@@ -114,12 +116,20 @@ fn claims(claims: &[ContractClaim]) -> String {
         })
         .collect::<Vec<_>>()
         .join("+");
-    if text.is_empty() { "-".to_owned() } else { text }
+    if text.is_empty() {
+        "-".to_owned()
+    } else {
+        text
+    }
 }
 
 fn ports(ports: impl IntoIterator<Item = String>) -> String {
     let text = ports.into_iter().collect::<Vec<_>>().join(",");
-    if text.is_empty() { "-".to_owned() } else { text }
+    if text.is_empty() {
+        "-".to_owned()
+    } else {
+        text
+    }
 }
 
 fn gpu_semantics(gpu: GpuSemantics) -> &'static str {

@@ -12,7 +12,10 @@ use verineural::{
 pub const CASES: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 0), (1, 1)];
 
 fn port(dims: &[usize]) -> PortContract {
-    PortContract::new(Shape::new(dims.to_vec()).expect("fixed positive dimensions"), Domain::Any)
+    PortContract::new(
+        Shape::new(dims.to_vec()).expect("fixed positive dimensions"),
+        Domain::Any,
+    )
 }
 
 /// Generic consumer-owned affine block: MatMul(input, weights) + bias.
@@ -24,7 +27,11 @@ impl Affine {
     fn new(rows: usize, input: usize, output: usize) -> Self {
         Self {
             contract: MathContract::new(
-                vec![port(&[rows, input]), port(&[input, output]), port(&[output])],
+                vec![
+                    port(&[rows, input]),
+                    port(&[input, output]),
+                    port(&[output]),
+                ],
                 port(&[rows, output]),
             ),
         }
@@ -244,7 +251,10 @@ mod tests {
         let lab = build().unwrap();
         lab.validate_inputs().unwrap();
         assert_eq!(Lab::expected(), [0.0, 1.0, 1.0, 0.0]);
-        assert_eq!(lab.inputs[0].1.values(), &[0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]);
+        assert_eq!(
+            lab.inputs[0].1.values(),
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0]
+        );
         assert_eq!(lab.graph.modules().len(), 4);
         assert_eq!(lab.graph.nodes().len(), 11);
         assert!(lab.parameter_bits().contains("c0000000")); // -2.0
@@ -259,28 +269,27 @@ mod tests {
         assert!(!gpu.translation_plan().unwrap().kernels.is_empty());
 
         let snapshot =
-            verineural::snapshot_architecture(&lab.graph, lab.output, &gpu, &lab.metadata)
-                .unwrap();
-        assert!(snapshot
-            .dot
-            .contains("vn_global_property=\"architecture_global_nonnegative\""));
+            verineural::snapshot_architecture(&lab.graph, lab.output, &gpu, &lab.metadata).unwrap();
+        assert!(
+            snapshot
+                .dot
+                .contains("vn_global_property=\"architecture_global_nonnegative\"")
+        );
 
         let proof = LeanProofEngine::default()
             .generate_global_nonnegative(&lab.graph, lab.output, &[])
             .unwrap();
-        assert!(proof
-            .source()
-            .contains("theorem architecture_global_nonnegative"));
+        assert!(
+            proof
+                .source()
+                .contains("theorem architecture_global_nonnegative")
+        );
 
         let mut invalid_meta = lab.metadata.clone();
         invalid_meta.global_property = "xor_output_nonnegative".into();
-        assert!(verineural::snapshot_architecture(
-            &lab.graph,
-            lab.output,
-            &gpu,
-            &invalid_meta
-        )
-        .is_err());
+        assert!(
+            verineural::snapshot_architecture(&lab.graph, lab.output, &gpu, &invalid_meta).is_err()
+        );
     }
 
     #[test]

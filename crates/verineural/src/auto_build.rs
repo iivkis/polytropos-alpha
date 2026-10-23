@@ -229,9 +229,7 @@ pub fn check_architecture_connectivity(
             || module.outputs.len() != module.contract.outputs.len()
             || module.outputs.is_empty()
         {
-            return Err(invalid(format!(
-                "multi-module {index} has malformed ports"
-            )));
+            return Err(invalid(format!("multi-module {index} has malformed ports")));
         }
         for (&input, port) in module.inputs.iter().zip(&module.contract.inputs) {
             check_port(
@@ -449,10 +447,7 @@ impl ArchitectureAutoCompiler {
         }
         fs::create_dir_all(&directory)?;
         let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
-        fs::write(
-            directory.join("semantic.ir"),
-            graph.canonical_ir(),
-        )?;
+        fs::write(directory.join("semantic.ir"), graph.canonical_ir())?;
         let lean_dir = directory.join("lean");
         fs::create_dir_all(&lean_dir)?;
         let (checked, audit) = self
@@ -634,10 +629,7 @@ impl ArchitectureAutoCompiler {
         let directory = root.join("auto-build");
         let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
         let digest = auto_bundle::verify_manifest(&directory, &plan, pinned_sha256)?;
-        auto_bundle::verify_current_ir(
-            &directory,
-            &graph.canonical_ir(),
-        )?;
+        auto_bundle::verify_current_ir(&directory, &graph.canonical_ir())?;
         let ir_sha256 = auto_bundle::hash_file(&directory.join("semantic.ir"))?;
         let expected_dot = crate::architecture::auto_architecture_dot(graph, &plan, &ir_sha256)?;
         let dot_file = directory.join("architecture.dot");

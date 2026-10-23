@@ -3,9 +3,8 @@
 //! Supported ideal-Int Lean model, explicit unsupported GPU/FP32 certification.
 use std::path::Path;
 use verineural::{
-    Domain, GpuEngine, GpuError, LeanProofEngine, MathContract, NeuralError,
-    NeuralGraph, Operation, PointwiseExpr, PointwiseSpec, PortContract,
-    ProofError, Shape, Tensor,
+    Domain, GpuEngine, GpuError, LeanProofEngine, MathContract, NeuralError, NeuralGraph,
+    Operation, PointwiseExpr, PointwiseSpec, PortContract, ProofError, Shape, Tensor,
 };
 
 fn make_spec(version: &'static str, covered: bool) -> PointwiseSpec {
@@ -31,13 +30,15 @@ fn architecture(spec: &PointwiseSpec) -> (NeuralGraph, verineural::NodeId) {
         PortContract::any(shape),
     )
     .nonnegative();
-    let output = graph.compose(
-        "external_pointwise",
-        "1",
-        &contract,
-        &[x, bias],
-        |graph, args| spec.apply(graph, args),
-    ).unwrap();
+    let output = graph
+        .compose(
+            "external_pointwise",
+            "1",
+            &contract,
+            &[x, bias],
+            |graph, args| spec.apply(graph, args),
+        )
+        .unwrap();
     (graph, output)
 }
 
@@ -46,7 +47,10 @@ fn consumer_defines_atomic_semantics_and_reference_without_library_edits() {
     let spec = make_spec("1.0.0", true);
     let (graph, output) = architecture(&spec);
     assert_eq!(graph.nodes().len(), 3); // two inputs and exactly one custom op
-    assert!(matches!(&graph.node(output).unwrap().operation, Operation::Pointwise(_)));
+    assert!(matches!(
+        &graph.node(output).unwrap().operation,
+        Operation::Pointwise(_)
+    ));
     let canonical = graph.canonical_ir();
     assert!(canonical.contains("consumer.square_plus_relu@1.0.0"));
     assert!(canonical.contains("relu(add(mul(arg:0,arg:0),arg:1))"));
@@ -74,18 +78,17 @@ fn consumer_defines_atomic_semantics_and_reference_without_library_edits() {
 
 #[test]
 fn unsupported_or_bad_semantics_fail_closed() {
-    assert!(PointwiseSpec::new(
-        "bad", "1", 1, PointwiseExpr::input(1)
-    ).is_err());
-    assert!(PointwiseSpec::new(
-        "bad", "1", 0, PointwiseExpr::input(0)
-    ).is_err());
+    assert!(PointwiseSpec::new("bad", "1", 1, PointwiseExpr::input(1)).is_err());
+    assert!(PointwiseSpec::new("bad", "1", 0, PointwiseExpr::input(0)).is_err());
 
     let mut graph = NeuralGraph::default();
     let a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Any);
     let b = graph.input(Shape::new(vec![3]).unwrap(), Domain::Any);
     let spec = make_spec("1", true);
-    assert!(matches!(spec.apply(&mut graph, &[a, b]), Err(NeuralError::ShapeMismatch { .. })));
+    assert!(matches!(
+        spec.apply(&mut graph, &[a, b]),
+        Err(NeuralError::ShapeMismatch { .. })
+    ));
     assert_eq!(graph.nodes().len(), 2);
 
     // Same well-typed structure, but no ReLU proof rule for a*a+b:
@@ -97,9 +100,7 @@ fn unsupported_or_bad_semantics_fail_closed() {
     ));
 }
 
-fn certify(graph: &NeuralGraph, output: verineural::NodeId, path: &Path)
-    -> Result<(), ProofError>
-{
+fn certify(graph: &NeuralGraph, output: verineural::NodeId, path: &Path) -> Result<(), ProofError> {
     let engine = LeanProofEngine::default();
     let proof = engine.generate(graph, output)?;
     engine.verify_certified(&proof, path)?;
@@ -111,7 +112,8 @@ fn certify(graph: &NeuralGraph, output: verineural::NodeId, path: &Path)
 #[ignore = "requires pinned Lean 4 from Nix devShell"]
 fn lean_kernel_accepts_external_semantics_and_nonnegative_claim() {
     let dir = std::env::temp_dir().join(format!(
-        "verineural-pointwise-consumer-{}", std::process::id()
+        "verineural-pointwise-consumer-{}",
+        std::process::id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let (graph, output) = architecture(&make_spec("1.0.0", true));

@@ -34,7 +34,12 @@ fn case(reverse: bool) -> (NeuralGraph, ProofGoal) {
     (
         graph,
         ProofGoal {
-            name: if reverse { "relu_may_decrease" } else { "relu_preserves_order" }.into(),
+            name: if reverse {
+                "relu_may_decrease"
+            } else {
+                "relu_preserves_order"
+            }
+            .into(),
             output: y,
             kind: ProofGoalKind::Predicate(predicate),
         },
@@ -46,14 +51,23 @@ fn consumer_claims_are_in_canonical_ir_and_generate_nontrivial_goals() {
     let (graph, goal) = case(false);
     let ir = graph.canonical_ir();
     assert!(ir.contains("pointwise_le(input:0,output)"));
-    let proof = LeanProofEngine::default().generate_goal(&graph, &goal).unwrap();
+    let proof = LeanProofEngine::default()
+        .generate_goal(&graph, &goal)
+        .unwrap();
     assert!(proof.source().contains("VeriNeural.PointwiseLe"));
     assert!(proof.source().contains("VeriNeural.pointwise_le_relu"));
-    assert!(proof.theorem_names().iter().any(|n| n == "module_0_claim_0"));
-    assert!(proof
-        .theorem_names()
-        .iter()
-        .any(|n| n == "architecture_property_relu_preserves_order"));
+    assert!(
+        proof
+            .theorem_names()
+            .iter()
+            .any(|n| n == "module_0_claim_0")
+    );
+    assert!(
+        proof
+            .theorem_names()
+            .iter()
+            .any(|n| n == "architecture_property_relu_preserves_order")
+    );
     assert!(!proof.source().contains("sorry"));
 
     let (bad, bad_goal) = case(true);

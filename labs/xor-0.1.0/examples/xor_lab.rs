@@ -7,8 +7,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use verineural::{snapshot_architecture, GpuEngine, LeanProofEngine};
-use xor_lab::{build, Lab, CASES};
+use verineural::{GpuEngine, LeanProofEngine, snapshot_architecture};
+use xor_lab::{CASES, Lab, build};
 
 const EVIDENCE: [&str; 13] = [
     "architecture.identity",
@@ -78,7 +78,9 @@ fn verify_gpu_files(root: &Path, program: &verineural::GpuProgram) -> Result<(),
     let saved_plan = fs::read_to_string(dir.join("translation.plan"))?;
     let plan = program.translation_plan()?;
     if llvm != program.llvm_ir() || saved_plan != plan.to_text() {
-        return Err(invalid("executed GPU LLVM/translation plan differs from current graph").into());
+        return Err(
+            invalid("executed GPU LLVM/translation plan differs from current graph").into(),
+        );
     }
     let checked = plan.validate(&llvm, &ptx)?;
     if fs::read_to_string(dir.join("translation.report"))? != checked.to_text() {
@@ -201,7 +203,11 @@ fn parse_cli(args: &[String]) -> Result<(bool, PathBuf), io::Error> {
                 root = package_root.join(path);
                 custom_root = true;
             }
-            other => return Err(invalid(format!("unknown or repeated XOR argument: {other}"))),
+            other => {
+                return Err(invalid(format!(
+                    "unknown or repeated XOR argument: {other}"
+                )));
+            }
         }
         index += 1;
     }
