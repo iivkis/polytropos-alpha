@@ -127,6 +127,13 @@ tasks:
     cmds:
       - cargo run -p verineural --example multi_output_gpu
 
+  gpu-state-replay:
+    desc: GPU acceptance for named stateful ModelExecution, five D2D feedback steps and exact FP32 results
+    deps:
+      - prepare
+    cmds:
+      - cargo run -p verineural --example stateful_model_gpu
+
   gpu-stage4:
     desc: Lower IR to PTX and run the CUDA stage-4 example (developer-run)
     cmds:

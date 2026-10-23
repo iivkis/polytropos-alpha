@@ -146,6 +146,8 @@ Lean `approx_contract_relu_positive_branch` / `approx_contract_relu_nonpositive_
 
 **P1 state/execution (реализован API-срез; локальная приёмка ожидается):** SourceRole::State, ModelBuilder::state/next_state/block_multi, атомарный compose_multi_inferred, identity с transition links и ModelExecution. CUDA Graph исполняет чистый DAG; именованные обновления не перебинживают все параметры. Stateful step выполняет D2D feedback в явном CUDA stream. Добавлены CPU-only unit-тесты state validation, rollback и multi-output. Выполнить локально task check, task test, task clippy; GPU replay требует отдельного прогона. P0 index-routing GPU lowering и полная миграция rotating-matrices не входят в этот срез.
 
+**P1 hardware acceptance fixture (код, локальный CUDA-прогон ожидается):** `task gpu-state-replay` вызывает `examples/stateful_model_gpu.rs`, собирая один consumer-defined 3-output transition с двумя публичными readouts и приватной state link. Один GPU session/compiled CUDA Graph, `run` плюс пять `step`, точные FP32 bit fixtures для состояния и выходов, смена input и параметра без recapture, явный reset и отказы на неверные роли, формы, значения. CPU unit tests и ранее подтверждённый `task gpu-multi-output` не заменяют проверку этого D2D replay; статус GPU acceptance отмечать завершённым только после фактического успешного запуска на NVIDIA. Не выдавать это за доказательство CUDA/JIT/SASS/FP32 или произвольной рекуррентной сходимости.
+
 ## Общие ограничения для всех этапов
 
 - **Никаких** CI/CD, GitHub Actions, hooks, контейнеризации и прочей инфраструктуры без явного согласия пользователя.
