@@ -9,7 +9,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use verineural::{
-    GpuEngine, GpuLaunchConfig, GpuProgram, LeanProofEngine, ReluFusion, TranslationPlan,
+    GpuEngine, GpuLaunchConfig, GpuProgram, LeanProgram, LeanProofEngine, ReluFusion,
+    TranslationPlan,
     snapshot_architecture,
 };
 
@@ -57,6 +58,19 @@ fn checksums(root: &Path) -> Result<String, Box<dyn Error>> {
     Ok(contents)
 }
 
+// Do not accept a syntactically valid, but unrelated, Lean theorem.
+// Both the source and the transitive axiom dependencies are rechecked.
+fn verify_lean_evidence(root: &Path, expected: &LeanProgram) -> Result<(), Box<dyn Error>> {
+    let path = root.join("architecture.lean");
+    if fs::read_to_string(&path)? != expected.source() {
+        return Err(failed("saved Lean source differs from current Rust architecture").into());
+    }
+    let proof = LeanProofEngine::default();
+    proof.check_file(&path)?;
+    proof.audit_file(&path, expected.theorem_names())?;
+    Ok(())
+}
+
 fn verified_bundle(
     root: &Path,
     lab: &coupled_field_lab::Lab,
@@ -81,7 +95,19 @@ fn verified_bundle(
     if fs::read_to_string(root.join("output.bits"))? != expected_bits {
         return Err(failed("saved GPU output differs from exact Int oracle").into());
     }
-    LeanProofEngine::default().check_file(&root.join("architecture.lean"))?;
+    let proof = LeanProofEngine::default().generate_global_nonnegative(
+        &lab.graph,
+        lab.output,
+        &lab.source_nodes,
+    )?;
+    if !proof
+        .theorem_names()
+        .iter()
+        .any(|name| name == "architecture_global_nonnegative")
+    {
+        return Err(failed("architecture-level Lean obligation absent").into());
+    }
+    verify_lean_evidence(root, &proof)?;
     for label in ["baseline", "fused"] {
         let dir = root.join("gpu").join(label);
         let llvm = fs::read_to_string(dir.join("graph.ll"))?;
@@ -190,7 +216,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err(failed("architecture-level Lean obligation absent").into());
     }
-    let checked = LeanProofEngine::default().verify(&proof, &root.join("architecture.lean"))?;
+    let (checked, _audit) =
+        LeanProofEngine::default().verify_certified(&proof, &root.join("architecture.lean"))?;
     if checked.theorem_names.is_empty() {
         return Err(failed("Lean returned no checked theorems").into());
     }
@@ -261,4 +288,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Stage 9 guarantee: global ideal-Int nonnegative theorem under explicit input assumptions; concrete GPU FP32 exact-integer probes; structural translation validation; CUDA JIT/SASS still trusted"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage9_rejects_swapped_lean_source_before_accepting_certificate() {
+        let lab = build().unwrap();
+        let expected = LeanProofEngine::default()
+            .generate_global_nonnegative(&lab.graph, lab.output, &lab.source_nodes)
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "verineural-stage9-proof-replay-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("architecture.lean"), format!("{}\n-- swapped\n", expected.source()))
+            .unwrap();
+        // No Lean installation is needed for this negative case: comparing
+        // against the independently regenerated Rust proof fails first.
+        assert!(verify_lean_evidence(&root, &expected).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -11,6 +11,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     FixedScan, GpuEngine, GpuError, GpuProgram, LeanProgram, LeanProofEngine, NeuralError,
@@ -339,6 +340,81 @@ pub struct AutoBuildReport {
     pub manifest_sha256: String,
 }
 
+// Keep the last valid bundle while every new proof, GPU lowering and artifact
+// check is performed. Staging and the previous bundle are on the same
+// filesystem, so directory renames do not become cross-device copies.
+static NEXT_BUILD_ID: AtomicU64 = AtomicU64::new(0);
+
+struct StagedBuild {
+    directory: PathBuf,
+    backup: PathBuf,
+    published: bool,
+}
+
+impl StagedBuild {
+    fn create(root: &Path) -> Result<Self, AutoBuildError> {
+        fs::create_dir_all(root)?;
+        loop {
+            let id = NEXT_BUILD_ID.fetch_add(1, Ordering::Relaxed);
+            let suffix = format!("{}-{id}", std::process::id());
+            let directory = root.join(format!(".auto-build.staging-{suffix}"));
+            let backup = root.join(format!(".auto-build.previous-{suffix}"));
+            if backup.exists() {
+                continue;
+            }
+            match fs::create_dir(&directory) {
+                Ok(()) => {
+                    return Ok(Self {
+                        directory,
+                        backup,
+                        published: false,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn publish(&mut self, final_dir: &Path) -> Result<(), AutoBuildError> {
+        let previous = final_dir.exists();
+        if previous && !final_dir.is_dir() {
+            return Err(AutoBuildError::Integrity(format!(
+                "existing auto-build path is not a directory: {}",
+                final_dir.display()
+            )));
+        }
+        if previous {
+            fs::rename(final_dir, &self.backup)?;
+        }
+        if let Err(error) = fs::rename(&self.directory, final_dir) {
+            if previous {
+                fs::rename(&self.backup, final_dir).map_err(|rollback| {
+                    AutoBuildError::Integrity(format!(
+                        "publish failed ({error}); could not restore previous bundle: {rollback}; \
+                         previous bundle remains at {}",
+                        self.backup.display()
+                    ))
+                })?;
+            }
+            return Err(error.into());
+        }
+        self.published = true;
+        if previous {
+            fs::remove_dir_all(&self.backup)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StagedBuild {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ArchitectureAutoCompiler {
     proof: LeanProofEngine,
@@ -430,8 +506,9 @@ impl ArchitectureAutoCompiler {
         })
     }
 
-    /// One developer-invoked build. The reserved auto-build/ subdirectory is
-    /// replaced each time; no stale report survives failed proof/GPU checks.
+    /// One developer-invoked build. A complete new auto-build/ is staged and
+    /// validated before replacing the previous good bundle. Failed builds
+    /// leave the previously published evidence untouched.
     /// There is no CUDA execution or claim of IEEE-754 machine equivalence.
     pub fn build(
         &self,
@@ -441,12 +518,10 @@ impl ArchitectureAutoCompiler {
         gpu_requirement: GpuRequirement,
         root: &Path,
     ) -> Result<AutoBuildReport, AutoBuildError> {
-        let directory = root.join("auto-build");
-        if directory.exists() {
-            fs::remove_dir_all(&directory)?;
-        }
-        fs::create_dir_all(&directory)?;
         let plan = self.plan(graph, outputs, tasks, gpu_requirement)?;
+        let final_dir = root.join("auto-build");
+        let mut staged = StagedBuild::create(root)?;
+        let directory = staged.directory.clone();
         fs::write(directory.join("semantic.ir"), graph.canonical_ir())?;
         let lean_dir = directory.join("lean");
         fs::create_dir_all(&lean_dir)?;
@@ -479,12 +554,11 @@ impl ArchitectureAutoCompiler {
         for (index, target) in plan.gpu.iter().enumerate() {
             match target {
                 PlannedGpu::Supported { output, program } => {
-                    let ptx = self
-                        .gpu
+                    self.gpu
                         .lower(program, &directory.join(format!("gpu_{index}")))?;
                     output_evidence.push(OutputBuildEvidence {
                         node: output.index(),
-                        ptx: Some(ptx),
+                        ptx: Some(final_dir.join(format!("gpu_{index}/graph.ptx"))),
                         reason: None,
                     });
                 }
@@ -511,12 +585,13 @@ impl ArchitectureAutoCompiler {
             &directory.join("architecture.png"),
         )?;
         let shared_gpu_ptx = if let Some(program) = &plan.shared_gpu {
-            Some(self.gpu.lower(program, &directory.join("gpu_shared"))?)
+            self.gpu.lower(program, &directory.join("gpu_shared"))?;
+            Some(final_dir.join("gpu_shared/graph.ptx"))
         } else {
             None
         };
         let mut report = AutoBuildReport {
-            directory: directory.clone(),
+            directory: final_dir.clone(),
             connectivity: plan.connectivity,
             output_evidence,
             shared_gpu_ptx,
@@ -529,14 +604,9 @@ impl ArchitectureAutoCompiler {
             manifest_sha256: String::new(),
         };
         fs::write(directory.join("report.txt"), report_text(graph, &report))?;
-        report.manifest_sha256 = match auto_bundle::write_manifest(&directory, &plan) {
-            Ok(digest) => digest,
-            Err(error) => {
-                let _ = fs::remove_file(directory.join("report.txt"));
-                let _ = fs::remove_file(directory.join("SHA256SUMS"));
-                return Err(error);
-            }
-        };
+        report.manifest_sha256 = auto_bundle::write_manifest(&directory, &plan)?;
+        auto_bundle::verify_manifest(&directory, &plan, Some(&report.manifest_sha256))?;
+        staged.publish(&final_dir)?;
         Ok(report)
     }
 }
@@ -793,4 +863,50 @@ fn verify_source(
     }
     proof.check_file(path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod staged_build_tests {
+    use super::*;
+
+    fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "verineural-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    #[test]
+    fn failed_staging_does_not_destroy_previous_bundle() {
+        let root = test_root("rollback");
+        let old = root.join("auto-build");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("SHA256SUMS"), b"old-valid-bundle").unwrap();
+        let staging_path = {
+            let staged = StagedBuild::create(&root).unwrap();
+            fs::write(staged.directory.join("architecture.lean"), b"incomplete").unwrap();
+            staged.directory.clone()
+        }; // Simulate a proof/backend failure before publication.
+        assert!(!staging_path.exists());
+        assert_eq!(fs::read(old.join("SHA256SUMS")).unwrap(), b"old-valid-bundle");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_publication_replaces_bundle_and_cleans_backup() {
+        let root = test_root("publish");
+        let old = root.join("auto-build");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("report.txt"), "old").unwrap();
+        let mut staged = StagedBuild::create(&root).unwrap();
+        let staging = staged.directory.clone();
+        let backup = staged.backup.clone();
+        fs::write(staging.join("report.txt"), "new").unwrap();
+        staged.publish(&old).unwrap();
+        assert_eq!(fs::read_to_string(old.join("report.txt")).unwrap(), "new");
+        assert!(!staging.exists());
+        assert!(!backup.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -27,6 +27,10 @@ tasks:
           echo "fmt-check: detached HEAD; refusing auto-push." >&2
           exit 1
         }
+        if [ "$branch" != "dev" ]; then
+          echo "fmt-check: only dev may be automatically committed and pushed (current: $branch)." >&2
+          exit 1
+        fi
         git remote get-url origin >/dev/null
         cargo fmt --all
         cargo fmt --all -- --check
