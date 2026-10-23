@@ -1,58 +1,32 @@
-verineural-architecture-ir-v1
-id=coupled-field
-version=0.1.0
-output=22
-fp32=FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }
-property=architecture_global_nonnegative
-node=0;op=Input;inputs=[];shape=[1, 4];dtype=binary32;layout=row-major;domain=NonNegativeFinite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([1, 4]), domain: NonNegativeFinite };role=input
-node=1;op=Input;inputs=[];shape=[1, 4];dtype=binary32;layout=row-major;domain=NonNegativeFinite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([1, 4]), domain: NonNegativeFinite };role=input
-node=2;op=Input;inputs=[];shape=[1, 4];dtype=binary32;layout=row-major;domain=NonNegativeFinite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([1, 4]), domain: NonNegativeFinite };role=input
-node=3;op=Input;inputs=[];shape=[4];dtype=binary32;layout=row-major;domain=NonNegativeFinite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([4]), domain: NonNegativeFinite };role=parameter
-node=4;op=Input;inputs=[];shape=[4];dtype=binary32;layout=row-major;domain=NonNegativeFinite;semantics=OperationSemantics { ideal: Input, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[];ensures=PortContract { shape: Shape([4]), domain: NonNegativeFinite };role=parameter
-node=5;op=Mul;inputs=[0, 1];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Mul, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=6;op=BiasAdd;inputs=[5, 3];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: BiasAdd, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=7;op=Relu;inputs=[6];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=8;op=Mul;inputs=[1, 2];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Mul, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=9;op=BiasAdd;inputs=[8, 4];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: BiasAdd, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=10;op=Relu;inputs=[9];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=11;op=Add;inputs=[7, 10];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Add, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=12;op=Relu;inputs=[11];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=13;op=Mul;inputs=[0, 2];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Mul, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=14;op=BiasAdd;inputs=[13, 4];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: BiasAdd, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=15;op=Relu;inputs=[14];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=16;op=Mul;inputs=[2, 1];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Mul, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=17;op=BiasAdd;inputs=[16, 3];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: BiasAdd, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=18;op=Relu;inputs=[17];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=19;op=Add;inputs=[15, 18];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Add, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=20;op=Relu;inputs=[19];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=21;op=Add;inputs=[12, 20];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Add, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-node=22;op=Relu;inputs=[21];shape=[1, 4];dtype=binary32;layout=row-major;domain=Any;semantics=OperationSemantics { ideal: Relu, fp32: FP32Policy { rounding: NearestTiesToEven, fma: SeparateOperations, subnormals: Preserve, reduction: LeftToRight }, gpu: NotLowered };requires=[PortContract { shape: Shape([1, 4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any };role=primitive
-module=0;name=boundary_response;inputs=[0, 1, 3];body_start=5;output=7;requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any }
-module=1;name=boundary_response;inputs=[1, 2, 4];body_start=8;output=10;requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any }
-module=2;name=coupled_unit;inputs=[0, 1, 2, 3, 4];body_start=5;output=12;requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any }
-module=3;name=boundary_response;inputs=[0, 2, 4];body_start=13;output=15;requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any }
-module=4;name=boundary_response;inputs=[2, 1, 3];body_start=16;output=18;requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any }
-module=5;name=coupled_unit;inputs=[0, 2, 1, 4, 3];body_start=13;output=20;requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any }
-module=6;name=coupled_field;inputs=[0, 1, 2, 3, 4];body_start=5;output=22;requires=[PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([1, 4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }, PortContract { shape: Shape([4]), domain: Any }];ensures=PortContract { shape: Shape([1, 4]), domain: Any }
-translation_plan_begin
-vn-translation-plan-v1
-threads=256
-kernel	5	mul	4	0:4,1:4	0	0
-kernel	6	bias_add	4	5:4,3:4	4	0
-kernel	7	relu	4	6:4	0	0
-kernel	8	mul	4	1:4,2:4	0	0
-kernel	9	bias_add	4	8:4,4:4	4	0
-kernel	10	relu	4	9:4	0	0
-kernel	11	add	4	7:4,10:4	0	0
-kernel	12	relu	4	11:4	0	0
-kernel	13	mul	4	0:4,2:4	0	0
-kernel	14	bias_add	4	13:4,4:4	4	0
-kernel	15	relu	4	14:4	0	0
-kernel	16	mul	4	2:4,1:4	0	0
-kernel	17	bias_add	4	16:4,3:4	4	0
-kernel	18	relu	4	17:4	0	0
-kernel	19	add	4	15:4,18:4	0	0
-kernel	20	relu	4	19:4	0	0
-kernel	21	add	4	12:4,20:4	0	0
-kernel	22	relu	4	21:4	0	0
-translation_plan_end
+verineural-semantic-ir-v2
+policy=rounding=nearest_ties_to_even,fma=separate_operations,subnormals=preserve,reduction=left_to_right
+node=0;op=input;inputs=-;shape=1x4;domain=nonnegative_finite;requires=-;ensures=1x4@nonnegative_finite;claims=-;ideal=input;gpu=not_lowered
+node=1;op=input;inputs=-;shape=1x4;domain=nonnegative_finite;requires=-;ensures=1x4@nonnegative_finite;claims=-;ideal=input;gpu=not_lowered
+node=2;op=input;inputs=-;shape=1x4;domain=nonnegative_finite;requires=-;ensures=1x4@nonnegative_finite;claims=-;ideal=input;gpu=not_lowered
+node=3;op=input;inputs=-;shape=4;domain=nonnegative_finite;requires=-;ensures=4@nonnegative_finite;claims=-;ideal=input;gpu=not_lowered
+node=4;op=input;inputs=-;shape=4;domain=nonnegative_finite;requires=-;ensures=4@nonnegative_finite;claims=-;ideal=input;gpu=not_lowered
+node=5;op=mul;inputs=0,1;shape=1x4;domain=any;requires=1x4@any,1x4@any;ensures=1x4@any;claims=-;ideal=mul;gpu=not_lowered
+node=6;op=bias_add;inputs=5,3;shape=1x4;domain=any;requires=1x4@any,4@any;ensures=1x4@any;claims=-;ideal=bias_add;gpu=not_lowered
+node=7;op=relu;inputs=6;shape=1x4;domain=any;requires=1x4@any;ensures=1x4@any;claims=-;ideal=relu;gpu=not_lowered
+node=8;op=mul;inputs=1,2;shape=1x4;domain=any;requires=1x4@any,1x4@any;ensures=1x4@any;claims=-;ideal=mul;gpu=not_lowered
+node=9;op=bias_add;inputs=8,4;shape=1x4;domain=any;requires=1x4@any,4@any;ensures=1x4@any;claims=-;ideal=bias_add;gpu=not_lowered
+node=10;op=relu;inputs=9;shape=1x4;domain=any;requires=1x4@any;ensures=1x4@any;claims=-;ideal=relu;gpu=not_lowered
+node=11;op=add;inputs=7,10;shape=1x4;domain=any;requires=1x4@any,1x4@any;ensures=1x4@any;claims=-;ideal=add;gpu=not_lowered
+node=12;op=relu;inputs=11;shape=1x4;domain=any;requires=1x4@any;ensures=1x4@any;claims=-;ideal=relu;gpu=not_lowered
+node=13;op=mul;inputs=0,2;shape=1x4;domain=any;requires=1x4@any,1x4@any;ensures=1x4@any;claims=-;ideal=mul;gpu=not_lowered
+node=14;op=bias_add;inputs=13,4;shape=1x4;domain=any;requires=1x4@any,4@any;ensures=1x4@any;claims=-;ideal=bias_add;gpu=not_lowered
+node=15;op=relu;inputs=14;shape=1x4;domain=any;requires=1x4@any;ensures=1x4@any;claims=-;ideal=relu;gpu=not_lowered
+node=16;op=mul;inputs=2,1;shape=1x4;domain=any;requires=1x4@any,1x4@any;ensures=1x4@any;claims=-;ideal=mul;gpu=not_lowered
+node=17;op=bias_add;inputs=16,3;shape=1x4;domain=any;requires=1x4@any,4@any;ensures=1x4@any;claims=-;ideal=bias_add;gpu=not_lowered
+node=18;op=relu;inputs=17;shape=1x4;domain=any;requires=1x4@any;ensures=1x4@any;claims=-;ideal=relu;gpu=not_lowered
+node=19;op=add;inputs=15,18;shape=1x4;domain=any;requires=1x4@any,1x4@any;ensures=1x4@any;claims=-;ideal=add;gpu=not_lowered
+node=20;op=relu;inputs=19;shape=1x4;domain=any;requires=1x4@any;ensures=1x4@any;claims=-;ideal=relu;gpu=not_lowered
+node=21;op=add;inputs=12,20;shape=1x4;domain=any;requires=1x4@any,1x4@any;ensures=1x4@any;claims=-;ideal=add;gpu=not_lowered
+node=22;op=relu;inputs=21;shape=1x4;domain=any;requires=1x4@any;ensures=1x4@any;claims=-;ideal=relu;gpu=not_lowered
+module=0;kind=single;name=boundary_response;version=unversioned;inputs=0,1,3;body=5..8;outputs=7;input_ports=input_0:1x4@any,input_1:1x4@any,input_2:4@any;output_ports=output:1x4@any!-
+module=1;kind=single;name=boundary_response;version=unversioned;inputs=1,2,4;body=8..11;outputs=10;input_ports=input_0:1x4@any,input_1:1x4@any,input_2:4@any;output_ports=output:1x4@any!-
+module=2;kind=single;name=coupled_unit;version=unversioned;inputs=0,1,2,3,4;body=5..13;outputs=12;input_ports=input_0:1x4@any,input_1:1x4@any,input_2:1x4@any,input_3:4@any,input_4:4@any;output_ports=output:1x4@any!-
+module=3;kind=single;name=boundary_response;version=unversioned;inputs=0,2,4;body=13..16;outputs=15;input_ports=input_0:1x4@any,input_1:1x4@any,input_2:4@any;output_ports=output:1x4@any!-
+module=4;kind=single;name=boundary_response;version=unversioned;inputs=2,1,3;body=16..19;outputs=18;input_ports=input_0:1x4@any,input_1:1x4@any,input_2:4@any;output_ports=output:1x4@any!-
+module=5;kind=single;name=coupled_unit;version=unversioned;inputs=0,2,1,4,3;body=13..21;outputs=20;input_ports=input_0:1x4@any,input_1:1x4@any,input_2:1x4@any,input_3:4@any,input_4:4@any;output_ports=output:1x4@any!-
+module=6;kind=single;name=coupled_field;version=unversioned;inputs=0,1,2,3,4;body=5..23;outputs=22;input_ports=input_0:1x4@any,input_1:1x4@any,input_2:1x4@any,input_3:4@any,input_4:4@any;output_ports=output:1x4@any!-
