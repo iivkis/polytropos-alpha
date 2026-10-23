@@ -1,1 +1,0 @@
-auto-build/lean/architecture.lean
