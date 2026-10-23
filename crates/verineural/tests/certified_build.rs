@@ -36,6 +36,11 @@ fn certified_build_replays_and_detects_modification() {
     assert!(built.directory.join("identity.txt").is_file());
     assert!(built.directory.join("architecture.dot").is_file());
     assert!(built.directory.join("architecture.png").is_file());
+    assert!(root.join("semantic.ir").is_file());
+    assert!(root.join("architecture.dot").is_file());
+    assert!(root.join("architecture.png").is_file());
+    assert!(root.join("architecture.lean").is_file());
+    assert!(root.join("SHA256SUMS").is_file());
     let digest = built.manifest_sha256;
     m.verify_certified(config.clone(), Some(&digest)).unwrap();
     fs::write(built.directory.join("semantic.ir"), "tampered IR").unwrap();

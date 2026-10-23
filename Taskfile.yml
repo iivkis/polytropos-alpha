@@ -196,6 +196,18 @@ tasks:
     cmds:
       - cargo run -p xor-lab --example xor_lab -- --verify {{.CLI_ARGS}}
 
+  certified-build:
+    desc: Stage 10 certified build dispatcher for --manifest-path selected consumer (no GPU launch)
+    deps: [prepare]
+    cmds:
+      - cargo run -p verineural --bin cargo-verineural -- build --certified {{.CLI_ARGS}}
+
+  verify-certified-build:
+    desc: Stage 10 offline certified replay using --manifest-path and optional external pin
+    deps: [prepare]
+    cmds:
+      - cargo run -p verineural --bin cargo-verineural -- verify --certified {{.CLI_ARGS}}
+
   verify-certified-stage10:
     desc: Tool-dependent Stage 10 acceptance for true/false Lean goals, identity and tamper
     deps: [prepare]

@@ -353,9 +353,12 @@ impl Model {
     ) -> Result<AutoBuildReport, AutoBuildError> {
         let outputs: Vec<_> = self.outputs.values().copied().collect();
         let tasks: Vec<_> = self.goals.values().cloned().map(ArchitectureProofTask::Goal).collect();
-        compiler.build_identified(
-            &self.graph, &outputs, &tasks, &config.resolved_root(), &self.certified_identity()
-        )
+        let root = config.resolved_root();
+        let identity = self.certified_identity();
+        crate::certified::preflight_root(&root, &identity)?;
+        let report = compiler.build_identified(&self.graph, &outputs, &tasks, &root, &identity)?;
+        crate::certified::publish_root(&root, &identity)?;
+        Ok(report)
     }
 
     /// Verify the complete current-source bundle without CUDA or GPU execution.
@@ -376,10 +379,13 @@ impl Model {
     ) -> Result<AutoBuildReport, AutoBuildError> {
         let outputs: Vec<_> = self.outputs.values().copied().collect();
         let tasks: Vec<_> = self.goals.values().cloned().map(ArchitectureProofTask::Goal).collect();
-        compiler.verify_identified(
-            &self.graph, &outputs, &tasks, &config.resolved_root(), pinned_sha256,
-            &self.certified_identity()
-        )
+        let root = config.resolved_root();
+        let identity = self.certified_identity();
+        let report = compiler.verify_identified(
+            &self.graph, &outputs, &tasks, &root, pinned_sha256, &identity
+        )?;
+        crate::certified::verify_root(&root, &identity)?;
+        Ok(report)
     }
 
     /// Reuse ArchitectureAutoCompiler; planned Lean goals are not certified.

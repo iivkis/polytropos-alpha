@@ -5,3 +5,9 @@
 /.lake/
 *.swp
 *.swo
+
+# VeriNeural Stage 10 generated proof bundle and same-id legacy backups
+**/auto-build/
+**/.auto-build.staging-*/
+**/.auto-build.previous-*/
+**/.verineural-pre-stage10/
