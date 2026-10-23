@@ -176,6 +176,9 @@ pub fn tensor_heavy() -> (NeuralGraph, NodeId, ProofGoal) {
     let gated = graph.select_positive(mask, custom, product).unwrap();
     let reduced = graph.reduce_sum(gated, 1).unwrap();
     let output = graph.relu(reduced).unwrap();
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
     let goal = ProofGoal::nonnegative("tensor_heavy_output", output, vec![matrix, values, gates]);
     (graph, output, goal)
@@ -355,7 +358,10 @@ mod tests {
         let (same, _, _) = tensor_heavy();
         assert_eq!(graph.canonical_ir(), same.canonical_ir());
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         assert_eq!(graph.modules().len(), 1);
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
         assert!(
