@@ -122,6 +122,7 @@ fn operation_title(operation: &Operation) -> &'static str {
         Operation::Permute { .. } => "Permute",
         Operation::ReverseAxis { .. } => "Reverse axis",
         Operation::Concat { .. } => "Concat",
+        Operation::SliceAxis { .. } => "Slice axis",
         Operation::ArgMax { .. } => "Argmax",
         Operation::Take { .. } => "Take",
     }

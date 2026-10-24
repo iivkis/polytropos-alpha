@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::translation::{TranslationKernel, TranslationKind, TranslationPlan};
-use crate::{NeuralError, NeuralGraph, NodeId, NodeStorage, Operation, Shape, Tensor};
+use crate::{LeanProgram, NeuralError, NeuralGraph, NodeId, NodeStorage, Operation, Shape, Tensor};
 
 use super::cuda::CudaSession;
 
@@ -1816,7 +1816,6 @@ impl GpuEngine {
                         llvm_ir.push_str(&take_axis0_kernel_ir(index, node.shape.element_count()));
                     }
                     Operation::Permute { .. }
-                    | Operation::ReverseAxis { .. }
                     | Operation::Concat { .. }
                     | Operation::ArgMax { .. }
                     | Operation::Take { .. } => {
