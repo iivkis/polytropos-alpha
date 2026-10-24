@@ -1992,7 +1992,15 @@ impl LeanProofEngine {
                 "      simp only [{definition}]\n",
                 "      exact {claim_name} {successor_args} {hypothesis_args}\n\n",
                 "{end}",
-            )
+            ),
+            theorem = theorem,
+            state_count = state_count,
+            input_count = input_count,
+            definition = definition,
+            claim_name = claim_name,
+            successor_args = successor_args,
+            hypothesis_args = hypothesis_args,
+            end = end,
         ));
         program.theorems.push(theorem);
         Ok(program)
