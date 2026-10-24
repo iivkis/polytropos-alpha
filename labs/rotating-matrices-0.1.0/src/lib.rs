@@ -13,8 +13,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use verineural::{
-    ArgMaxTieBreak, Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError,
-    ModelExecution, NeuralError, NeuralGraph, NodeId, Shape, Tensor,
+    ArgMaxTieBreak, Domain, GpuEngine, Model, ModelBuilder, ModelError, ModelExecution,
+    NeuralError, NeuralGraph, NodeId, Shape, Tensor,
 };
 
 pub const WIDTH: usize = 64;
@@ -293,28 +293,6 @@ fn scalar_readout(g: &mut NeuralGraph, x: &[NodeId]) -> Result<NodeId, NeuralErr
     g.bias_add(projection, x[2])
 }
 
-/// One-step recurrent transition. No fixed sequence length is baked into IR.
-/// The caller explicitly rebinds `state` for each next UTF-8 token.
-pub fn core_model() -> Result<Model, ModelError> {
-    let mut m = ModelBuilder::new("rotating_core_step", "0.1.0");
-    let state = m.input("state", [1, WIDTH], Domain::Finite)?;
-    let token = m.input("token_bits", [1, WIDTH], Domain::NonNegativeFinite)?;
-    let w = m.parameter("rotated_weight", [WIDTH, WIDTH], Domain::Finite)?;
-    let bias = m.parameter("bias", [WIDTH], Domain::Finite)?;
-    let next = m.block(
-        "recurrent_transition",
-        &[state, token, w, bias],
-        recurrent_transition,
-    )?;
-    m.output("next_state", next)?;
-    m.proof_goal(verineural::ProofGoal::nonnegative(
-        "next_state_nonnegative",
-        next,
-        vec![],
-    ))?;
-    m.finish()
-}
-
 /// Learned logits for 2 cores x 4 orientations. This standalone model is kept
 /// for stochastic-training policy, where sampling intentionally remains on the
 /// host. Deterministic inference uses architecture_model() and GPU ArgMax/Take.
@@ -344,19 +322,60 @@ pub fn head_model() -> Result<Model, ModelError> {
     m.finish()
 }
 
-fn rotating_bank(g: &mut NeuralGraph, core0: NodeId, core1: NodeId) -> Result<NodeId, NeuralError> {
-    fn rotations(g: &mut NeuralGraph, core: NodeId) -> Result<[NodeId; TURNS], NeuralError> {
-        let transposed = g.permute(core, &[1, 0])?;
-        let r90 = g.reverse_axis(transposed, 1)?;
-        let r270 = g.reverse_axis(transposed, 0)?;
-        let flipped_rows = g.reverse_axis(core, 0)?;
-        let r180 = g.reverse_axis(flipped_rows, 1)?;
-        Ok([core, r90, r180, r270])
+/// One fixed training-policy route. The route choice is host policy, but the
+/// spatial rotation itself remains an ordinary Semantic IR transform and GPU
+/// lowering; no host-rotated tensor is bound as a derived parameter.
+pub fn routed_core_model(action: usize) -> Result<Model, ModelError> {
+    if action >= ACTIONS {
+        return Err(ModelError::Invalid("route action outside 0..8".into()));
     }
+    let turn = action % TURNS;
+    let mut m = ModelBuilder::new(format!("rotating_core_route_{action}"), "0.1.0");
+    let state = m.input("state", [1, WIDTH], Domain::Finite)?;
+    let token = m.input("token_bits", [1, WIDTH], Domain::NonNegativeFinite)?;
+    let base = m.parameter("base_weight", [WIDTH, WIDTH], Domain::Finite)?;
+    let bias = m.parameter("bias", [WIDTH], Domain::Finite)?;
+    let rotated = rotated_graph_weight(m.graph_mut(), base, turn)?;
+    let next = m.block(
+        "recurrent_transition",
+        &[state, token, rotated, bias],
+        recurrent_transition,
+    )?;
+    m.output("next_state", next)?;
+    m.finish()
+}
 
+fn rotated_graph_weight(
+    g: &mut NeuralGraph,
+    core: NodeId,
+    turn: usize,
+) -> Result<NodeId, NeuralError> {
+    match turn {
+        0 => Ok(core),
+        1 => {
+            let transposed = g.permute(core, &[1, 0])?;
+            g.reverse_axis(transposed, 1)
+        }
+        2 => {
+            let rows = g.reverse_axis(core, 0)?;
+            g.reverse_axis(rows, 1)
+        }
+        3 => {
+            let transposed = g.permute(core, &[1, 0])?;
+            g.reverse_axis(transposed, 0)
+        }
+        _ => Err(NeuralError::ContractViolation {
+            module: "rotated_graph_weight",
+            detail: "turn must be in 0..4",
+        }),
+    }
+}
+
+fn rotating_bank(g: &mut NeuralGraph, core0: NodeId, core1: NodeId) -> Result<NodeId, NeuralError> {
     let mut variants = Vec::with_capacity(ACTIONS);
     for core in [core0, core1] {
-        for rotated in rotations(g, core)? {
+        for turn in 0..TURNS {
+            let rotated = rotated_graph_weight(g, core, turn)?;
             variants.push(g.reshape(rotated, Shape::new(vec![1, WIDTH, WIDTH])?)?);
         }
     }
@@ -412,15 +431,18 @@ pub fn architecture_model() -> Result<Model, ModelError> {
 
 pub struct Architectures {
     pub architecture: Model,
-    pub core: Model,
+    pub routes: Vec<Model>,
     pub router: Model,
     pub head: Model,
 }
 impl Architectures {
     pub fn new() -> Result<Self, ModelError> {
+        let routes = (0..ACTIONS)
+            .map(routed_core_model)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             architecture: architecture_model()?,
-            core: core_model()?,
+            routes,
             router: router_model()?,
             head: head_model()?,
         })
@@ -493,9 +515,9 @@ impl Parameters {
 pub struct Runner {
     pub models: Architectures,
     deterministic: ModelExecution,
-    core: GpuExecution,
-    router: GpuExecution,
-    head: GpuExecution,
+    routes: Vec<ModelExecution>,
+    router: ModelExecution,
+    head: ModelExecution,
 }
 impl Runner {
     pub fn new(p: &Parameters) -> Result<Self, Box<dyn Error>> {
@@ -539,34 +561,29 @@ impl Runner {
             ],
             &workspace.path().join("deterministic"),
         )?;
-        let core_program = gpu.compile(
-            models.core.graph(),
-            models.core.output("next_state").unwrap(),
-        )?;
-        let router_program = gpu.compile(
-            models.router.graph(),
-            models.router.output("logits").unwrap(),
-        )?;
-        let head_program = gpu.compile(
-            models.head.graph(),
-            models.head.output("normalized_result").unwrap(),
-        )?;
-        let core = gpu.prepare(
-            &core_program,
-            &models.core.bind([
-                ("state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
-                ("token_bits", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
-                (
-                    "rotated_weight",
-                    Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?,
-                ),
-                ("bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
-            ])?,
-            &workspace.path().join("core"),
-        )?;
-        let router = gpu.prepare(
-            &router_program,
-            &models.router.bind([
+        let mut routes = Vec::with_capacity(ACTIONS);
+        for (action, model) in models.routes.iter().enumerate() {
+            let (core, _) = route_parts(action)?;
+            routes.push(gpu.prepare_model(
+                model,
+                [
+                    ("state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
+                    (
+                        "token_bits",
+                        Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
+                    ),
+                    (
+                        "base_weight",
+                        Tensor::from_slice([WIDTH, WIDTH], &p.cores[core])?,
+                    ),
+                    ("bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
+                ],
+                &workspace.path().join(format!("route_{action}")),
+            )?);
+        }
+        let router = gpu.prepare_model(
+            &models.router,
+            [
                 (
                     "dictionary_state",
                     Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
@@ -574,47 +591,75 @@ impl Runner {
                 ("state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
                 ("weights", Tensor::from_slice([WIDTH, ACTIONS], &p.router)?),
                 ("bias", Tensor::from_slice([ACTIONS], &p.router_bias)?),
-            ])?,
+            ],
             &workspace.path().join("router"),
         )?;
-        let head = gpu.prepare(
-            &head_program,
-            &models.head.bind([
+        let head = gpu.prepare_model(
+            &models.head,
+            [
                 (
                     "final_state",
                     Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
                 ),
                 ("weights", Tensor::from_slice([WIDTH, 1], &p.head)?),
                 ("bias", Tensor::from_slice([1], &[p.head_bias])?),
-            ])?,
+            ],
             &workspace.path().join("head"),
         )?;
         Ok(Self {
             models,
             deterministic,
-            core,
+            routes,
             router,
             head,
         })
     }
 
-    fn logits(
+    fn prepare_router(
         &mut self,
         p: &Parameters,
         dict: &[f32; WIDTH],
+    ) -> Result<(), Box<dyn Error>> {
+        self.router.set_input(
+            "dictionary_state",
+            &Tensor::from_slice([1, WIDTH], dict)?,
+        )?;
+        self.router.set_parameter(
+            "weights",
+            &Tensor::from_slice([WIDTH, ACTIONS], &p.router)?,
+        )?;
+        self.router.set_parameter(
+            "bias",
+            &Tensor::from_slice([ACTIONS], &p.router_bias)?,
+        )?;
+        Ok(())
+    }
+
+    fn prepare_routes(&mut self, p: &Parameters) -> Result<(), Box<dyn Error>> {
+        for action in 0..ACTIONS {
+            let (core, _) = route_parts(action)?;
+            self.routes[action].set_parameter(
+                "base_weight",
+                &Tensor::from_slice([WIDTH, WIDTH], &p.cores[core])?,
+            )?;
+            self.routes[action].set_parameter(
+                "bias",
+                &Tensor::from_slice([WIDTH], &p.core_bias)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn logits(
+        &mut self,
         state: &[f32; WIDTH],
     ) -> Result<[f32; ACTIONS], Box<dyn Error>> {
-        let values = self.models.router.bind([
-            ("dictionary_state", Tensor::from_slice([1, WIDTH], dict)?),
-            ("state", Tensor::from_slice([1, WIDTH], state)?),
-            ("weights", Tensor::from_slice([WIDTH, ACTIONS], &p.router)?),
-            ("bias", Tensor::from_slice([ACTIONS], &p.router_bias)?),
-        ])?;
-        self.router.update_inputs(&values)?;
-        self.router.replay()?;
+        self.router
+            .set_input("state", &Tensor::from_slice([1, WIDTH], state)?)?;
+        self.router.run()?;
         Ok(self
             .router
-            .read_output()?
+            .output("logits")?
             .values()
             .try_into()
             .map_err(|_| LabError("router shape".into()))?)
@@ -622,30 +667,23 @@ impl Runner {
 
     fn step(
         &mut self,
-        p: &Parameters,
         state: &[f32; WIDTH],
         token: u16,
         action: usize,
     ) -> Result<[f32; WIDTH], Box<dyn Error>> {
-        let (core, turn) = route_parts(action)?;
-        let rotated = rotate(&p.cores[core], turn)?;
-        let values = self.models.core.bind([
-            ("state", Tensor::from_slice([1, WIDTH], state)?),
-            (
-                "token_bits",
-                Tensor::from_slice([1, WIDTH], &Dictionary::bits(token))?,
-            ),
-            (
-                "rotated_weight",
-                Tensor::from_slice([WIDTH, WIDTH], &rotated)?,
-            ),
-            ("bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
-        ])?;
-        self.core.update_inputs(&values)?;
-        self.core.replay()?;
-        let next: [f32; WIDTH] = self
-            .core
-            .read_output()?
+        route_parts(action)?;
+        let execution = self
+            .routes
+            .get_mut(action)
+            .ok_or_else(|| LabError("route execution missing".into()))?;
+        execution.set_input("state", &Tensor::from_slice([1, WIDTH], state)?)?;
+        execution.set_input(
+            "token_bits",
+            &Tensor::from_slice([1, WIDTH], &Dictionary::bits(token))?,
+        )?;
+        execution.run()?;
+        let next: [f32; WIDTH] = execution
+            .output("next_state")?
             .values()
             .try_into()
             .map_err(|_| LabError("core shape".into()))?;
@@ -656,14 +694,18 @@ impl Runner {
     }
 
     fn readout(&mut self, p: &Parameters, state: &[f32; WIDTH]) -> Result<f32, Box<dyn Error>> {
-        let values = self.models.head.bind([
-            ("final_state", Tensor::from_slice([1, WIDTH], state)?),
-            ("weights", Tensor::from_slice([WIDTH, 1], &p.head)?),
-            ("bias", Tensor::from_slice([1], &[p.head_bias])?),
-        ])?;
-        self.head.update_inputs(&values)?;
-        self.head.replay()?;
-        let value = self.head.read_output()?.values()[0];
+        self.head.set_input(
+            "final_state",
+            &Tensor::from_slice([1, WIDTH], state)?,
+        )?;
+        self.head.set_parameter(
+            "weights",
+            &Tensor::from_slice([WIDTH, 1], &p.head)?,
+        )?;
+        self.head
+            .set_parameter("bias", &Tensor::from_slice([1], &[p.head_bias])?)?;
+        self.head.run()?;
+        let value = self.head.output("normalized_result")?.values()[0];
         if !value.is_finite() {
             return Err(Box::new(LabError("nonfinite readout".into())));
         }
@@ -807,13 +849,17 @@ impl Runner {
         }
         let tokens = dictionary.encode(input)?;
         let dict = dictionary.state(&tokens);
+        self.prepare_routes(p)?;
+        if fixed.is_none() {
+            self.prepare_router(p, &dict)?;
+        }
         let mut state = [0f32; WIDTH];
         let mut decisions = Vec::with_capacity(tokens.len());
         for &token in &tokens {
             let probs = if fixed.is_some() {
                 [1.0 / ACTIONS as f32; ACTIONS]
             } else {
-                probabilities(&self.logits(p, &dict, &state)?)
+                probabilities(&self.logits(&state)?)
             };
             let action = fixed.unwrap_or_else(|| choose(&probs, rng, sample_routes));
             let features = std::array::from_fn(|i| dict[i] + state[i]);
@@ -822,7 +868,7 @@ impl Runner {
                 probs,
                 features,
             });
-            state = self.step(p, &state, token, action)?;
+            state = self.step(&state, token, action)?;
         }
         let normalized = self.readout(p, &state)?;
         Ok(Trace {
@@ -845,9 +891,10 @@ impl Runner {
         if tokens.len() != decisions.len() {
             return Err(Box::new(LabError("bad route trace".into())));
         }
+        self.prepare_routes(p)?;
         let mut state = [0f32; WIDTH];
         for (&token, decision) in tokens.iter().zip(decisions) {
-            state = self.step(p, &state, token, decision.action)?;
+            state = self.step(&state, token, decision.action)?;
         }
         self.readout(p, &state)
     }
@@ -1247,6 +1294,14 @@ mod tests {
             assert_eq!(route_parts(action).unwrap(), (action / 4, action % 4));
         }
         assert!(route_parts(8).is_err());
+        for action in 0..ACTIONS {
+            let model = routed_core_model(action).unwrap();
+            let ir = model.graph().canonical_ir();
+            assert!(!ir.contains("rotated_weight"));
+            if action % TURNS != 0 {
+                assert!(ir.contains("reverse_axis:"));
+            }
+        }
         assert_eq!(argmax_first(&[f32::NAN, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), 1);
         assert_eq!(argmax_first(&[f32::NAN; ACTIONS]), 0);
 
