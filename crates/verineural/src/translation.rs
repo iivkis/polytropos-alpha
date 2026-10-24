@@ -13,6 +13,12 @@ use crate::gpu::audit_fp32_ptx;
 pub enum TranslationKind {
     Add,
     Mul,
+    /// IEEE binary32 subtraction with explicit round-to-nearest-even.
+    Sub,
+    /// IEEE binary32 division, round-to-nearest-even.
+    DivRne,
+    /// Explicit experimental ex2.approx-based natural exponential.
+    ExpApprox,
     BiasAdd { columns: usize },
     MatMul { inner: usize, columns: usize },
     Transpose2D { rows: usize, columns: usize },
@@ -36,6 +42,9 @@ impl TranslationKind {
         match self {
             Self::Add => "add",
             Self::Mul => "mul",
+            Self::Sub => "sub_rn",
+            Self::DivRne => "div_rn",
+            Self::ExpApprox => "exp_approx",
             Self::BiasAdd { .. } => "bias_add",
             Self::MatMul { .. } => "matmul",
             Self::Transpose2D { .. } => "transpose2d",
@@ -59,6 +68,8 @@ impl TranslationKind {
         match self {
             Self::Add | Self::BiasAdd { .. } => (1, 0, 0),
             Self::Mul => (0, 1, 0),
+            Self::Sub | Self::DivRne => (0, 0, 0),
+            Self::ExpApprox => (0, 1, 0),
             Self::MatMul { .. } => (1, 1, 0),
             Self::Transpose2D { .. }
             | Self::ReverseRows2D { .. }
@@ -79,6 +90,7 @@ impl TranslationKind {
     fn expected_inputs(self) -> usize {
         match self {
             Self::Relu
+            | Self::ExpApprox
             | Self::Transpose2D { .. }
             | Self::ReverseRows2D { .. }
             | Self::ReverseColumns2D { .. }
@@ -123,6 +135,9 @@ impl TranslationKind {
         let kind = match name {
             "add" => Self::Add,
             "mul" => Self::Mul,
+            "sub_rn" => Self::Sub,
+            "div_rn" => Self::DivRne,
+            "exp_approx" => Self::ExpApprox,
             "bias_add" => Self::BiasAdd { columns },
             "matmul" => Self::MatMul { inner, columns },
             "transpose2d" => Self::Transpose2D {
@@ -336,6 +351,9 @@ impl TranslationPlan {
                 kernel.kind,
                 TranslationKind::Add
                     | TranslationKind::Mul
+                    | TranslationKind::Sub
+                    | TranslationKind::DivRne
+                    | TranslationKind::ExpApprox
                     | TranslationKind::Relu
                     | TranslationKind::AddRelu
                     | TranslationKind::MulRelu
@@ -598,6 +616,64 @@ impl TranslationPlan {
                 ));
                 continue;
             }
+            // A deliberately narrow DSL lowering. IEEE sub/div are RNE; exp
+            // is opt-in approximate and never presented as strict FP32.
+            if matches!(
+                kernel.kind,
+                TranslationKind::Sub | TranslationKind::DivRne | TranslationKind::ExpApprox
+            ) {
+                let (instruction, bound_result, expected_asm) = match kernel.kind {
+                    TranslationKind::Sub => (
+                        "sub.rn.f32",
+                        "%value = call float asm sideeffect \"sub.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)",
+                        1,
+                    ),
+                    TranslationKind::DivRne => (
+                        "div.rn.f32",
+                        "%value = call float asm sideeffect \"div.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)",
+                        1,
+                    ),
+                    TranslationKind::ExpApprox => (
+                        "ex2.approx.f32",
+                        "%value = call float asm sideeffect \"ex2.approx.f32 $0, $1;\", \"=f,f\"(float %scaled)",
+                        2,
+                    ),
+                    _ => unreachable!(),
+                };
+                let fp32_scales = usize::from(matches!(kernel.kind, TranslationKind::ExpApprox));
+                let correct_operands = if matches!(kernel.kind, TranslationKind::ExpApprox) {
+                    ir.contains("%scaled = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float 1.442695e+00)")
+                        && !ir.contains("%bp = getelementptr")
+                } else {
+                    ir.contains("%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx")
+                        && ir.contains("%y = load float, ptr addrspace(1) %bp")
+                };
+                if !ir.contains(bound_result)
+                    || !ir.contains(instruction)
+                    || !correct_operands
+                    || !ir.contains("icmp ult i32 %idx, %length")
+                    || !ir.contains("br i1 %valid, label %compute, label %done")
+                    || !ir.contains("%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx")
+                    || !ir.contains("store float %value, ptr addrspace(1) %op, align 4")
+                    || ir.matches("call float asm sideeffect").count() != expected_asm
+                    || ir.matches("fcmp ").count() != 0
+                {
+                    return Err(invalid(format!(
+                        "pointwise LLVM operands or FP32 policy changed at node {node}"
+                    )));
+                }
+                audit_fp32_ptx(ir, asm)
+                    .map_err(|err| invalid(format!("PTX node {node}: {err}")))?;
+                report.rounded_muls += fp32_scales;
+                report.details.push_str(&format!(
+                    "node={node} kind={} reads={:?} writes={} numeric={} translation=template-checked hardware=trusted\n",
+                    kernel.kind.name(), kernel.reads, kernel.writes,
+                    if matches!(kernel.kind, TranslationKind::ExpApprox) {
+                        "approx-ex2-not-certified"
+                    } else { "RNE-instruction-not-proven" }
+                ));
+                continue;
+            }
             let actual_add = ir.matches("call float asm sideeffect \"add.rn.f32").count();
             let actual_mul = ir.matches("call float asm sideeffect \"mul.rn.f32").count();
             let actual_relu = ir.matches("fcmp uno float").count();
@@ -723,7 +799,10 @@ impl TranslationPlan {
                 TranslationKind::Relu => {
                     Some("%value = select i1 %keep, float %x, float 0.000000e+00")
                 }
-                TranslationKind::MatMul { .. }
+                TranslationKind::Sub
+                | TranslationKind::DivRne
+                | TranslationKind::ExpApprox
+                | TranslationKind::MatMul { .. }
                 | TranslationKind::Transpose2D { .. }
                 | TranslationKind::ReverseRows2D { .. }
                 | TranslationKind::ReverseColumns2D { .. }

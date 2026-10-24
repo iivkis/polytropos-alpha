@@ -431,6 +431,7 @@ tasks:
     deps: [prepare]
     cmds:
       - cargo test -p verineural --test structural_last_row
+      - cargo test -p verineural --test pointwise_gpu
       - cargo test -p torus16-mix-lab
 
   verify-gpu-structural-last-row:
@@ -439,8 +440,20 @@ tasks:
     cmds:
       - cargo test -p verineural --test structural_last_row -- --ignored --nocapture
 
+  lab-torus16-mix-gpu:
+    desc: Run all eight Torus16-Mix roles in one CUDA Graph with explicit approximate exp and compare Tensor oracle
+    deps: [prepare]
+    cmds:
+      - cargo run -p torus16-mix-lab --example torus16_mix -- --gpu
+
+  verify-gpu-torus16-mix:
+    desc: NVIDIA GPU acceptance for Torus16-Mix full multi-output forward (no PyTorch)
+    deps: [prepare]
+    cmds:
+      - cargo test -p torus16-mix-lab --test gpu_forward -- --ignored --nocapture
+
   certify-lab-torus16-mix:
-    desc: Fail closed on unsupported Torus16-Mix Exp/Div/Broadcast/Slice backend operations
+    desc: Fail closed on unsupported certified numerical semantics of pointwise Exp/Div
     deps: [prepare]
     cmds:
       - cargo run -p torus16-mix-lab --example torus16_mix -- --certify

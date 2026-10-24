@@ -225,3 +225,33 @@ validator проверяет LLVM-шаблоны и PTX FP32 policy; генер�
 нужны отдельная численная спецификация и проверенный lowering, не
 скрытое approx-замещение. Никакие крупные нейросетевые блоки в библиотеку
 не добавлены.
+
+### Torus16-Mix: полный executable operator forward, экспериментальная numeric-область (2026-10-25)
+
+Потребитель labs/torus16-mix-0.1.0 описывает единый 8-output операторный
+граф с одной shared W и входным gated mixing до каждого MatMul.
+Восемь выходов можно запускать в одном CUDA Graph через именованный
+ModelExecution. Никаких предметных Torus/EMA/LLM-компонентов в ядре
+VeriNeural нет.
+
+Новые универсальные GPU-paths: pointwise subtraction (sub.rn.f32),
+division (div.rn.f32), natural exponential via explicit experimental
+opt-in GpuLaunchConfig::with_approximate_exp() (mul.rn.f32 x log2(e),
+ex2.approx.f32). Доступны только версии AST Sub/Div/Exp с проверкой
+канонического выражения и имени. Чужой PointwiseSpec, включая
+совпадающее имя с изменённой математикой, отвергается.
+LLVM/PTX translation validation проверяет регистры, инструкции,
+rounding-режимы и численную метку ExpApprox, но не доказывает IEEE-754
+error bound или PTX/SASS. Strict-сборка и certified-build по-прежнему
+отклоняют Exp. Здесь нет молчаливого approximate fallback.
+
+Приёмка: task test-lab-torus16-mix; task lab-torus16-mix-gpu;
+task verify-gpu-torus16-mix. Аппаратный тест с ненулевым mix_gate
+и нессиметричной W проверяет восемь выходов против независимого
+Tensor reference. Авторские Cargo/Lean/CUDA проверки не запускались,
+пользователь должен подтвердить результаты в локальном devShell.
+
+Вне реализации: полная 4-layer EMA4-LM с Conv9/LayerNorm/SwiGLU,
+recurrent state, backprop/AdamW, BPC и GPU memory benchmarks. Нельзя
+выдавать готовность operator forward за воспроизведение обученного
+результата 24 908-параметрической сети.

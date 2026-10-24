@@ -42,6 +42,7 @@ impl ReluFusion {
 pub struct GpuLaunchConfig {
     threads_per_block: u32,
     relu_fusion: ReluFusion,
+    approximate_exp: bool,
 }
 
 impl GpuLaunchConfig {
@@ -53,6 +54,7 @@ impl GpuLaunchConfig {
         Ok(Self {
             threads_per_block,
             relu_fusion,
+            approximate_exp: false,
         })
     }
 
@@ -63,6 +65,17 @@ impl GpuLaunchConfig {
     pub const fn relu_fusion(self) -> ReluFusion {
         self.relu_fusion
     }
+
+    /// Explicit opt-in to ex2.approx.f32 for Exp in executable GPU graphs.
+    /// This is NOT the strict FP32 or certified numerical profile.
+    pub const fn with_approximate_exp(mut self) -> Self {
+        self.approximate_exp = true;
+        self
+    }
+
+    pub const fn approximate_exp(self) -> bool {
+        self.approximate_exp
+    }
 }
 
 impl Default for GpuLaunchConfig {
@@ -70,6 +83,7 @@ impl Default for GpuLaunchConfig {
         Self {
             threads_per_block: 256,
             relu_fusion: ReluFusion::Disabled,
+            approximate_exp: false,
         }
     }
 }
@@ -384,6 +398,13 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
     const MUL_ASM: &str = "call float asm sideeffect \"mul.rn.f32";
     let expected_adds = llvm_ir.matches(ADD_ASM).count();
     let expected_muls = llvm_ir.matches(MUL_ASM).count();
+    // Explicitly authored inline PTX, not arbitrary machine substitutions.
+    let expected_subs = llvm_ir.matches("call float asm sideeffect \"sub.rn.f32").count();
+    let expected_divs = llvm_ir.matches("call float asm sideeffect \"div.rn.f32").count();
+    let expected_exp2s = llvm_ir.matches("call float asm sideeffect \"ex2.approx.f32").count();
+    let mut rounded_subs = 0usize;
+    let mut rounded_divs = 0usize;
+    let mut approximate_exp2s = 0usize;
     let mut rounded_adds = 0usize;
     let mut rounded_muls = 0usize;
     let mut block_comment = false;
@@ -421,7 +442,7 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
             continue;
         }
         if opcode.contains(".ftz.")
-            || opcode.contains(".approx.")
+            || (opcode.contains(".approx.") && opcode != "ex2.approx.f32")
             || opcode.starts_with("fma.")
             || opcode.starts_with("mad.")
         {
@@ -430,6 +451,9 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
         match opcode {
             "add.rn.f32" => rounded_adds += 1,
             "mul.rn.f32" => rounded_muls += 1,
+            "sub.rn.f32" => rounded_subs += 1,
+            "div.rn.f32" => rounded_divs += 1,
+            "ex2.approx.f32" => approximate_exp2s += 1,
             _ if opcode.starts_with("setp.")
                 || opcode.starts_with("selp.")
                 || opcode.starts_with("mov.")
@@ -437,6 +461,13 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
                 || opcode.starts_with("st.") => {}
             _ => return Err(rejected(format!("unapproved PTX FP32 opcode: {opcode}"))),
         }
+    }
+    if rounded_subs != expected_subs || rounded_divs != expected_divs
+        || approximate_exp2s != expected_exp2s
+    {
+        return Err(rejected(format!(
+            "pointwise arithmetic count mismatch: LLVM sub/div/ex2={expected_subs}/{expected_divs}/{expected_exp2s}; PTX={rounded_subs}/{rounded_divs}/{approximate_exp2s}"
+        )));
     }
     if rounded_adds != expected_adds || rounded_muls != expected_muls {
         return Err(rejected(format!(
@@ -447,6 +478,23 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
         rounded_adds,
         rounded_muls,
     })
+}
+
+/// An intentionally bounded executable subset of the versioned pointwise DSL.
+/// Signature and expression must both match: arbitrary custom ASTs fail closed.
+/// No architecture-specific primitive enters the compiler.
+fn supported_pointwise(spec: &crate::PointwiseSpec) -> Option<TranslationKind> {
+    match (
+        spec.id(),
+        spec.version(),
+        spec.arity(),
+        spec.expression().canonical().as_str(),
+    ) {
+        ("verineural.sub", "1", 2, "sub(arg:0,arg:1)") => Some(TranslationKind::Sub),
+        ("verineural.div", "1", 2, "div(arg:0,arg:1)") => Some(TranslationKind::DivRne),
+        ("verineural.exp", "1", 1, "exp(arg:0)") => Some(TranslationKind::ExpApprox),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -872,6 +920,12 @@ impl GpuProgram {
                 match node.operation {
                     Operation::Add => TranslationKind::Add,
                     Operation::Mul => TranslationKind::Mul,
+                    Operation::Pointwise(ref spec) => supported_pointwise(spec).ok_or(
+                        GpuError::UnsupportedOperation {
+                            node: contract.kernel_node,
+                            operation: node.operation.name(),
+                        },
+                    )?,
                     Operation::BiasAdd => {
                         let columns = match contract.pattern {
                             GpuMemoryPattern::BiasAdd { columns } => columns,
@@ -1847,11 +1901,22 @@ impl GpuEngine {
                     | Operation::ArgMax { .. }
                     | Operation::Take { .. }
                     | Operation::Reshape(_)
+                    | Operation::Pointwise(_)
             ) {
                 return Err(GpuError::UnsupportedOperation {
                     node: id.index(),
                     operation: node.operation.name(),
                 });
+            }
+            if let Operation::Pointwise(ref spec) = node.operation {
+                let kind = supported_pointwise(spec);
+                if kind.is_none() || (matches!(kind, Some(TranslationKind::ExpApprox))
+                    && !self.launch.approximate_exp())
+                {
+                    return Err(GpuError::UnsupportedOperation {
+                        node: id.index(), operation: node.operation.name(),
+                    });
+                }
             }
             pending.extend(node.inputs.iter().copied());
         }
@@ -2148,7 +2213,8 @@ impl GpuEngine {
                     | Operation::SliceAxis { .. }
                     | Operation::BroadcastTo(_)
                     | Operation::ArgMax { .. }
-                    | Operation::Take { .. },
+                    | Operation::Take { .. }
+                    | Operation::Pointwise(_),
                     NodeStorage::OwnedContiguous { .. },
                 ) => {
                     let ptr = session.allocate(node.shape.element_count())?;
@@ -2352,6 +2418,23 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
                %y = load float, ptr addrspace(1) %bp, align 4\n\
                %value = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n",
         ),
+        Operation::Pointwise(spec) => match supported_pointwise(spec) {
+            Some(TranslationKind::Sub) => String::from(
+                "  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx\n\
+                   %y = load float, ptr addrspace(1) %bp, align 4\n\
+                   %value = call float asm sideeffect \"sub.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n",
+            ),
+            Some(TranslationKind::DivRne) => String::from(
+                "  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx\n\
+                   %y = load float, ptr addrspace(1) %bp, align 4\n\
+                   %value = call float asm sideeffect \"div.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n",
+            ),
+            Some(TranslationKind::ExpApprox) => String::from(
+                "  %scaled = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float 1.442695e+00)\n\
+                   %value = call float asm sideeffect \"ex2.approx.f32 $0, $1;\", \"=f,f\"(float %scaled)\n",
+            ),
+            _ => unreachable!("pointwise signatures were validated before codegen"),
+        },
         Operation::BiasAdd => format!(
             "  %col = urem i32 %idx, {columns}\n\
                %bp = getelementptr float, ptr addrspace(1) %b, i32 %col\n\
