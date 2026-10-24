@@ -561,7 +561,9 @@ theorem approx_contract_positive_mask_select_positive
   rcases herr with ⟨_hlower, hupper⟩
   have hactual : 0 < conditionActual := by omega
   have hideal : 0 < conditionIdeal := by omega
-  simpa [hactual, hideal] using hyes
+  have hzeroOne : (0 : Int) < 1 := by decide
+  rw [if_pos hideal, if_pos hzeroOne, if_pos hactual, if_pos hzeroOne]
+  exact hyes
 
 theorem approx_contract_positive_mask_select_nonpositive
     {conditionBound conditionEpsilon conditionIdeal conditionActual
@@ -578,7 +580,10 @@ theorem approx_contract_positive_mask_select_nonpositive
   rcases herr with ⟨hlower, _hupper⟩
   have hactual : conditionActual ≤ 0 := by omega
   have hideal : conditionIdeal ≤ 0 := by omega
-  simp [Int.not_lt.mpr hactual, Int.not_lt.mpr hideal]
+  have hactualNot : ¬ 0 < conditionActual := Int.not_lt.mpr hactual
+  have hidealNot : ¬ 0 < conditionIdeal := Int.not_lt.mpr hideal
+  have hzeroZero : ¬ (0 : Int) < 0 := by decide
+  rw [if_neg hidealNot, if_neg hzeroZero, if_neg hactualNot, if_neg hzeroZero]
   exact hno
 
 end VeriNeural
