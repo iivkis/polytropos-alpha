@@ -210,7 +210,10 @@ impl PointwiseExpr {
     /// The caller provides graph-specific, validated tensor references.
     pub(crate) fn lean(&self, input: &impl Fn(usize) -> String) -> String {
         match self {
-            Self::Input(port) => input(*port),
+            // A substituted graph term may itself be an application with
+            // named arguments (for example matmul). Keep it atomic when
+            // an enclosing pointwise operator consumes it.
+            Self::Input(port) => format!("({})", input(*port)),
             Self::Add(a, b) => {
                 format!("(VeriNeural.add {} {})", a.lean(input), b.lean(input))
             }
@@ -332,5 +335,32 @@ impl PointwiseSpec {
             })
             .collect::<Vec<_>>();
         crate::Tensor::new(output_shape, values)
+    }
+}
+
+#[cfg(test)]
+mod lean_term_tests {
+    use super::PointwiseExpr;
+
+    #[test]
+    fn substituted_matmul_application_is_one_lean_argument() {
+        let matmul = "VeriNeural.matmul (m := 2) (k := 2) (n := 2) p_0 p_1";
+        let input = |_port| matmul.to_owned();
+        let relu = PointwiseExpr::input(0).relu();
+        assert_eq!(
+            relu.lean(&input),
+            format!("(VeriNeural.relu ({matmul}))")
+        );
+        assert_eq!(
+            relu.nonnegative_lean(&input),
+            Some(format!("VeriNeural.relu_nonnegative ({matmul})"))
+        );
+
+        // Parenthesization must hold for multiple substituted operands too.
+        let sum = PointwiseExpr::input(0).add(PointwiseExpr::input(1));
+        assert_eq!(
+            sum.lean(&input),
+            format!("(VeriNeural.add ({matmul}) ({matmul}))")
+        );
     }
 }
