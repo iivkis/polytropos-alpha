@@ -1566,6 +1566,9 @@ impl GpuExecution {
                 "CUDA event benchmark returned an invalid duration".into(),
             ));
         }
+        // benchmark_graph synchronizes the stop event, so the final measured
+        // replay has completed and its output buffers are safe to read.
+        self.execution_health.outputs_completed();
         Ok(GpuBenchmark {
             warmup_launches,
             measured_launches,
@@ -2475,6 +2478,24 @@ mod execution_health_tests {
             node: 0,
             reason: "shape mismatch",
         };
+        assert!(health.ensure_outputs_ready().is_ok());
+    }
+
+    #[test]
+    fn successful_synchronized_benchmark_restores_output_readiness() {
+        let health = ExecutionHealth::default();
+        health.outputs_completed();
+        assert!(health.ensure_outputs_ready().is_ok());
+
+        // GpuExecution::benchmark starts a new replay epoch.
+        health.invalidate_outputs();
+        assert!(matches!(
+            health.ensure_outputs_ready(),
+            Err(GpuError::OutputNotReady)
+        ));
+
+        // A successful benchmark_graph return means its stop event completed.
+        health.outputs_completed();
         assert!(health.ensure_outputs_ready().is_ok());
     }
 
