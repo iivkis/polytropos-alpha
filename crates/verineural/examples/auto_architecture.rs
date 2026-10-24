@@ -80,13 +80,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let right = graph.apply_module(&activated, &[parameter])?;
     let output = graph.apply_module(&merge, &[left, right])?;
 
-    let tasks = vec![ArchitectureProofTask::Goal(ProofGoal {
-        name: "merged_nonnegative".to_owned(),
-        output,
-        kind: ProofGoalKind::Nonnegative {
-            assumptions: Vec::new(),
-        },
-    })];
+    let tasks = vec![
+        ArchitectureProofTask::Goal(ProofGoal {
+            name: "merged_nonnegative".to_owned(),
+            output,
+            kind: ProofGoalKind::Nonnegative {
+                assumptions: Vec::new(),
+            },
+        }),
+        ArchitectureProofTask::Goal(ProofGoal {
+            name: "left_nonnegative".to_owned(),
+            output: left,
+            kind: ProofGoalKind::Nonnegative {
+                assumptions: Vec::new(),
+            },
+        }),
+    ];
     let compiler = ArchitectureAutoCompiler::default();
     let root = Path::new("target/verineural/auto-architecture");
     let outputs = [left, right, output];

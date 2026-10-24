@@ -1,6 +1,6 @@
 # P0/P1 implementation status (dev)
 
-This file records the scope of this implementation, not a claim that VN-P01–VN-P12 are complete.
+This file records the supported scope of the implementation. VN-P01–VN-P06 now have a complete P0 acceptance path in that explicitly bounded scope; VN-P07–VN-P12 remain P1 work. "Complete" does not mean arbitrary Lean/Rust predicates, arbitrary atomic math, IEEE-754 machine proof or signed provenance.
 
 Implemented API slices:
 - **P01/P03**: `MathContract::with_claim` declares independent ideal-Int `Nonnegative` and `EqualsInput` goals. Lean emits distinct theorems. An unsupported nonnegative proof fails closed; an invalid equality has an independently stated theorem that Lean must reject. `node_*_semantics` remains only definitional equality.
@@ -22,8 +22,16 @@ Implemented API slices:
 - **P10**: `ParametricSignature` and consumer `ParametricModule` provide symbolic input/output axes with repeated-symbol unification, fixed axes, positive bounds, upper bounds and divisibility constraints. `apply_parametric_module` specializes them into checked concrete binary32 row-major `MathContract` / `NeuralModule` instances, preserving rollback, claim obligations, and the existing Lean/GPU compilation path. The `task symbolic-shapes` consumer example instantiates one versioned MatMul at two sizes and checks ideal-Int Lean claims plus LLVM NVPTX lowering. This is static specialization only; no runtime-dynamic dimensions, arbitrary dtype, views, strides, new atomic tensor ops or SASS-level proof.
 - **P09**: `scan_fixed` builds atomic consumer-defined state/input → next_state/output transitions. `generate_fixed_scan_nonnegative` checks the actual ordered multi-module bindings, requires a consumer-owned `Nonnegative` claim for each next-state, proves the initial state under explicit source assumptions, and generates a separate global Lean theorem that *all* states from t=0 through the concrete horizon are nonnegative. The `task proof-scan-invariant` consumer example asks Lean to verify the local/global theorems and audits axioms. This does not prove arbitrary-horizon induction, IEEE binary32 finiteness, or machine execution.
 
-Open requirements:
-- **Automation**: generic mathematical predicate DSL and automatically discharged proof rules for every semantic primitive, automatic shared CUDA Graph runtime execution from the auto-compiler, certified runtime execution, signed/pinned provenance and machine-level ISA correspondence. Auto-build now includes SHA-256 integrity plus source-aware replay, but neither proves FP32/NVIDIA machine behavior nor authenticates the publisher. Structural connectivity and local/global Lean properties are distinct claims.
+P0 acceptance gate:
+- **VN-P01/P03**: the typed `Predicate` DSL provides independent relational obligations; true and deliberately false contracts are kernel-checked separately, and canonical semantics/version changes alter fingerprints.
+- **VN-P02**: an external consumer-defined `PointwiseSpec` creates an atomic versioned semantic operation without editing VeriNeural; host and Lean semantics derive from the same AST, while unsupported GPU/numeric lowering fails closed.
+- **VN-P04**: module ownership/capture/port checks and transactional rollback reject hidden dependencies and foreign outputs before commit.
+- **VN-P05**: the fork/fan-in auto-architecture now carries multiple independent global goals; unsupported/false component obligations block planning/publication instead of inheriting another goal's status.
+- **VN-P06**: the certified Model path records theorem identities, Lean version, transitive axiom dependencies, semantic/identity fingerprints and SHA-256 evidence; replay rejects tampering and forbidden proof dependencies.
+- Developer-run aggregate: `task p0-acceptance`. It intentionally invokes the real Lean/LLVM/Graphviz tools and is not run automatically by agents.
+
+Open P1+ requirements:
+- **Automation**: broader automatically discharged proof rules, automatic shared CUDA Graph runtime execution from the auto-compiler, certified runtime execution, signed provenance and machine-level ISA correspondence. Auto-build includes SHA-256 integrity plus source-aware replay, but neither proves FP32/NVIDIA machine behavior nor authenticates the publisher. Structural connectivity and local/global Lean properties are distinct claims.
 - **P02/P08/P10**: general comparisons, reductions, indexing, scatter/gather, broadcast, arbitrary new atomic semantics, generic dtypes, symbolic shape arithmetic beyond static named-axis binding, dynamic shapes, views/strides/aliasing, and LLVM/PTX lowering with machine/FP32 guarantees for new conditional operators. The supported ideal-Int mask/select proof is a narrow vertical slice, not comprehensive P08.
 - **P05/P07/P09**: general user predicate DSL, independently cached module-definition proofs and reusable theorem dependencies, full state/control IR and arbitrary-horizon inductive invariants. The new bounded ideal-Int invariant applies only to the concretely unrolled scan and its source hypotheses.
 - **P06**: transitive axiom audit integration into every certified artifact, pinned executable/library provenance and reproducible audit evidence.

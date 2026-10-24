@@ -263,6 +263,19 @@ tasks:
     cmds:
       - cargo test -p verineural --test pointwise_primitive -- --ignored
 
+  p0-acceptance:
+    desc: Verify VN-P01..P06 supported-scope contracts, external primitive, composition and certified Lean trust boundary
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test relational_predicates
+      - cargo test -p verineural --test pointwise_primitive
+      - cargo test -p verineural --test auto_build
+      - cargo test -p verineural --test relational_predicates -- --ignored
+      - cargo test -p verineural --test pointwise_primitive -- --ignored
+      - cargo run -p verineural --example auto_architecture
+      - cargo run -p verineural --example auto_architecture -- --verify
+      - cargo test -p verineural --test certified_build -- --ignored
+
   verify-tensor-reductions:
     desc: Lean-check axis-sum ideal semantics, nonnegative fold, and consumer contracts
     deps: [prepare]
@@ -282,7 +295,7 @@ tasks:
       - cargo test -p verineural-consumer-acceptance --all-targets -- --ignored
 
   lab-rotating:
-    desc: Inspect and train rotating-matrices; structural/index GPU certification remains fail-closed
+    desc: Inspect and train rotating-matrices; deterministic routing uses the unified structural/index CUDA Graph
     deps: [prepare]
     cmds:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --inspect
@@ -307,7 +320,7 @@ tasks:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --train {{.CLI_ARGS}}
 
   certify-lab-rotating:
-    desc: Attempt certified build; P0 structural/index nodes are expected to fail closed until GPU lowering
+    desc: Build rotating-matrices structural/index evidence with Lean and NVPTX (no GPU launch)
     deps: [prepare]
     cmds:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-architecture
