@@ -45,11 +45,14 @@ impl From<GpuError> for ModelExecutionError {
     }
 }
 
+type StateFeedbackLink = (NodeId, NodeId);
+type ExecutionRootsAndStateLinks = (Vec<NodeId>, Vec<StateFeedbackLink>);
+
 // A pure next_state may ignore its old state; the GPU execution slice still
 // must include that source so the writable feedback destination is allocated.
 fn execution_roots_with_states(
     model: &Model,
-) -> Result<(Vec<NodeId>, Vec<(NodeId, NodeId)>), ModelExecutionError> {
+) -> Result<ExecutionRootsAndStateLinks, ModelExecutionError> {
     let links = model
         .state_links()
         .iter()

@@ -215,7 +215,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// "visible" is public both directly and through a zero-copy reshape.
 fn check_replacement_and_aliased_outputs(gpu: &GpuEngine) -> Result<(), Box<dyn Error>> {
     let mut builder = ModelBuilder::new("state-replacement-and-alias", "1");
-    let hidden = builder.state("hidden", [WIDTH], Domain::Any)?;
+    let _hidden = builder.state("hidden", [WIDTH], Domain::Any)?;
     let visible = builder.state("visible", [WIDTH], Domain::Any)?;
     let token = builder.input("token", [WIDTH], Domain::Finite)?;
     let gain = builder.parameter("gain", [WIDTH], Domain::Finite)?;
