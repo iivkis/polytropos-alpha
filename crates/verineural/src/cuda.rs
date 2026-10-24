@@ -469,11 +469,7 @@ mod platform {
                 // SAFETY: the copy completed on this stream; staging is
                 // pinned and remains owned by staging_pending until release.
                 unsafe {
-                    ptr::copy_nonoverlapping(
-                        pointer.cast::<f32>(),
-                        values.as_mut_ptr(),
-                        elements,
-                    )
+                    ptr::copy_nonoverlapping(pointer.cast::<f32>(), values.as_mut_ptr(), elements)
                 };
                 outputs.push(values);
             }

@@ -1671,13 +1671,12 @@ impl GpuExecution {
         self.preserved_output_valid = false;
         for &(id, value) in inputs {
             self.execution_health.record_io(
-                self.session.copy_to_device(
-                    self.input_addresses[&id.index()],
-                    value.values(),
-                ),
+                self.session
+                    .copy_to_device(self.input_addresses[&id.index()], value.values()),
             )?;
         }
-        self.execution_health.record_io(self.session.flush_input_copies())
+        self.execution_health
+            .record_io(self.session.flush_input_copies())
     }
 
     /// Rebind one named source without uploading unchanged parameters or state.
@@ -2040,9 +2039,7 @@ impl GpuExecution {
         sources
             .into_iter()
             .zip(copied)
-            .map(|((id, shape, _), values)| {
-                Ok((id, Tensor::new(shape, values)?))
-            })
+            .map(|((id, shape, _), values)| Ok((id, Tensor::new(shape, values)?)))
             .collect()
     }
 
