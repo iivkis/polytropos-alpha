@@ -37,9 +37,9 @@
 //! structural validation is distinct from semantic proof or JIT/SASS assurance.
 
 mod architecture;
-mod autodiff;
 mod auto_build;
 mod auto_bundle;
+mod autodiff;
 mod canonical;
 mod certificate;
 mod certified;
@@ -61,14 +61,13 @@ mod symbolic;
 mod tensor;
 mod translation;
 
-pub use autodiff::{DifferentiationError, ReverseGraph, differentiate};
-pub use optimizer::{AdamW, OptimizerError};
 pub use architecture::{ArchitectureMetadata, ArchitectureSnapshot, snapshot_architecture};
 pub use auto_build::{
     ArchitectureAutoCompiler, ArchitectureProofTask, AutoBuildError, AutoBuildPlan,
     AutoBuildReport, ConnectivityEvidence, GpuRequirement, OutputBuildEvidence, PlannedGpu,
     check_architecture_connectivity,
 };
+pub use autodiff::{DifferentiationError, ReverseGraph, differentiate};
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use certified::{CertifiedBuildConfig, certified_example_main};
 pub use consumer::{BindingError, ComponentBinder, ObligationError};
@@ -94,6 +93,7 @@ pub use numeric::{
     RneModuleErrorContract, RneRangePlan, RneSelectEvidence, RneSelectPlan, RneStateRolloutPlan,
     RneStateStepContract, RneThresholdEvidence, RneThresholdSide,
 };
+pub use optimizer::{AdamW, OptimizerError};
 pub use primitive::{PointwiseExpr, PointwiseSpec, PrimitiveExpr, PrimitiveSpec};
 pub use proof::{
     CheckedLean, LeanAxiomAudit, LeanProgram, LeanProofEngine, ProofAssumption, ProofError,

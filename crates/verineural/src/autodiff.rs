@@ -12,7 +12,10 @@ use crate::{DType, Domain, NeuralError, NeuralGraph, NodeId, Operation, Shape, T
 pub enum DifferentiationError {
     Neural(NeuralError),
     Invalid(&'static str),
-    Unsupported { node: usize, operation: &'static str },
+    Unsupported {
+        node: usize,
+        operation: &'static str,
+    },
 }
 
 impl fmt::Display for DifferentiationError {
@@ -20,14 +23,18 @@ impl fmt::Display for DifferentiationError {
         match self {
             Self::Neural(err) => write!(f, "{err}"),
             Self::Invalid(s) => write!(f, "invalid derivative request: {s}"),
-            Self::Unsupported { node, operation } =>
-                write!(f, "reverse-mode node {node}: unsupported derivative for {operation}"),
+            Self::Unsupported { node, operation } => write!(
+                f,
+                "reverse-mode node {node}: unsupported derivative for {operation}"
+            ),
         }
     }
 }
 impl Error for DifferentiationError {}
 impl From<NeuralError> for DifferentiationError {
-    fn from(err: NeuralError) -> Self { Self::Neural(err) }
+    fn from(err: NeuralError) -> Self {
+        Self::Neural(err)
+    }
 }
 
 /// Differentiable graph contains the *primal* as an unchanged prefix.
@@ -43,13 +50,26 @@ pub struct ReverseGraph {
 }
 
 impl ReverseGraph {
-    pub fn graph(&self) -> &NeuralGraph { &self.graph }
-    pub fn root(&self) -> NodeId { self.root }
-    pub fn seed(&self) -> NodeId { self.seed }
-    pub fn gradients(&self) -> &[(NodeId, NodeId)] { &self.gradients }
-    pub fn constants(&self) -> &[(NodeId, Tensor<f32>)] { &self.constants }
+    pub fn graph(&self) -> &NeuralGraph {
+        &self.graph
+    }
+    pub fn root(&self) -> NodeId {
+        self.root
+    }
+    pub fn seed(&self) -> NodeId {
+        self.seed
+    }
+    pub fn gradients(&self) -> &[(NodeId, NodeId)] {
+        &self.gradients
+    }
+    pub fn constants(&self) -> &[(NodeId, Tensor<f32>)] {
+        &self.constants
+    }
     pub fn gradient_of(&self, node: NodeId) -> Option<NodeId> {
-        self.gradients.iter().find(|(source, _)| *source == node).map(|(_, grad)| *grad)
+        self.gradients
+            .iter()
+            .find(|(source, _)| *source == node)
+            .map(|(_, grad)| *grad)
     }
 
     /// Add seed and internally generated zero/one tensors to primal bindings.
@@ -60,7 +80,9 @@ impl ReverseGraph {
         seed: Tensor<f32>,
     ) -> Result<Vec<(NodeId, Tensor<f32>)>, DifferentiationError> {
         if seed.shape() != &self.graph.node(self.root)?.shape {
-            return Err(DifferentiationError::Invalid("seed shape differs from differentiated output"));
+            return Err(DifferentiationError::Invalid(
+                "seed shape differs from differentiated output",
+            ));
         }
         if seed.values().iter().any(|v| !v.is_finite()) {
             return Err(DifferentiationError::Invalid("seed must be finite"));
@@ -81,7 +103,9 @@ struct ReverseBuilder {
 impl ReverseBuilder {
     fn fill(&mut self, shape: &Shape, value: f32) -> Result<NodeId, DifferentiationError> {
         let key = (shape.dims().to_vec(), value.to_bits());
-        if let Some(id) = self.fills.get(&key) { return Ok(*id); }
+        if let Some(id) = self.fills.get(&key) {
+            return Ok(*id);
+        }
         let tensor = Tensor::from_vec(key.0.clone(), vec![value; shape.element_count()])?;
         let id = self.graph.input(shape.clone(), Domain::Finite);
         self.constants.push((id, tensor));
@@ -97,17 +121,24 @@ impl ReverseBuilder {
 
     fn reduce_scalar(&mut self, grad: NodeId) -> Result<NodeId, DifferentiationError> {
         let shape = self.graph.node(grad)?.shape.clone();
-        if shape.dims() == [1, 1] { return Ok(grad); }
+        if shape.dims() == [1, 1] {
+            return Ok(grad);
+        }
         if shape.rank() != 2 || shape.dims()[0] != 1 {
-            return Err(DifferentiationError::Invalid("scalar broadcast adjoint supports one row"));
+            return Err(DifferentiationError::Invalid(
+                "scalar broadcast adjoint supports one row",
+            ));
         }
         let ones = self.fill(&Shape::new(vec![shape.dims()[1], 1])?, 1.)?;
         Ok(self.graph.matmul(grad, ones)?)
     }
 
-    fn scatter_slice(&mut self, grad: NodeId, start: usize, source_width: usize)
-        -> Result<NodeId, DifferentiationError>
-    {
+    fn scatter_slice(
+        &mut self,
+        grad: NodeId,
+        start: usize,
+        source_width: usize,
+    ) -> Result<NodeId, DifferentiationError> {
         let written = self.graph.node(grad)?.shape.element_count();
         let mut parts = Vec::new();
         if start != 0 {
@@ -122,8 +153,15 @@ impl ReverseBuilder {
 }
 
 fn pointwise_kind(operation: &Operation) -> Option<&'static str> {
-    let Operation::Pointwise(spec) = operation else { return None };
-    match (spec.id(), spec.version(), spec.arity(), spec.expression().canonical().as_str()) {
+    let Operation::Pointwise(spec) = operation else {
+        return None;
+    };
+    match (
+        spec.id(),
+        spec.version(),
+        spec.arity(),
+        spec.expression().canonical().as_str(),
+    ) {
         ("verineural.sub", "1", 2, "sub(arg:0,arg:1)") => Some("sub"),
         ("verineural.div", "1", 2, "div(arg:0,arg:1)") => Some("div"),
         ("verineural.exp", "1", 1, "exp(arg:0)") => Some("exp"),
@@ -134,17 +172,24 @@ fn pointwise_kind(operation: &Operation) -> Option<&'static str> {
 
 fn supported(operation: &Operation, shape: &Shape, inputs: &[Shape]) -> bool {
     match operation {
-        Operation::Input | Operation::Add | Operation::Mul | Operation::MatMul |
-        Operation::BiasAdd | Operation::Reshape(_) => true,
+        Operation::Input
+        | Operation::Add
+        | Operation::Mul
+        | Operation::MatMul
+        | Operation::BiasAdd
+        | Operation::Reshape(_) => true,
         Operation::Permute { axes } => axes.as_slice() == [1, 0] && shape.rank() == 2,
         Operation::ReverseAxis { axis } => shape.rank() == 2 && *axis < 2,
-        Operation::SliceAxis { axis: 1, .. } =>
-            shape.rank() == 2 && shape.dims()[0] == 1 && inputs[0].dims()[0] == 1,
-        Operation::Concat { axis: 1 } =>
-            shape.rank() == 2 && shape.dims()[0] == 1 && inputs.iter().all(|s| s.dims()[0] == 1),
-        Operation::BroadcastTo(_) =>
-            inputs[0] == *shape ||
-            (inputs[0].dims() == [1, 1] && shape.rank() == 2 && shape.dims()[0] == 1),
+        Operation::SliceAxis { axis: 1, .. } => {
+            shape.rank() == 2 && shape.dims()[0] == 1 && inputs[0].dims()[0] == 1
+        }
+        Operation::Concat { axis: 1 } => {
+            shape.rank() == 2 && shape.dims()[0] == 1 && inputs.iter().all(|s| s.dims()[0] == 1)
+        }
+        Operation::BroadcastTo(_) => {
+            inputs[0] == *shape
+                || (inputs[0].dims() == [1, 1] && shape.rank() == 2 && shape.dims()[0] == 1)
+        }
         Operation::Pointwise(_) => pointwise_kind(operation).is_some(),
         _ => false,
     }
@@ -160,26 +205,43 @@ pub fn differentiate(
     wrt: &[NodeId],
 ) -> Result<ReverseGraph, DifferentiationError> {
     let output = primal.node(root)?;
-    if output.dtype != DType::F32 { return Err(DifferentiationError::Invalid("only F32 output roots")); }
-    if wrt.is_empty() { return Err(DifferentiationError::Invalid("at least one gradient target required")); }
+    if output.dtype != DType::F32 {
+        return Err(DifferentiationError::Invalid("only F32 output roots"));
+    }
+    if wrt.is_empty() {
+        return Err(DifferentiationError::Invalid(
+            "at least one gradient target required",
+        ));
+    }
     let mut seen = BTreeSet::new();
     for &id in wrt {
         let node = primal.node(id)?;
-        if !seen.insert(id.index()) || node.dtype != DType::F32
+        if !seen.insert(id.index())
+            || node.dtype != DType::F32
             || !matches!(node.operation, Operation::Input)
-        { return Err(DifferentiationError::Invalid("gradient targets must be distinct F32 source nodes")); }
+        {
+            return Err(DifferentiationError::Invalid(
+                "gradient targets must be distinct F32 source nodes",
+            ));
+        }
     }
 
     let mut reachable = BTreeSet::new();
     let mut pending = vec![root];
     while let Some(id) = pending.pop() {
         let node = primal.node(id)?;
-        if !reachable.insert(id.index()) { continue; }
-        let inputs = node.inputs.iter().map(|x| primal.node(*x).map(|n| n.shape.clone()))
+        if !reachable.insert(id.index()) {
+            continue;
+        }
+        let inputs = node
+            .inputs
+            .iter()
+            .map(|x| primal.node(*x).map(|n| n.shape.clone()))
             .collect::<Result<Vec<_>, _>>()?;
         if !supported(&node.operation, &node.shape, &inputs) {
             return Err(DifferentiationError::Unsupported {
-                node: id.index(), operation: node.operation.name(),
+                node: id.index(),
+                operation: node.operation.name(),
             });
         }
         pending.extend(node.inputs.iter().copied());
@@ -190,17 +252,29 @@ pub fn differentiate(
     // parameter: backprop must not materialize irrelevant derivative kernels.
     let mut relevant = wrt.iter().map(|id| id.index()).collect::<BTreeSet<_>>();
     for &index in &reachable {
-        if primal.nodes()[index].inputs.iter().any(|id| relevant.contains(&id.index())) {
+        if primal.nodes()[index]
+            .inputs
+            .iter()
+            .any(|id| relevant.contains(&id.index()))
+        {
             relevant.insert(index);
         }
     }
-    let mut b = ReverseBuilder { graph: primal.clone(), constants: Vec::new(), fills: BTreeMap::new() };
+    let mut b = ReverseBuilder {
+        graph: primal.clone(),
+        constants: Vec::new(),
+        fills: BTreeMap::new(),
+    };
     let seed = b.graph.input(output.shape.clone(), Domain::Finite);
     let mut adjoints = BTreeMap::<usize, NodeId>::new();
     adjoints.insert(root.index(), seed);
     for index in reachable.into_iter().rev() {
-        if !relevant.contains(&index) { continue; }
-        let Some(delta) = adjoints.get(&index).copied() else { continue };
+        if !relevant.contains(&index) {
+            continue;
+        }
+        let Some(delta) = adjoints.get(&index).copied() else {
+            continue;
+        };
         let node = primal.nodes()[index].clone();
         let ids = &node.inputs;
         let contributions: Vec<(NodeId, NodeId)> = match &node.operation {
@@ -229,13 +303,12 @@ pub fn differentiate(
                 db = b.graph.reshape(db, bias_shape.clone())?;
                 vec![(ids[0], delta), (ids[1], db)]
             }
-            Operation::Reshape(_) => vec![
-                (ids[0], b.graph.reshape(delta, primal.node(ids[0])?.shape.clone())?),
-            ],
+            Operation::Reshape(_) => vec![(
+                ids[0],
+                b.graph.reshape(delta, primal.node(ids[0])?.shape.clone())?,
+            )],
             Operation::Permute { .. } => vec![(ids[0], b.graph.permute(delta, &[1, 0])?)],
-            Operation::ReverseAxis { axis } => vec![
-                (ids[0], b.graph.reverse_axis(delta, *axis)?),
-            ],
+            Operation::ReverseAxis { axis } => vec![(ids[0], b.graph.reverse_axis(delta, *axis)?)],
             Operation::Concat { axis: 1 } => {
                 let left = primal.node(ids[0])?.shape.dims()[1];
                 let right = primal.node(ids[1])?.shape.dims()[1];
@@ -250,8 +323,11 @@ pub fn differentiate(
             }
             Operation::BroadcastTo(_) => {
                 let source_shape = &primal.node(ids[0])?.shape;
-                let grad = if source_shape == &node.shape { delta }
-                    else { b.reduce_scalar(delta)? };
+                let grad = if source_shape == &node.shape {
+                    delta
+                } else {
+                    b.reduce_scalar(delta)?
+                };
                 vec![(ids[0], grad)]
             }
             Operation::Pointwise(_) => match pointwise_kind(&node.operation) {
@@ -272,7 +348,9 @@ pub fn differentiate(
             _ => unreachable!("prevalidated differentiability rule"),
         };
         for (source, grad) in contributions {
-            if !relevant.contains(&source.index()) { continue; }
+            if !relevant.contains(&source.index()) {
+                continue;
+            }
             if let Some(existing) = adjoints.get(&source.index()).copied() {
                 let summed = b.graph.add(existing, grad)?;
                 adjoints.insert(source.index(), summed);
@@ -281,12 +359,21 @@ pub fn differentiate(
             }
         }
     }
-    let gradients = wrt.iter().map(|&target| {
-        let grad = match adjoints.get(&target.index()).copied() {
-            Some(id) => id,
-            None => b.fill(&primal.node(target)?.shape, 0.)?,
-        };
-        Ok((target, grad))
-    }).collect::<Result<Vec<_>, DifferentiationError>>()?;
-    Ok(ReverseGraph { graph: b.graph, root, seed, gradients, constants: b.constants })
+    let gradients = wrt
+        .iter()
+        .map(|&target| {
+            let grad = match adjoints.get(&target.index()).copied() {
+                Some(id) => id,
+                None => b.fill(&primal.node(target)?.shape, 0.)?,
+            };
+            Ok((target, grad))
+        })
+        .collect::<Result<Vec<_>, DifferentiationError>>()?;
+    Ok(ReverseGraph {
+        graph: b.graph,
+        root,
+        seed,
+        gradients,
+        constants: b.constants,
+    })
 }

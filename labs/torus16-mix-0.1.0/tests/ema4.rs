@@ -121,23 +121,35 @@ fn gpu_streaming_logits_and_state_match_cpu_oracle() {
     }
 }
 
-
 #[test]
 fn ema4_single_step_gradient_stays_on_public_semantic_ir() {
-    let model=architecture_model(16).unwrap();
-    let logits=model.output("logits").unwrap();
-    let final_bias=model.source("final_beta").unwrap().0;
-    let reverse=verineural::differentiate(model.graph(),logits,&[final_bias]).unwrap();
-    let gradient=reverse.gradient_of(final_bias).unwrap();
-    assert_eq!(reverse.graph().node(gradient).unwrap().shape.dims(),&[1,WIDTH]);
-    assert!(reverse.graph().nodes().len()>model.graph().nodes().len());
-    let engine=GpuEngine::default().with_launch_config(
-        GpuLaunchConfig::default().with_approximate_exp());
-    let program=engine.compile_outputs(reverse.graph(),&[logits,gradient]).unwrap();
-    assert!(program.kernel_count().unwrap()>0);
-    let values=reverse.bindings(
-        &model.bind(Ema4Weights::deterministic(16).unwrap().bindings(0).unwrap()).unwrap(),
-        Tensor::zeros(vec![1,16]).unwrap()).unwrap();
-    let active=values.iter().filter(|(id,_)|program.source_inputs().contains(id)).count();
-    assert_eq!(active,program.source_inputs().len());
+    let model = architecture_model(16).unwrap();
+    let logits = model.output("logits").unwrap();
+    let final_bias = model.source("final_beta").unwrap().0;
+    let reverse = verineural::differentiate(model.graph(), logits, &[final_bias]).unwrap();
+    let gradient = reverse.gradient_of(final_bias).unwrap();
+    assert_eq!(
+        reverse.graph().node(gradient).unwrap().shape.dims(),
+        &[1, WIDTH]
+    );
+    assert!(reverse.graph().nodes().len() > model.graph().nodes().len());
+    let engine =
+        GpuEngine::default().with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    let program = engine
+        .compile_outputs(reverse.graph(), &[logits, gradient])
+        .unwrap();
+    assert!(program.kernel_count().unwrap() > 0);
+    let values = reverse
+        .bindings(
+            &model
+                .bind(Ema4Weights::deterministic(16).unwrap().bindings(0).unwrap())
+                .unwrap(),
+            Tensor::zeros(vec![1, 16]).unwrap(),
+        )
+        .unwrap();
+    let active = values
+        .iter()
+        .filter(|(id, _)| program.source_inputs().contains(id))
+        .count();
+    assert_eq!(active, program.source_inputs().len());
 }
