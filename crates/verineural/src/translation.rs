@@ -19,6 +19,8 @@ pub enum TranslationKind {
     ReverseRows2D { rows: usize, columns: usize },
     ReverseColumns2D { rows: usize, columns: usize },
     ConcatAxis0 { left: usize },
+    SliceLastRow { start: usize, source_width: usize },
+    BroadcastScalar,
     ArgMaxLast { width: usize },
     TakeAxis0 { lane: usize },
     Relu,
@@ -40,6 +42,8 @@ impl TranslationKind {
             Self::ReverseRows2D { .. } => "reverse_rows2d",
             Self::ReverseColumns2D { .. } => "reverse_columns2d",
             Self::ConcatAxis0 { .. } => "concat_axis0",
+            Self::SliceLastRow { .. } => "slice_last_row",
+            Self::BroadcastScalar => "broadcast_scalar",
             Self::ArgMaxLast { .. } => "argmax_last",
             Self::TakeAxis0 { .. } => "take_axis0",
             Self::Relu => "relu",
@@ -60,6 +64,8 @@ impl TranslationKind {
             | Self::ReverseRows2D { .. }
             | Self::ReverseColumns2D { .. }
             | Self::ConcatAxis0 { .. }
+            | Self::SliceLastRow { .. }
+            | Self::BroadcastScalar
             | Self::ArgMaxLast { .. }
             | Self::TakeAxis0 { .. } => (0, 0, 0),
             Self::Relu => (0, 0, 1),
@@ -76,6 +82,8 @@ impl TranslationKind {
             | Self::Transpose2D { .. }
             | Self::ReverseRows2D { .. }
             | Self::ReverseColumns2D { .. }
+            | Self::SliceLastRow { .. }
+            | Self::BroadcastScalar
             | Self::ArgMaxLast { .. } => 1,
             Self::AddBiasRelu { .. } | Self::MulBiasRelu { .. } => 3,
             _ => 2,
@@ -92,6 +100,7 @@ impl TranslationKind {
             | Self::Transpose2D { columns, .. }
             | Self::ReverseRows2D { columns, .. }
             | Self::ReverseColumns2D { columns, .. } => columns,
+            Self::SliceLastRow { source_width, .. } => source_width,
             _ => 0,
         }
     }
@@ -103,6 +112,7 @@ impl TranslationKind {
             | Self::ReverseRows2D { rows, .. }
             | Self::ReverseColumns2D { rows, .. } => rows,
             Self::ConcatAxis0 { left } => left,
+            Self::SliceLastRow { start, .. } => start,
             Self::ArgMaxLast { width } => width,
             Self::TakeAxis0 { lane } => lane,
             _ => 0,
@@ -128,6 +138,8 @@ impl TranslationKind {
                 columns,
             },
             "concat_axis0" => Self::ConcatAxis0 { left: inner },
+            "slice_last_row" => Self::SliceLastRow { start: inner, source_width: columns },
+            "broadcast_scalar" => Self::BroadcastScalar,
             "argmax_last" => Self::ArgMaxLast { width: inner },
             "take_axis0" => Self::TakeAxis0 { lane: inner },
             "relu" => Self::Relu,
@@ -228,7 +240,9 @@ impl TranslationPlan {
                     | TranslationKind::MulBiasRelu { .. }
                     | TranslationKind::MatMul { .. }
             ) && columns == 0)
-                || (columns != 0 && (kernel.writes % columns != 0 || columns > i32::MAX as usize))
+                || (columns != 0 && (columns > i32::MAX as usize
+                    || (!matches!(kernel.kind, TranslationKind::SliceLastRow { .. })
+                        && kernel.writes % columns != 0)))
             {
                 return Err(invalid("unrepresentable column extent"));
             }
@@ -276,6 +290,18 @@ impl TranslationPlan {
                         || kernel.reads[0].1 != kernel.writes =>
                 {
                     return Err(invalid("reverse2d source shape mismatch"));
+                }
+                TranslationKind::SliceLastRow { start, source_width }
+                    if source_width == 0
+                        || source_width > i32::MAX as usize
+                        || kernel.reads[0].1 != source_width
+                        || start.checked_add(kernel.writes)
+                            .is_none_or(|end| end > source_width) =>
+                {
+                    return Err(invalid("last-row slice source mismatch"));
+                }
+                TranslationKind::BroadcastScalar if kernel.reads[0].1 != 1 => {
+                    return Err(invalid("scalar broadcast source mismatch"));
                 }
                 TranslationKind::ConcatAxis0 { left }
                     if left == 0
@@ -508,6 +534,16 @@ impl TranslationPlan {
                     "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
                     "store float %x, ptr addrspace(1) %op, align 4".into(),
                 ]),
+                TranslationKind::SliceLastRow { start, .. } => Some(vec![
+                    format!("%source_idx = add i32 %idx, {start}"),
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
+                    "store float %x, ptr addrspace(1) %op, align 4".into(),
+                ]),
+                TranslationKind::BroadcastScalar => Some(vec![
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 0".into(),
+                    "%x = load float, ptr addrspace(1) %ap, align 4".into(),
+                    "store float %x, ptr addrspace(1) %op, align 4".into(),
+                ]),
                 TranslationKind::ConcatAxis0 { left } => Some(vec![
                     format!("icmp ult i32 %idx, {left}"),
                     format!("sub i32 %idx, {left}"),
@@ -685,6 +721,8 @@ impl TranslationPlan {
                 | TranslationKind::ReverseRows2D { .. }
                 | TranslationKind::ReverseColumns2D { .. }
                 | TranslationKind::ConcatAxis0 { .. }
+                | TranslationKind::SliceLastRow { .. }
+                | TranslationKind::BroadcastScalar
                 | TranslationKind::ArgMaxLast { .. }
                 | TranslationKind::TakeAxis0 { .. }
                 | TranslationKind::AddBiasRelu { .. }

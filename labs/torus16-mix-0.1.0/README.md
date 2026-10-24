@@ -54,8 +54,12 @@ task certify-lab-torus16-mix
 ~~~
 
 Эта команда **сейчас обязана завершаться ошибкой**, а не выпускать фиктивный
-сертификат: Pointwise Exp/Div, BroadcastTo и SliceAxis не имеют полного
-GPU/Lean lowering. Нет отдельного CUDA, своего IR и скрытого CPU fallback.
+сертификат: Pointwise Exp/Div по-прежнему не имеют строгого GPU lowering.
+Для BroadcastTo и SliceAxis теперь есть узкий структурный GPU-профиль
+[1,1] -> [1,N] и [1,N] SliceAxis(1), а также Concat(1) на [1,N].
+Он проходит через общий Semantic IR / CUDA Graph / translation validation;
+поддержка других форм остаётся fail-closed. Генерация Lean memory obligations
+не означает, что пользователь уже проверил их Lean или GPU. Нет отдельного CUDA, своего IR и скрытого CPU fallback.
 Проверка форм и связей в Semantic IR не равна верификации CUDA FP32.
 Ни GPU-ускорение, ни реальное обучение, ни сходимость, ни GPU/Lean
 сертификация Torus16-Mix здесь не заявлены. Для завершения лаборатории

@@ -143,4 +143,13 @@ theorem same_block_lane_unique {block width laneA laneB : Nat}
     laneA = laneB :=
   Nat.add_left_cancel equal_index
 
+/-- A contiguous single-row slice reads only within its source allocation. -/
+theorem slice_last_row_address_bound {index len start sourceWidth : Nat}
+    (active : index < len)
+    (fits : start + len ≤ sourceWidth) :
+    index + start < sourceWidth := by
+  have bound : index + start < len + start :=
+    Nat.add_lt_add_right active start
+  exact lt_of_lt_of_le bound (by simpa [Nat.add_comm] using fits)
+
 end VeriNeural

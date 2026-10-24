@@ -427,10 +427,17 @@ tasks:
       - cargo run -p torus16-mix-lab --example torus16_mix -- --ir
 
   test-lab-torus16-mix:
-    desc: Run Torus16-Mix operator tests against an independent Rust scalar oracle (no PyTorch)
+    desc: Run Torus16-Mix plus reusable one-row structural GPU contract tests (no PyTorch)
     deps: [prepare]
     cmds:
+      - cargo test -p verineural --test structural_last_row
       - cargo test -p torus16-mix-lab
+
+  verify-gpu-structural-last-row:
+    desc: Run ignored NVIDIA acceptance for generic SliceAxis/BroadcastTo/Concat(1) in one CUDA Graph
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test structural_last_row -- --ignored --nocapture
 
   certify-lab-torus16-mix:
     desc: Fail closed on unsupported Torus16-Mix Exp/Div/Broadcast/Slice backend operations

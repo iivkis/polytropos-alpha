@@ -206,3 +206,22 @@ Lean `approx_contract_relu_positive_branch` / `approx_contract_relu_nonpositive_
 обязательными отдельными аппаратными проверками. Это численная validation,
 не доказательство FP32/LLVM/PTX/JIT/SASS.
 \n**Stage 10 и P1 proof-boundary hardening (код; локальная приёмка ожидается):**\nкорневая миграция семи root alias при ошибке теперь откатывает установленные ссылки\nи возвращает исходные tracked legacy-файлы из backup; fault-injection tests\nпроверяют rollback fresh и legacy-публикации. Атомарность видимости\n*семи различных* root paths всё ещё не гарантируется, зато неуспешная миграция\nне оставляет частично перенесённые артефакты в штатном однопроцессном профиле.\nLean `PointwiseLe` generator переиспользует общие композиционные леммы\n(`refl/trans/add with nonnegative/Relu`) поверх DAG и самостоятельно доказывает\nнеотрицательность составной sibling-ветки из ReLU/Add/Mul, без присвоения\nruntime Domain статуса Lean-гипотезы. Преднамеренно ложные отношения\nпродолжают отклоняться kernel-check в certified-пути. Это поддерживаемый\nrelational фрагмент, не произвольный theorem-dependency framework;\nобязательная проверка structural LLVM/PTX/memory evidence и явные\n`fp32_machine_equivalence=not-proven`, `nvidia_jit_sass_equivalence=not-proven`\nостаются trust boundary. Команда `task verify-stage10-proof-boundary` запускает\nвсе связанные проверки при совместной локальной приёмке.\n\n**Совместная приёмка после Stage 10/P1 усиления:** `task verify-all-acceptance`\nобъединяет check/test/clippy, P0/P1/P2, root migration fault-injection,\nLean relational positive/negative claims, GPU memory/translation audit,\nStage10 certified replay, state feedback и rotating NVIDIA parity/training.\nОтдельный тест с намеренной заменой `add.rn.f32` на `add.ftz.f32`,\n`mul.rn.f32` на `fma.rn.f32` / `mul.approx.f32` и нарушенным\nколичеством операций обязан быть отклонён существующим FP32 PTX auditor.\nReport дополнительно различает проверенные условные Lean memory obligations,\nструктурный LLVM/PTX audit и отсутствие отдельного RNE bounds/cuda-runtime proof.\nВсе эти новые проверки **ожидают запуска пользователем**; полноценная\nформальная JIT/SASS или arbitrary-predicate theorem composition не заявлена.\n
+
+**Torus16-Mix structural row profile (код, локальная приёмка ожидается):**
+GPU lowering переиспользуемых операций дополнен узким профилем `SliceAxis(axis=1)`
+для `[1,N]`, `BroadcastTo` из одного элемента в `[1,N]` и
+`Concat(axis=1)` для двух однострочных тензоров. Последняя операция
+переиспользует flat-concat адресацию только при доказуемой эквивалентности
+форм. Планы памяти фиксируют исходные размеры и сдвиг, translation
+validator проверяет LLVM-шаблоны и PTX FP32 policy; генератор Lean
+выводит арифметическое обязательство для границ среза, не утверждая
+полного доказательства CUDA. `crates/verineural/tests/structural_last_row.rs`
+проверяет plan round-trip, поддерживаемые и отвергаемые формы и содержит
+отдельный ignored NVIDIA CUDA Graph replay. Команды:
+`task test-lab-torus16-mix`, `task verify-gpu-structural-last-row`.
+Локальные Cargo/Lean/LLVM/CUDA проверки агентом **не выполнялись**.
+`Exp`/`Div` и весь Torus16-Mix forward по-прежнему fail-closed,
+поскольку строгая FP32 экспонента не реализована; для завершения лаборатории
+нужны отдельная численная спецификация и проверенный lowering, не
+скрытое approx-замещение. Никакие крупные нейросетевые блоки в библиотеку
+не добавлены.

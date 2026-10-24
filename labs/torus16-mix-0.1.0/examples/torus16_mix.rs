@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             );
             println!("reference role_0 first 6 lanes: {:?}", &output[..6]);
             println!(
-                "Proof/GPU status: unsupported; exp/div/broadcast/axis slicing require backend coverage."
+                "Proof/GPU status: full operator unsupported (exp/div); one-row structural GPU slice is available."
             );
             println!("This is the operator slice; no LM training or original BPC reproduction.");
         }
