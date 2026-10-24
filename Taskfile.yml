@@ -179,6 +179,13 @@ tasks:
     cmds:
       - cargo run -p verineural --example stage8_exact -- --verify
 
+  verify-numeric-branch:
+    desc: Check P1 stable PositiveMask/SelectPositive RNE branch inheritance and fail-closed zero crossing
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test numeric_branch
+      - cargo test -p verineural --test numeric_branch -- --ignored
+
   lab-stage9:
     desc: Build Stage 9 independent coupled-field research lab, Lean, CUDA Graph and DOT/PNG evidence
     deps: [prepare]

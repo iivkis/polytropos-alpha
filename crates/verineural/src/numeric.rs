@@ -20,12 +20,13 @@ use std::error::Error;
 use std::fmt;
 
 use crate::{
-    LeanProofEngine, ModuleInvocation, NeuralError, NeuralGraph, NodeId, Operation, ProofError,
-    Tensor,
+    LeanProgram, LeanProofEngine, ModuleInvocation, NeuralError, NeuralGraph, NodeId, Operation,
+    ProofError, Tensor,
 };
 
 const EXACT_F32_INTEGER_LIMIT: i64 = 1 << 24;
 const SOURCE_INTEGER_LIMIT: i64 = 1 << 20;
+const BASIC_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Basic.lean");
 const MEMORY_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Memory.lean");
 const NUMERIC_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Numeric.lean");
 
@@ -40,6 +41,11 @@ pub enum NumericError {
     UnsupportedRange {
         node: usize,
         bound: i64,
+    },
+    UnstableBranch {
+        node: usize,
+        lower_ticks: i128,
+        upper_ticks: i128,
     },
     InvalidInput {
         node: usize,
@@ -66,6 +72,14 @@ impl fmt::Display for NumericError {
             Self::UnsupportedRange { node, bound } => write!(
                 f,
                 "node {node} needs integer bound {bound}, outside exact binary32 subset"
+            ),
+            Self::UnstableBranch {
+                node,
+                lower_ticks,
+                upper_ticks,
+            } => write!(
+                f,
+                "numeric branch at node {node} is unstable: ideal condition interval [{lower_ticks}, {upper_ticks}] crosses zero"
             ),
             Self::InvalidInput { node, reason } => {
                 write!(f, "FP32 numeric input {node}: {reason}")
@@ -1600,6 +1614,289 @@ impl RneThresholdEvidence {
     }
 }
 
+/// Generic strict-positive condition classification for a reachable numeric
+/// node. This is reusable by ReLU and by PositiveMask → SelectPositive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RneConditionEvidence {
+    condition: NodeId,
+    fraction_bits: u32,
+    observed_ticks: i64,
+    epsilon_ticks: i64,
+    ideal_lower_ticks: i128,
+    ideal_upper_ticks: i128,
+    side: RneThresholdSide,
+}
+
+impl RneConditionEvidence {
+    pub fn condition(&self) -> NodeId {
+        self.condition
+    }
+
+    pub fn fraction_bits(&self) -> u32 {
+        self.fraction_bits
+    }
+
+    pub fn observed_ticks(&self) -> i64 {
+        self.observed_ticks
+    }
+
+    pub fn epsilon_ticks(&self) -> i64 {
+        self.epsilon_ticks
+    }
+
+    pub fn ideal_interval_ticks(&self) -> (i128, i128) {
+        (self.ideal_lower_ticks, self.ideal_upper_ticks)
+    }
+
+    pub fn side(&self) -> RneThresholdSide {
+        self.side
+    }
+}
+
+/// Conditional numerical evidence for the canonical
+/// PositiveMask(condition) → SelectPositive(mask, yes, no) pattern.
+/// An indeterminate condition deliberately has no selected contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RneSelectEvidence {
+    select: NodeId,
+    condition: NodeId,
+    selected: Option<NodeId>,
+    condition_evidence: RneConditionEvidence,
+    contract: Option<RneErrorContract>,
+}
+
+impl RneSelectEvidence {
+    pub fn select(&self) -> NodeId {
+        self.select
+    }
+
+    pub fn condition(&self) -> NodeId {
+        self.condition
+    }
+
+    pub fn side(&self) -> RneThresholdSide {
+        self.condition_evidence.side()
+    }
+
+    pub fn condition_evidence(&self) -> RneConditionEvidence {
+        self.condition_evidence
+    }
+
+    pub fn selected(&self) -> Option<NodeId> {
+        self.selected
+    }
+
+    pub fn contract(&self) -> Option<RneErrorContract> {
+        self.contract
+    }
+}
+
+/// P1 branch-composition slice. It does not pretend PositiveMask/SelectPositive
+/// are ordinary RNE arithmetic nodes. Instead it proves a conditional rule:
+/// once the condition interval lies strictly on one side of zero, the select
+/// inherits exactly the already-proved error contract of that branch.
+#[derive(Clone, Debug)]
+pub struct RneSelectPlan {
+    select: NodeId,
+    condition: NodeId,
+    yes: NodeId,
+    no: NodeId,
+    condition_plan: RneRangePlan,
+    yes_plan: RneRangePlan,
+    no_plan: RneRangePlan,
+}
+
+impl RneSelectPlan {
+    pub fn compile(
+        graph: &NeuralGraph,
+        select: NodeId,
+        source_fraction_bits: u32,
+        source_bound_ticks: i64,
+    ) -> Result<Self, NumericError> {
+        let select_node = graph.node(select)?;
+        if !matches!(select_node.operation, Operation::SelectPositive) {
+            return Err(NumericError::InvalidInput {
+                node: select.index(),
+                reason: "RNE select plan requires a SelectPositive node",
+            });
+        }
+        let mask = select_node.inputs[0];
+        let mask_node = graph.node(mask)?;
+        if !matches!(mask_node.operation, Operation::PositiveMask) {
+            return Err(NumericError::InvalidInput {
+                node: mask.index(),
+                reason: "RNE select plan currently requires a direct PositiveMask producer",
+            });
+        }
+        let condition = mask_node.inputs[0];
+        let yes = select_node.inputs[1];
+        let no = select_node.inputs[2];
+
+        Ok(Self {
+            select,
+            condition,
+            yes,
+            no,
+            condition_plan: RneRangePlan::compile(
+                graph,
+                condition,
+                source_fraction_bits,
+                source_bound_ticks,
+            )?,
+            yes_plan: RneRangePlan::compile(
+                graph,
+                yes,
+                source_fraction_bits,
+                source_bound_ticks,
+            )?,
+            no_plan: RneRangePlan::compile(
+                graph,
+                no,
+                source_fraction_bits,
+                source_bound_ticks,
+            )?,
+        })
+    }
+
+    pub fn select(&self) -> NodeId {
+        self.select
+    }
+
+    pub fn condition(&self) -> NodeId {
+        self.condition
+    }
+
+    pub fn yes(&self) -> NodeId {
+        self.yes
+    }
+
+    pub fn no(&self) -> NodeId {
+        self.no
+    }
+
+    pub fn condition_plan(&self) -> &RneRangePlan {
+        &self.condition_plan
+    }
+
+    pub fn yes_plan(&self) -> &RneRangePlan {
+        &self.yes_plan
+    }
+
+    pub fn no_plan(&self) -> &RneRangePlan {
+        &self.no_plan
+    }
+
+    pub fn classify(&self, observed_condition: f32) -> Result<RneSelectEvidence, NumericError> {
+        let condition_evidence = self
+            .condition_plan
+            .classify_condition(self.condition, observed_condition)?;
+        let (selected, contract) = match condition_evidence.side() {
+            RneThresholdSide::Positive => (Some(self.yes), Some(self.yes_plan.output_contract())),
+            RneThresholdSide::NonPositive => {
+                (Some(self.no), Some(self.no_plan.output_contract()))
+            }
+            RneThresholdSide::Indeterminate => (None, None),
+        };
+        Ok(RneSelectEvidence {
+            select: self.select,
+            condition: self.condition,
+            selected,
+            condition_evidence,
+            contract,
+        })
+    }
+
+    pub fn stable_contract(
+        &self,
+        observed_condition: f32,
+    ) -> Result<RneErrorContract, NumericError> {
+        let evidence = self.classify(observed_condition)?;
+        evidence.contract().ok_or_else(|| {
+            let (lower_ticks, upper_ticks) = evidence.condition_evidence().ideal_interval_ticks();
+            NumericError::UnstableBranch {
+                node: self.select.index(),
+                lower_ticks,
+                upper_ticks,
+            }
+        })
+    }
+
+    /// Generate the conditional Lean composition theorem for one observed
+    /// condition. The theorem assumes the condition ApproxContract and the
+    /// selected branch ApproxContract; the opposite branch is intentionally
+    /// irrelevant. Indeterminate observations fail closed before generation.
+    pub fn lean_program(&self, observed_condition: f32) -> Result<LeanProgram, NumericError> {
+        let evidence = self.classify(observed_condition)?;
+        let selected = evidence.contract().ok_or_else(|| {
+            let (lower_ticks, upper_ticks) = evidence.condition_evidence().ideal_interval_ticks();
+            NumericError::UnstableBranch {
+                node: self.select.index(),
+                lower_ticks,
+                upper_ticks,
+            }
+        })?;
+        let condition = self.condition_plan.output_contract();
+        let observed_ticks = evidence.condition_evidence().observed_ticks();
+        let theorem = match evidence.side() {
+            RneThresholdSide::Positive => format!("select_{}_stable_positive", self.select.index()),
+            RneThresholdSide::NonPositive => {
+                format!("select_{}_stable_nonpositive", self.select.index())
+            }
+            RneThresholdSide::Indeterminate => unreachable!("handled above"),
+        };
+        let lemma = match evidence.side() {
+            RneThresholdSide::Positive => {
+                "VeriNeural.approx_contract_positive_mask_select_positive"
+            }
+            RneThresholdSide::NonPositive => {
+                "VeriNeural.approx_contract_positive_mask_select_nonpositive"
+            }
+            RneThresholdSide::Indeterminate => unreachable!("handled above"),
+        };
+        let margin = match evidence.side() {
+            RneThresholdSide::Positive => {
+                format!("{} < ({observed_ticks} : Int)", condition.epsilon_ticks)
+            }
+            RneThresholdSide::NonPositive => format!(
+                "({observed_ticks} : Int) + {} ≤ 0",
+                condition.epsilon_ticks
+            ),
+            RneThresholdSide::Indeterminate => unreachable!("handled above"),
+        };
+        let source = format!(
+            "{BASIC_LIBRARY}\n\n{NUMERIC_LIBRARY}\n\nnamespace VeriNeural.Generated\n\n             theorem {theorem}\n                 {{idealCondition selectedIdeal selectedActual otherIdeal otherActual : Int}}\n                 (hcondition : VeriNeural.ApproxContract {} {} idealCondition ({observed_ticks} : Int))\n                 (hselected : VeriNeural.ApproxContract {} {} selectedIdeal selectedActual) :\n                 VeriNeural.ApproxContract {} {}\n                   (if 0 < (if 0 < idealCondition then 1 else 0) then {} else {})\n                   (if 0 < (if 0 < ({observed_ticks} : Int) then 1 else 0) then {} else {}) := by\n               have hmargin : {margin} := by omega\n               {} hcondition hmargin hselected\n\nend VeriNeural.Generated\n",
+            condition.ideal_bound_ticks,
+            condition.epsilon_ticks,
+            selected.ideal_bound_ticks,
+            selected.epsilon_ticks,
+            selected.ideal_bound_ticks,
+            selected.epsilon_ticks,
+            if matches!(evidence.side(), RneThresholdSide::Positive) {
+                "selectedIdeal"
+            } else {
+                "otherIdeal"
+            },
+            if matches!(evidence.side(), RneThresholdSide::Positive) {
+                "otherIdeal"
+            } else {
+                "selectedIdeal"
+            },
+            if matches!(evidence.side(), RneThresholdSide::Positive) {
+                "selectedActual"
+            } else {
+                "otherActual"
+            },
+            if matches!(evidence.side(), RneThresholdSide::Positive) {
+                "otherActual"
+            } else {
+                "selectedActual"
+            },
+            lemma,
+        );
+        Ok(LeanProgram::generated(source, vec![theorem], Vec::new()))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RneModuleErrorContract {
     name: &'static str,
@@ -2046,39 +2343,25 @@ impl RneRangePlan {
             })
     }
 
-    /// Classify the pre-activation of a reachable ReLU, using its own q scale
-    /// and the RNE epsilon from the preceding node's ApproxContract.
-    ///
-    /// Positive: observed > epsilon. NonPositive: observed + epsilon <= 0.
-    /// All remaining cases are Indeterminate, including equality at the
-    /// positive margin. This is conditional on ApproxContract and trusted
-    /// FP32/GPU correspondence, not a machine-level branch certificate.
-    pub fn classify_relu_input(
+    /// Classify any reachable numeric condition against strict zero.
+    /// This is a conditional source-level result under the node ApproxContract.
+    pub fn classify_condition(
         &self,
-        relu: NodeId,
+        condition: NodeId,
         observed: f32,
-    ) -> Result<RneThresholdEvidence, NumericError> {
-        let node = self.graph.node(relu)?;
-        if !matches!(node.operation, Operation::Relu) || !self.contracts.contains_key(&relu.index())
-        {
-            return Err(NumericError::InvalidInput {
-                node: relu.index(),
-                reason: "threshold target must be a reachable ReLU",
-            });
-        }
-        let input = node.inputs[0];
-        let contract = self.node_contract(input)?;
+    ) -> Result<RneConditionEvidence, NumericError> {
+        let contract = self.node_contract(condition)?;
         let observed_ticks =
             f32_to_dyadic_ticks(observed, contract.fraction_bits).map_err(|reason| {
                 NumericError::InvalidInput {
-                    node: input.index(),
+                    node: condition.index(),
                     reason,
                 }
             })?;
         if observed_ticks.unsigned_abs() > contract.actual_bound_ticks as u64 {
             return Err(NumericError::InvalidInput {
-                node: input.index(),
-                reason: "threshold observation exceeds the node actual range bound",
+                node: condition.index(),
+                reason: "condition observation exceeds the node actual range bound",
             });
         }
         // i128 avoids signed overflow even near the maximum supported i64.
@@ -2093,15 +2376,43 @@ impl RneRangePlan {
         } else {
             RneThresholdSide::Indeterminate
         };
-        Ok(RneThresholdEvidence {
-            relu,
-            input,
+        Ok(RneConditionEvidence {
+            condition,
             fraction_bits: contract.fraction_bits,
             observed_ticks,
             epsilon_ticks: contract.epsilon_ticks,
             ideal_lower_ticks,
             ideal_upper_ticks,
             side,
+        })
+    }
+
+    /// Backwards-compatible ReLU-specific view over generic condition evidence.
+    pub fn classify_relu_input(
+        &self,
+        relu: NodeId,
+        observed: f32,
+    ) -> Result<RneThresholdEvidence, NumericError> {
+        let node = self.graph.node(relu)?;
+        if !matches!(node.operation, Operation::Relu) || !self.contracts.contains_key(&relu.index())
+        {
+            return Err(NumericError::InvalidInput {
+                node: relu.index(),
+                reason: "threshold target must be a reachable ReLU",
+            });
+        }
+        let input = node.inputs[0];
+        let evidence = self.classify_condition(input, observed)?;
+        let (ideal_lower_ticks, ideal_upper_ticks) = evidence.ideal_interval_ticks();
+        Ok(RneThresholdEvidence {
+            relu,
+            input,
+            fraction_bits: evidence.fraction_bits(),
+            observed_ticks: evidence.observed_ticks(),
+            epsilon_ticks: evidence.epsilon_ticks(),
+            ideal_lower_ticks,
+            ideal_upper_ticks,
+            side: evidence.side(),
         })
     }
 

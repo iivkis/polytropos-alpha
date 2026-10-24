@@ -537,4 +537,48 @@ theorem approx_contract_relu_nonpositive_branch
   · exact Int.max_eq_right (by omega)
   · exact Int.max_eq_right (by omega)
 
+/-!
+P1 stable branch slice for PositiveMask → SelectPositive.
+
+The condition contract is independent from either branch contract. A select inherits
+the chosen branch's numerical contract only when the observed condition is far
+enough from zero to force the same strict-positive decision in the ideal and
+actual values. No theorem is provided for an interval crossing zero.
+-/
+
+theorem approx_contract_positive_mask_select_positive
+    {conditionBound conditionEpsilon conditionIdeal conditionActual
+      yesBound yesEpsilon yesIdeal yesActual noIdeal noActual : Int}
+    (hcondition :
+      ApproxContract conditionBound conditionEpsilon conditionIdeal conditionActual)
+    (hmargin : conditionEpsilon < conditionActual)
+    (hyes : ApproxContract yesBound yesEpsilon yesIdeal yesActual) :
+    ApproxContract yesBound yesEpsilon
+      (if 0 < (if 0 < conditionIdeal then 1 else 0) then yesIdeal else noIdeal)
+      (if 0 < (if 0 < conditionActual then 1 else 0) then yesActual else noActual) := by
+  rcases hcondition with ⟨_hbound, hepsilon, _hideal, herr⟩
+  unfold ApproxWithin Within at herr
+  rcases herr with ⟨_hlower, hupper⟩
+  have hactual : 0 < conditionActual := by omega
+  have hideal : 0 < conditionIdeal := by omega
+  simpa [hactual, hideal] using hyes
+
+theorem approx_contract_positive_mask_select_nonpositive
+    {conditionBound conditionEpsilon conditionIdeal conditionActual
+      noBound noEpsilon noIdeal noActual yesIdeal yesActual : Int}
+    (hcondition :
+      ApproxContract conditionBound conditionEpsilon conditionIdeal conditionActual)
+    (hmargin : conditionActual + conditionEpsilon ≤ 0)
+    (hno : ApproxContract noBound noEpsilon noIdeal noActual) :
+    ApproxContract noBound noEpsilon
+      (if 0 < (if 0 < conditionIdeal then 1 else 0) then yesIdeal else noIdeal)
+      (if 0 < (if 0 < conditionActual then 1 else 0) then yesActual else noActual) := by
+  rcases hcondition with ⟨_hbound, hepsilon, _hideal, herr⟩
+  unfold ApproxWithin Within at herr
+  rcases herr with ⟨hlower, _hupper⟩
+  have hactual : conditionActual ≤ 0 := by omega
+  have hideal : conditionIdeal ≤ 0 := by omega
+  simp [Int.not_lt.mpr hactual, Int.not_lt.mpr hideal]
+  exact hno
+
 end VeriNeural

@@ -205,6 +205,18 @@ pub struct LeanProgram {
 }
 
 impl LeanProgram {
+    pub(crate) fn generated(
+        source: String,
+        theorems: Vec<String>,
+        assumptions: Vec<ProofAssumption>,
+    ) -> Self {
+        Self {
+            source,
+            theorems,
+            assumptions,
+        }
+    }
+
     pub fn source(&self) -> &str {
         &self.source
     }
