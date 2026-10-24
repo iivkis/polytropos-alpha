@@ -78,7 +78,10 @@ fn gpu_training_upload_inventory_excludes_fixed_model_parameters() {
     // never belong to the AdamW parameter inventory or upload set.
     for fixed in ["ones_column", "inv_width", "epsilon_scalar", "one_vec"] {
         assert!(named.contains_key(fixed), "model source missing: {fixed}");
-        assert!(!trainable.contains_key(fixed), "fixed source became trainable: {fixed}");
+        assert!(
+            !trainable.contains_key(fixed),
+            "fixed source became trainable: {fixed}"
+        );
     }
     assert!(named.len() > trainable.len());
 
@@ -86,7 +89,11 @@ fn gpu_training_upload_inventory_excludes_fixed_model_parameters() {
     let names = trainable.keys().collect::<Vec<_>>();
     let targets = names
         .iter()
-        .map(|name| *named.get(*name).expect("trainable name must have an IR source"))
+        .map(|name| {
+            *named
+                .get(*name)
+                .expect("trainable name must have an IR source")
+        })
         .collect::<Vec<_>>();
     let uploads = names
         .iter()
@@ -96,7 +103,10 @@ fn gpu_training_upload_inventory_excludes_fixed_model_parameters() {
     assert_eq!(uploads.len(), trainable.len());
     assert_eq!(uploads.len(), targets.len());
     assert_eq!(
-        uploads.iter().map(|(_, tensor)| tensor.values().len()).sum::<usize>(),
+        uploads
+            .iter()
+            .map(|(_, tensor)| tensor.values().len())
+            .sum::<usize>(),
         Ema4Weights::parameter_count(RESEARCH_VOCAB)
     );
     for fixed in ["ones_column", "inv_width", "epsilon_scalar", "one_vec"] {
