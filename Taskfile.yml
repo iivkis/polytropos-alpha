@@ -102,6 +102,13 @@ tasks:
     cmds:
       - cargo run -p verineural --example scan_invariant
 
+  verify-inductive-invariant:
+    desc: Check P1 arbitrary-horizon ideal-Int state invariant from one reusable consumer transition
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test inductive_invariant
+      - cargo test -p verineural --test inductive_invariant -- --ignored
+
   auto-architecture:
     desc: Generate and audit all ideal-Int architecture/goal proofs and lower each supported output to NVPTX
     cmds:

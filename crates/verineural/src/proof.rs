@@ -1580,6 +1580,144 @@ impl LeanProofEngine {
         Ok(program)
     }
 
+    /// Build an arbitrary-horizon ideal-Int invariant from one reusable
+    /// consumer-defined state transition. Unlike FixedScan, this theorem does
+    /// not unroll time: Lean performs induction over Nat and reuses the
+    /// transition's checked next_state Nonnegative claim at every successor.
+    ///
+    /// First supported profile: exactly two direct F32 sources named
+    /// state/input, two outputs named next_state/output, state-preserving
+    /// shape/dtype, and NonNegativeFinite source hypotheses.
+    pub fn generate_inductive_state_nonnegative(
+        &self,
+        graph: &NeuralGraph,
+        module_index: usize,
+        name: &str,
+    ) -> Result<LeanProgram, ProofError> {
+        if name.is_empty()
+            || !name.as_bytes()[0].is_ascii_alphabetic()
+            || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return Err(ProofError::InvalidGoalName);
+        }
+        let module = graph
+            .multi_modules()
+            .get(module_index)
+            .ok_or(ProofError::InvalidScan)?;
+        if module.inputs.len() != 2
+            || module.outputs.len() != 2
+            || module.contract.inputs.len() != 2
+            || module.contract.outputs.len() != 2
+            || module.contract.inputs[0].name != "state"
+            || module.contract.inputs[1].name != "input"
+            || module.contract.outputs[0].name != "next_state"
+            || module.contract.outputs[1].name != "output"
+        {
+            return Err(ProofError::InvalidScan);
+        }
+
+        let state = module.inputs[0];
+        let input = module.inputs[1];
+        let next_state = module.outputs[0];
+        let state_node = graph.node(state)?;
+        let input_node = graph.node(input)?;
+        let next_node = graph.node(next_state)?;
+        if state == input
+            || !matches!(state_node.operation, Operation::Input)
+            || !matches!(input_node.operation, Operation::Input)
+            || state_node.dtype != DType::F32
+            || input_node.dtype != DType::F32
+            || state_node.domain != Domain::NonNegativeFinite
+            || input_node.domain != Domain::NonNegativeFinite
+            || state_node.shape != next_node.shape
+            || state_node.dtype != next_node.dtype
+        {
+            return Err(ProofError::InvalidScan);
+        }
+        let claim = module.contract.outputs[0]
+            .claims
+            .iter()
+            .position(|claim| *claim == ContractClaim::Nonnegative)
+            .ok_or(ProofError::InvalidScan)?;
+        let claim_name = format!("multi_{module_index}_port_0_claim_{claim}");
+
+        let mut program = self.generate_outputs(graph, &module.outputs)?;
+        let mut used = BTreeSet::new();
+        for &target in &module.outputs {
+            used.extend(collect_used_nodes(graph, target)?);
+        }
+        let sources = used
+            .iter()
+            .filter(|&&index| matches!(graph.nodes()[index].operation, Operation::Input))
+            .copied()
+            .collect::<Vec<_>>();
+        if sources.len() != 2
+            || !sources.contains(&state.index())
+            || !sources.contains(&input.index())
+        {
+            return Err(ProofError::InvalidScan);
+        }
+        let assumption_nodes = program
+            .assumptions()
+            .iter()
+            .map(|assumption| assumption.input_node)
+            .collect::<BTreeSet<_>>();
+        if assumption_nodes != BTreeSet::from([state.index(), input.index()]) {
+            return Err(ProofError::InvalidScan);
+        }
+
+        let state_count = state_node.shape.element_count();
+        let input_count = input_node.shape.element_count();
+        let step_args = |state_value: &str, input_value: &str| {
+            sources
+                .iter()
+                .map(|source| {
+                    if *source == state.index() {
+                        state_value.to_owned()
+                    } else {
+                        input_value.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let hypothesis_args = program
+            .assumptions()
+            .iter()
+            .map(|assumption| {
+                if assumption.input_node == state.index() {
+                    "ih".to_owned()
+                } else {
+                    "(h_input t)".to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let definition = format!("scan_{name}_state");
+        let theorem = format!("scan_{name}_inductive_nonnegative");
+        let end = "end VeriNeural.Generated\n";
+        if !program.source.ends_with(end) {
+            return Err(ProofError::LeanRejected {
+                details: "generated Lean source has no namespace terminator".into(),
+            });
+        }
+        program.source.truncate(program.source.len() - end.len());
+
+        let successor_args = step_args(
+            &format!("({definition} initial inputAt t)"),
+            "(inputAt t)",
+        );
+        program.source.push_str(&format!(
+            "def {definition}\n                 (initial : VeriNeural.Tensor {state_count})\n                 (inputAt : Nat → VeriNeural.Tensor {input_count}) :\n                 Nat → VeriNeural.Tensor {state_count}\n               | 0 => initial\n               | Nat.succ t => node_{} {successor_args}\n\n",
+            next_state.index()
+        ));
+        program.source.push_str(&format!(
+            "theorem {theorem}\n                 (initial : VeriNeural.Tensor {state_count})\n                 (inputAt : Nat → VeriNeural.Tensor {input_count})\n                 (h_initial : VeriNeural.Nonnegative initial)\n                 (h_input : ∀ t, VeriNeural.Nonnegative (inputAt t)) :\n                 ∀ t, VeriNeural.Nonnegative ({definition} initial inputAt t) := by\n               intro t\n               induction t with\n               | zero =>\n      simpa [{definition}] using h_initial\n               | succ t ih =>\n      simp only [{definition}]\n                   exact {claim_name} {successor_args} {hypothesis_args}\n\n{end}"
+        ));
+        program.theorems.push(theorem);
+        Ok(program)
+    }
+
     /// Certified profile: only explicitly allowlisted foundational Lean axioms
     /// are admitted. Checker, kernel and imported library remain explicit TCB.
     pub fn verify_certified(
