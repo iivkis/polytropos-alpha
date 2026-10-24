@@ -740,8 +740,7 @@ impl LeanProofEngine {
                     }
                     Operation::SliceAxis { axis, start, len } => {
                         let input = node.inputs[0].index();
-                        let (outer, width, inner) =
-                            axis_factors(&graph.nodes()[input].shape, axis);
+                        let (outer, width, inner) = axis_factors(&graph.nodes()[input].shape, axis);
                         format!(
                             "VeriNeural.sliceAxis_nonnegative (outer := {outer})                              (width := {width}) (inner := {inner}) (start := {start})                              (len := {len}) {} ({})",
                             call(input),
@@ -1977,10 +1976,7 @@ impl LeanProofEngine {
         }
         program.source.truncate(program.source.len() - end.len());
 
-        let successor_args = step_args(
-            &format!("({definition} initial inputAt t)"),
-            "(inputAt t)",
-        );
+        let successor_args = step_args(&format!("({definition} initial inputAt t)"), "(inputAt t)");
         program.source.push_str(&format!(
             "def {definition}\n                 (initial : VeriNeural.Tensor {state_count})\n                 (inputAt : Nat → VeriNeural.Tensor {input_count}) :\n                 Nat → VeriNeural.Tensor {state_count}\n               | 0 => initial\n               | Nat.succ t => node_{} {successor_args}\n\n",
             next_state.index()
@@ -2266,9 +2262,8 @@ fn normalized_module_expression(
                 expr(node.inputs[0], cache)?
             )
         }
-        Operation::Pointwise(spec) if spec.expression().has_ideal_int_semantics() => spec
-            .expression()
-            .lean(&|port| {
+        Operation::Pointwise(spec) if spec.expression().has_ideal_int_semantics() => {
+            spec.expression().lean(&|port| {
                 normalized_module_expression(
                     graph,
                     module_index,
@@ -2277,7 +2272,8 @@ fn normalized_module_expression(
                     &mut BTreeMap::new(),
                 )
                 .unwrap_or_else(|_| "__unsupported".to_owned())
-            }),
+            })
+        }
         _ => {
             return Err(ProofError::UnsupportedOperation {
                 node: index,
@@ -2365,7 +2361,10 @@ fn normalized_module_nonnegative_proof(
         }
         Operation::Relu => format!("VeriNeural.relu_nonnegative {}", term(node.inputs[0])?),
         Operation::PositiveMask => {
-            format!("VeriNeural.positiveMask_nonnegative {}", term(node.inputs[0])?)
+            format!(
+                "VeriNeural.positiveMask_nonnegative {}",
+                term(node.inputs[0])?
+            )
         }
         Operation::SelectPositive => {
             let yes = node.inputs[1];

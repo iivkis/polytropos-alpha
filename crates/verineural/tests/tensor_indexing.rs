@@ -163,10 +163,8 @@ fn rotating_bank_slice_is_canonical_has_lean_structure_and_gpu_lowering() {
     assert!(!memory.contains("sorry"));
 
     let mut reverse_rows_graph = NeuralGraph::default();
-    let matrix = reverse_rows_graph.input(
-        Shape::new(vec![2, 3]).unwrap(),
-        Domain::NonNegativeFinite,
-    );
+    let matrix =
+        reverse_rows_graph.input(Shape::new(vec![2, 3]).unwrap(), Domain::NonNegativeFinite);
     let reversed = reverse_rows_graph.reverse_axis(matrix, 0).unwrap();
     let reverse_rows = GpuEngine::default()
         .compile(&reverse_rows_graph, reversed)

@@ -115,7 +115,10 @@ impl TranslationKind {
             "mul" => Self::Mul,
             "bias_add" => Self::BiasAdd { columns },
             "matmul" => Self::MatMul { inner, columns },
-            "transpose2d" => Self::Transpose2D { rows: inner, columns },
+            "transpose2d" => Self::Transpose2D {
+                rows: inner,
+                columns,
+            },
             "reverse_rows2d" => Self::ReverseRows2D {
                 rows: inner,
                 columns,

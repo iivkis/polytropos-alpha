@@ -78,9 +78,11 @@ fn induction_reuses_one_transition_claim_without_fixed_unroll() {
             .contains("theorem scan_accumulator_inductive_nonnegative")
     );
     assert!(program.source().contains("induction t with"));
-    assert!(program.source().contains(&format!(
-        "multi_{module_index}_port_0_claim_0"
-    )));
+    assert!(
+        program
+            .source()
+            .contains(&format!("multi_{module_index}_port_0_claim_0"))
+    );
     assert!(program.source().contains("h_input : ∀ t"));
     assert!(!program.source().contains("no arbitrary-horizon induction"));
     assert!(
@@ -95,8 +97,11 @@ fn induction_reuses_one_transition_claim_without_fixed_unroll() {
 fn induction_requires_a_consumer_owned_next_state_claim() {
     let (graph, module_index) = graph(false);
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_inductive_state_nonnegative(&graph, module_index, "missing_claim"),
+        LeanProofEngine::default().generate_inductive_state_nonnegative(
+            &graph,
+            module_index,
+            "missing_claim"
+        ),
         Err(ProofError::InvalidScan)
     ));
 }
@@ -112,8 +117,11 @@ fn induction_rejects_non_nonnegative_state_hypothesis() {
         .unwrap();
     let module_index = graph.multi_modules().len() - 1;
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_inductive_state_nonnegative(&graph, module_index, "bad_state"),
+        LeanProofEngine::default().generate_inductive_state_nonnegative(
+            &graph,
+            module_index,
+            "bad_state"
+        ),
         Err(ProofError::InvalidScan)
     ));
 }

@@ -2,9 +2,7 @@
 //! Previous next_state contracts are fed into the next step as source
 //! ApproxContracts. Fresh non-state inputs remain exact per step.
 
-use verineural::{
-    Domain, LeanProofEngine, NeuralGraph, NumericError, RneStateRolloutPlan, Shape,
-};
+use verineural::{Domain, LeanProofEngine, NeuralGraph, NumericError, RneStateRolloutPlan, Shape};
 
 fn additive_transition() -> (NeuralGraph, verineural::NodeId, verineural::NodeId) {
     let mut graph = NeuralGraph::default();
@@ -85,10 +83,7 @@ fn lean_kernel_checks_each_composed_recurrent_step() {
     let (graph, state, next) = additive_transition();
     let rollout =
         RneStateRolloutPlan::compile_fixed(&graph, state, next, 20, 8_388_608, 4).unwrap();
-    let dir = std::env::temp_dir().join(format!(
-        "verineural-numeric-state-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("verineural-numeric-state-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let engine = LeanProofEngine::default();
 

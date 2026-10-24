@@ -4,8 +4,14 @@ use verineural::{Domain, GpuEngine, NeuralGraph, NodeStorage, Shape};
 
 #[test]
 fn shape_exposes_canonical_row_major_strides() {
-    assert_eq!(Shape::new([2, 3, 4]).unwrap().row_major_strides(), [12, 4, 1]);
-    assert_eq!(Shape::new(Vec::<usize>::new()).unwrap().row_major_strides(), []);
+    assert_eq!(
+        Shape::new([2, 3, 4]).unwrap().row_major_strides(),
+        [12, 4, 1]
+    );
+    assert_eq!(
+        Shape::new(Vec::<usize>::new()).unwrap().row_major_strides(),
+        []
+    );
 }
 
 #[test]

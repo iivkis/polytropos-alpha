@@ -538,10 +538,7 @@ impl Runner {
                     "recurrent_state",
                     Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
                 ),
-                (
-                    "token_bits",
-                    Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
-                ),
+                ("token_bits", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
                 (
                     "router_weights",
                     Tensor::from_slice([WIDTH, ACTIONS], &p.router)?,
@@ -553,10 +550,7 @@ impl Runner {
                 ("core0", Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?),
                 ("core1", Tensor::from_slice([WIDTH, WIDTH], &p.cores[1])?),
                 ("core_bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
-                (
-                    "head_weights",
-                    Tensor::from_slice([WIDTH, 1], &p.head)?,
-                ),
+                ("head_weights", Tensor::from_slice([WIDTH, 1], &p.head)?),
                 ("head_bias", Tensor::from_slice([1], &[p.head_bias])?),
             ],
             &workspace.path().join("deterministic"),
@@ -568,10 +562,7 @@ impl Runner {
                 model,
                 [
                     ("state", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
-                    (
-                        "token_bits",
-                        Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
-                    ),
+                    ("token_bits", Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?),
                     (
                         "base_weight",
                         Tensor::from_slice([WIDTH, WIDTH], &p.cores[core])?,
@@ -620,18 +611,12 @@ impl Runner {
         p: &Parameters,
         dict: &[f32; WIDTH],
     ) -> Result<(), Box<dyn Error>> {
-        self.router.set_input(
-            "dictionary_state",
-            &Tensor::from_slice([1, WIDTH], dict)?,
-        )?;
-        self.router.set_parameter(
-            "weights",
-            &Tensor::from_slice([WIDTH, ACTIONS], &p.router)?,
-        )?;
-        self.router.set_parameter(
-            "bias",
-            &Tensor::from_slice([ACTIONS], &p.router_bias)?,
-        )?;
+        self.router
+            .set_input("dictionary_state", &Tensor::from_slice([1, WIDTH], dict)?)?;
+        self.router
+            .set_parameter("weights", &Tensor::from_slice([WIDTH, ACTIONS], &p.router)?)?;
+        self.router
+            .set_parameter("bias", &Tensor::from_slice([ACTIONS], &p.router_bias)?)?;
         Ok(())
     }
 
@@ -642,18 +627,13 @@ impl Runner {
                 "base_weight",
                 &Tensor::from_slice([WIDTH, WIDTH], &p.cores[core])?,
             )?;
-            self.routes[action].set_parameter(
-                "bias",
-                &Tensor::from_slice([WIDTH], &p.core_bias)?,
-            )?;
+            self.routes[action]
+                .set_parameter("bias", &Tensor::from_slice([WIDTH], &p.core_bias)?)?;
         }
         Ok(())
     }
 
-    fn logits(
-        &mut self,
-        state: &[f32; WIDTH],
-    ) -> Result<[f32; ACTIONS], Box<dyn Error>> {
+    fn logits(&mut self, state: &[f32; WIDTH]) -> Result<[f32; ACTIONS], Box<dyn Error>> {
         self.router
             .set_input("state", &Tensor::from_slice([1, WIDTH], state)?)?;
         self.router.run()?;
@@ -694,14 +674,10 @@ impl Runner {
     }
 
     fn readout(&mut self, p: &Parameters, state: &[f32; WIDTH]) -> Result<f32, Box<dyn Error>> {
-        self.head.set_input(
-            "final_state",
-            &Tensor::from_slice([1, WIDTH], state)?,
-        )?;
-        self.head.set_parameter(
-            "weights",
-            &Tensor::from_slice([WIDTH, 1], &p.head)?,
-        )?;
+        self.head
+            .set_input("final_state", &Tensor::from_slice([1, WIDTH], state)?)?;
+        self.head
+            .set_parameter("weights", &Tensor::from_slice([WIDTH, 1], &p.head)?)?;
         self.head
             .set_parameter("bias", &Tensor::from_slice([1], &[p.head_bias])?)?;
         self.head.run()?;
@@ -734,10 +710,8 @@ impl Runner {
         // Parameters and sequence-wide dictionary features are uploaded once
         // per forward call. Per token only token_bits changes; state feedback
         // stays on-device through ModelExecution::step().
-        self.deterministic.set_input(
-            "dictionary_state",
-            &Tensor::from_slice([1, WIDTH], &dict)?,
-        )?;
+        self.deterministic
+            .set_input("dictionary_state", &Tensor::from_slice([1, WIDTH], &dict)?)?;
         self.deterministic.set_state(
             "recurrent_state",
             &Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
@@ -750,26 +724,16 @@ impl Runner {
             "router_bias",
             &Tensor::from_slice([ACTIONS], &p.router_bias)?,
         )?;
-        self.deterministic.set_parameter(
-            "core0",
-            &Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?,
-        )?;
-        self.deterministic.set_parameter(
-            "core1",
-            &Tensor::from_slice([WIDTH, WIDTH], &p.cores[1])?,
-        )?;
-        self.deterministic.set_parameter(
-            "core_bias",
-            &Tensor::from_slice([WIDTH], &p.core_bias)?,
-        )?;
-        self.deterministic.set_parameter(
-            "head_weights",
-            &Tensor::from_slice([WIDTH, 1], &p.head)?,
-        )?;
-        self.deterministic.set_parameter(
-            "head_bias",
-            &Tensor::from_slice([1], &[p.head_bias])?,
-        )?;
+        self.deterministic
+            .set_parameter("core0", &Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?)?;
+        self.deterministic
+            .set_parameter("core1", &Tensor::from_slice([WIDTH, WIDTH], &p.cores[1])?)?;
+        self.deterministic
+            .set_parameter("core_bias", &Tensor::from_slice([WIDTH], &p.core_bias)?)?;
+        self.deterministic
+            .set_parameter("head_weights", &Tensor::from_slice([WIDTH, 1], &p.head)?)?;
+        self.deterministic
+            .set_parameter("head_bias", &Tensor::from_slice([1], &[p.head_bias])?)?;
 
         for &token in &tokens {
             let features = std::array::from_fn(|i| dict[i] + state[i]);
@@ -1302,7 +1266,10 @@ mod tests {
                 assert!(ir.contains("reverse_axis:"));
             }
         }
-        assert_eq!(argmax_first(&[f32::NAN, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), 1);
+        assert_eq!(
+            argmax_first(&[f32::NAN, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            1
+        );
         assert_eq!(argmax_first(&[f32::NAN; ACTIONS]), 0);
 
         let mut rng = Rng::new(7);

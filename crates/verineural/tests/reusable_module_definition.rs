@@ -92,19 +92,22 @@ fn one_definition_theorem_is_reused_by_two_concrete_instances() {
             .count(),
         1
     );
-    assert!(program
-        .source()
-        .contains("theorem module_definition_positive_join_instance_0 "));
-    assert!(program
-        .source()
-        .contains("theorem module_definition_positive_join_instance_1 "));
+    assert!(
+        program
+            .source()
+            .contains("theorem module_definition_positive_join_instance_0 ")
+    );
+    assert!(
+        program
+            .source()
+            .contains("theorem module_definition_positive_join_instance_1 ")
+    );
 
     let start = program
         .source()
         .find("def module_definition_positive_join ")
         .unwrap();
-    let end = program
-        .source()[start..]
+    let end = program.source()[start..]
         .find("theorem module_definition_positive_join_instance_0 ")
         .map(|offset| start + offset)
         .unwrap();
@@ -130,15 +133,21 @@ fn one_definition_theorem_is_reused_by_two_concrete_instances() {
     assert!(instance0.contains("module_definition_positive_join_nonnegative"));
     assert!(instance0.contains("h_0 h_1"));
 
-    assert!(program
-        .theorem_names()
-        .contains(&"module_definition_positive_join_nonnegative".to_owned()));
-    assert!(program
-        .theorem_names()
-        .contains(&"module_definition_positive_join_instance_0".to_owned()));
-    assert!(program
-        .theorem_names()
-        .contains(&"module_definition_positive_join_instance_1".to_owned()));
+    assert!(
+        program
+            .theorem_names()
+            .contains(&"module_definition_positive_join_nonnegative".to_owned())
+    );
+    assert!(
+        program
+            .theorem_names()
+            .contains(&"module_definition_positive_join_instance_0".to_owned())
+    );
+    assert!(
+        program
+            .theorem_names()
+            .contains(&"module_definition_positive_join_instance_1".to_owned())
+    );
 }
 
 #[test]
@@ -155,8 +164,11 @@ fn same_identity_with_different_body_cannot_reuse_definition_proof() {
         .unwrap();
 
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_reusable_module_nonnegative(&graph, &[0, 1], "lying_identity"),
+        LeanProofEngine::default().generate_reusable_module_nonnegative(
+            &graph,
+            &[0, 1],
+            "lying_identity"
+        ),
         Err(ProofError::ModuleDefinitionMismatch {
             representative: 0,
             other: 1
@@ -168,8 +180,11 @@ fn same_identity_with_different_body_cannot_reuse_definition_proof() {
 fn duplicate_instance_request_is_rejected_instead_of_counted_as_reuse() {
     let graph = repeated_graph();
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_reusable_module_nonnegative(&graph, &[0, 0], "duplicate"),
+        LeanProofEngine::default().generate_reusable_module_nonnegative(
+            &graph,
+            &[0, 0],
+            "duplicate"
+        ),
         Err(ProofError::InvalidOutputs)
     ));
 }
@@ -182,10 +197,8 @@ fn lean_checks_shared_definition_and_each_instance_application() {
     let program = LeanProofEngine::default()
         .generate_reusable_module_nonnegative(&graph, &[0, 1], "positive_join")
         .unwrap();
-    let dir = std::env::temp_dir().join(format!(
-        "verineural-reusable-module-{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("verineural-reusable-module-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     LeanProofEngine::default()
         .verify_certified(&program, &dir.join("reusable_module.lean"))

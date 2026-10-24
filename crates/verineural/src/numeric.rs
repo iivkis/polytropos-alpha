@@ -1878,18 +1878,8 @@ impl RneSelectPlan {
                 source_fraction_bits,
                 source_bound_ticks,
             )?,
-            yes_plan: RneRangePlan::compile(
-                graph,
-                yes,
-                source_fraction_bits,
-                source_bound_ticks,
-            )?,
-            no_plan: RneRangePlan::compile(
-                graph,
-                no,
-                source_fraction_bits,
-                source_bound_ticks,
-            )?,
+            yes_plan: RneRangePlan::compile(graph, yes, source_fraction_bits, source_bound_ticks)?,
+            no_plan: RneRangePlan::compile(graph, no, source_fraction_bits, source_bound_ticks)?,
         })
     }
 
@@ -1927,9 +1917,7 @@ impl RneSelectPlan {
             .classify_condition(self.condition, observed_condition)?;
         let (selected, contract) = match condition_evidence.side() {
             RneThresholdSide::Positive => (Some(self.yes), Some(self.yes_plan.output_contract())),
-            RneThresholdSide::NonPositive => {
-                (Some(self.no), Some(self.no_plan.output_contract()))
-            }
+            RneThresholdSide::NonPositive => (Some(self.no), Some(self.no_plan.output_contract())),
             RneThresholdSide::Indeterminate => (None, None),
         };
         Ok(RneSelectEvidence {
@@ -1992,10 +1980,9 @@ impl RneSelectPlan {
             RneThresholdSide::Positive => {
                 format!("{} < ({observed_ticks} : Int)", condition.epsilon_ticks)
             }
-            RneThresholdSide::NonPositive => format!(
-                "({observed_ticks} : Int) + {} ≤ 0",
-                condition.epsilon_ticks
-            ),
+            RneThresholdSide::NonPositive => {
+                format!("({observed_ticks} : Int) + {} ≤ 0", condition.epsilon_ticks)
+            }
             RneThresholdSide::Indeterminate => unreachable!("handled above"),
         };
         let source = format!(
@@ -2204,7 +2191,11 @@ impl RneRangePlan {
             let trace = match node.operation {
                 Operation::Input => {
                     rules.insert(index, RneRangeRule::Input);
-                    overrides.get(&index).copied().map(Ok).unwrap_or_else(source_contract)?
+                    overrides
+                        .get(&index)
+                        .copied()
+                        .map(Ok)
+                        .unwrap_or_else(source_contract)?
                 }
                 Operation::Add | Operation::BiasAdd => {
                     let left = contracts[&node.inputs[0].index()];

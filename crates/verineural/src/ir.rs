@@ -707,13 +707,8 @@ impl NodeId {
 /// storage except Reshape, which is a zero-copy contiguous alias.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeStorage {
-    OwnedContiguous {
-        strides: Vec<usize>,
-    },
-    Alias {
-        source: NodeId,
-        strides: Vec<usize>,
-    },
+    OwnedContiguous { strides: Vec<usize> },
+    Alias { source: NodeId, strides: Vec<usize> },
 }
 
 impl NodeStorage {

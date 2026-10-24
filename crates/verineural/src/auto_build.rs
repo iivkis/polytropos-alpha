@@ -655,8 +655,7 @@ impl ArchitectureAutoCompiler {
                         ));
                     }
                     for (theorem, axioms) in memory_audit.axiom_dependencies {
-                        axiom_dependencies
-                            .insert(format!("gpu_{index}.memory.{theorem}"), axioms);
+                        axiom_dependencies.insert(format!("gpu_{index}.memory.{theorem}"), axioms);
                     }
                     output_evidence.push(OutputBuildEvidence {
                         node: output.index(),
@@ -903,16 +902,16 @@ impl ArchitectureAutoCompiler {
                     let memory = program.memory_lean_program()?;
                     let memory_file = gpu_dir.join("memory.lean");
                     verify_source(&self.proof, &memory_file, &memory)?;
-                    let memory_audit =
-                        self.proof.audit_file(&memory_file, memory.theorem_names())?;
+                    let memory_audit = self
+                        .proof
+                        .audit_file(&memory_file, memory.theorem_names())?;
                     if memory_audit.lean_version != lean_version {
                         return Err(AutoBuildError::Integrity(
                             "Lean checker version changed while replaying GPU memory proofs".into(),
                         ));
                     }
                     for (theorem, axioms) in memory_audit.axiom_dependencies {
-                        axiom_dependencies
-                            .insert(format!("gpu_{index}.memory.{theorem}"), axioms);
+                        axiom_dependencies.insert(format!("gpu_{index}.memory.{theorem}"), axioms);
                     }
                     let ptx_file = gpu_dir.join("graph.ptx");
                     output_evidence.push(OutputBuildEvidence {
@@ -941,7 +940,9 @@ impl ArchitectureAutoCompiler {
             let memory = program.memory_lean_program()?;
             let memory_file = shared_dir.join("memory.lean");
             verify_source(&self.proof, &memory_file, &memory)?;
-            let memory_audit = self.proof.audit_file(&memory_file, memory.theorem_names())?;
+            let memory_audit = self
+                .proof
+                .audit_file(&memory_file, memory.theorem_names())?;
             if memory_audit.lean_version != lean_version {
                 return Err(AutoBuildError::Integrity(
                     "Lean checker version changed while replaying shared GPU memory proofs".into(),

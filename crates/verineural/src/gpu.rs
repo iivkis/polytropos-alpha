@@ -513,7 +513,8 @@ impl GpuProgram {
                 continue;
             }
             let node = &self.graph.nodes()[index];
-            if matches!(node.operation, Operation::Input) || self.graph.storage(node.id)?.is_alias() {
+            if matches!(node.operation, Operation::Input) || self.graph.storage(node.id)?.is_alias()
+            {
                 continue;
             }
             let writes = node.shape.element_count();
@@ -611,7 +612,7 @@ impl GpuProgram {
                                 lane: writes,
                                 choices: data.shape.dims()[0],
                             }
-                        },
+                        }
                         _ => GpuMemoryPattern::Pointwise,
                     };
                     (
@@ -658,10 +659,7 @@ impl GpuProgram {
                 }
                 GpuMemoryPattern::ReverseRows2D { rows, columns }
                 | GpuMemoryPattern::ReverseColumns2D { rows, columns } => {
-                    if rows == 0
-                        || columns == 0
-                        || rows.checked_mul(columns) != Some(writes)
-                    {
+                    if rows == 0 || columns == 0 || rows.checked_mul(columns) != Some(writes) {
                         return Err(GpuError::InvalidInput {
                             node: index,
                             reason: "reverse2d output extent mismatch",
@@ -852,7 +850,9 @@ impl GpuProgram {
                         }
                     },
                     Operation::Concat { axis: 0 } => match contract.pattern {
-                        GpuMemoryPattern::ConcatAxis0 { left } => TranslationKind::ConcatAxis0 { left },
+                        GpuMemoryPattern::ConcatAxis0 { left } => {
+                            TranslationKind::ConcatAxis0 { left }
+                        }
                         _ => {
                             return Err(GpuError::Fp32PtxRejected {
                                 reason: "Concat(0) lacks memory contract".into(),
@@ -860,7 +860,9 @@ impl GpuProgram {
                         }
                     },
                     Operation::ArgMax { axis: 1, .. } => match contract.pattern {
-                        GpuMemoryPattern::ArgMaxLast { width } => TranslationKind::ArgMaxLast { width },
+                        GpuMemoryPattern::ArgMaxLast { width } => {
+                            TranslationKind::ArgMaxLast { width }
+                        }
                         _ => {
                             return Err(GpuError::Fp32PtxRejected {
                                 reason: "ArgMax(last) lacks memory contract".into(),
@@ -868,7 +870,9 @@ impl GpuProgram {
                         }
                     },
                     Operation::Take { axis: 0 } => match contract.pattern {
-                        GpuMemoryPattern::TakeAxis0 { lane, .. } => TranslationKind::TakeAxis0 { lane },
+                        GpuMemoryPattern::TakeAxis0 { lane, .. } => {
+                            TranslationKind::TakeAxis0 { lane }
+                        }
                         _ => {
                             return Err(GpuError::Fp32PtxRejected {
                                 reason: "Take(0) lacks memory contract".into(),
@@ -932,7 +936,10 @@ impl GpuProgram {
         }
 
         let skipped = self.skipped_nodes();
-        let launched = kernels.iter().map(|kernel| kernel.node).collect::<BTreeSet<_>>();
+        let launched = kernels
+            .iter()
+            .map(|kernel| kernel.node)
+            .collect::<BTreeSet<_>>();
         let mut expected = BTreeSet::new();
         for &index in &self.live_nodes {
             let node = &self.graph.nodes()[index];
@@ -1110,7 +1117,8 @@ impl GpuProgram {
                     theorems.push(name);
                 }
                 GpuMemoryPattern::ReverseColumns2D { rows, columns } => {
-                    let name = format!("memory_node_{}_reverse_columns_bound", contract.kernel_node);
+                    let name =
+                        format!("memory_node_{}_reverse_columns_bound", contract.kernel_node);
                     source.push_str(&format!(
                         "theorem {name} (index : Nat) (active : index < {rows} * {columns}) :\n    (index / {columns}) * {columns} + ({columns} - 1 - index % {columns}) < {rows} * {columns} := by\n  exact VeriNeural.reverse_columns2d_address_bound (by decide) active\n\n"
                     ));
@@ -1118,7 +1126,8 @@ impl GpuProgram {
                 }
                 GpuMemoryPattern::ConcatAxis0 { left } => {
                     let right = contract.reads[1].1;
-                    let left_name = format!("memory_node_{}_concat_left_bound", contract.kernel_node);
+                    let left_name =
+                        format!("memory_node_{}_concat_left_bound", contract.kernel_node);
                     source.push_str(&format!(
                         "theorem {left_name} (index : Nat) (active : index < {left}) : index < {left} := by\n  exact VeriNeural.pointwise_address_bound active\n\n"
                     ));
@@ -1138,8 +1147,10 @@ impl GpuProgram {
                         "theorem {first_name} (index : Nat) (active : index < {rows}) : index * {width} < {rows} * {width} := by\n  exact VeriNeural.argmax_first_address_bound (by decide) active\n\n"
                     ));
                     theorems.push(first_name);
-                    let candidate_name =
-                        format!("memory_node_{}_argmax_candidate_bound", contract.kernel_node);
+                    let candidate_name = format!(
+                        "memory_node_{}_argmax_candidate_bound",
+                        contract.kernel_node
+                    );
                     source.push_str(&format!(
                         "theorem {candidate_name} (index lane : Nat) (active : index < {rows}) (candidate : lane < {width}) : index * {width} + lane < {rows} * {width} := by\n  exact VeriNeural.argmax_candidate_address_bound active candidate\n\n"
                     ));
@@ -1148,12 +1159,9 @@ impl GpuProgram {
                 GpuMemoryPattern::TakeAxis0 { lane, choices } => {
                     let index_name =
                         format!("memory_node_{}_take_index_nonempty", contract.kernel_node);
-                    source.push_str(&format!(
-                        "theorem {index_name} : 0 < 1 := by decide\n\n"
-                    ));
+                    source.push_str(&format!("theorem {index_name} : 0 < 1 := by decide\n\n"));
                     theorems.push(index_name);
-                    let bound_name =
-                        format!("memory_node_{}_take_bound", contract.kernel_node);
+                    let bound_name = format!("memory_node_{}_take_bound", contract.kernel_node);
                     source.push_str(&format!(
                         "theorem {bound_name} (selected index : Nat) (selectedBound : selected < {choices}) (active : index < {lane}) : selected * {lane} + index < {choices} * {lane} := by\n  exact VeriNeural.take_axis0_address_bound selectedBound active\n\n"
                     ));
@@ -1788,10 +1796,8 @@ impl GpuEngine {
                     }
                     Operation::Concat { axis: 0 } => {
                         let left = &graph.nodes()[node.inputs[0].index()];
-                        llvm_ir.push_str(&concat_axis0_kernel_ir(
-                            index,
-                            left.shape.element_count(),
-                        ));
+                        llvm_ir
+                            .push_str(&concat_axis0_kernel_ir(index, left.shape.element_count()));
                     }
                     Operation::ArgMax {
                         axis: 1,
@@ -1932,16 +1938,19 @@ impl GpuEngine {
                     let ptr = buffers[&source.index()];
                     buffers.insert(index, ptr);
                 }
-                (Operation::Add
-                | Operation::Mul
-                | Operation::MatMul
-                | Operation::BiasAdd
-                | Operation::Relu
-                | Operation::Permute { .. }
-                | Operation::ReverseAxis { .. }
-                | Operation::Concat { .. }
-                | Operation::ArgMax { .. }
-                | Operation::Take { .. }, NodeStorage::OwnedContiguous { .. }) => {
+                (
+                    Operation::Add
+                    | Operation::Mul
+                    | Operation::MatMul
+                    | Operation::BiasAdd
+                    | Operation::Relu
+                    | Operation::Permute { .. }
+                    | Operation::ReverseAxis { .. }
+                    | Operation::Concat { .. }
+                    | Operation::ArgMax { .. }
+                    | Operation::Take { .. },
+                    NodeStorage::OwnedContiguous { .. },
+                ) => {
                     let ptr = session.allocate(node.shape.element_count())?;
                     buffers.insert(index, ptr);
                 }
@@ -2254,7 +2263,6 @@ fn matmul_kernel_ir(index: usize, inner: usize, columns: usize) -> String {
          }}\n\n"
     )
 }
-
 
 fn transpose2d_kernel_ir(index: usize, rows: usize, columns: usize) -> String {
     format!(

@@ -17,14 +17,13 @@ fn host_slice_axis_preserves_row_major_coordinates() {
 #[test]
 fn graph_slice_records_bounds_and_rejects_invalid_intervals_atomically() {
     let mut graph = NeuralGraph::default();
-    let input = graph.input(Shape::new(vec![2, 4, 2]).unwrap(), Domain::NonNegativeFinite);
+    let input = graph.input(
+        Shape::new(vec![2, 4, 2]).unwrap(),
+        Domain::NonNegativeFinite,
+    );
     let sliced = graph.slice_axis(input, 1, 1, 2).unwrap();
     assert_eq!(graph.node(sliced).unwrap().shape.dims(), &[2, 2, 2]);
-    assert!(
-        graph
-            .canonical_ir()
-            .contains("slice_axis:1:start=1:len=2")
-    );
+    assert!(graph.canonical_ir().contains("slice_axis:1:start=1:len=2"));
 
     let before = graph.nodes().len();
     assert!(matches!(
@@ -69,10 +68,7 @@ fn lean_kernel_checks_static_slice_semantics() {
     let input = graph.input(Shape::new(vec![2, 4]).unwrap(), Domain::NonNegativeFinite);
     let sliced = graph.slice_axis(input, 1, 1, 2).unwrap();
     let program = LeanProofEngine::default().generate(&graph, sliced).unwrap();
-    let dir = std::env::temp_dir().join(format!(
-        "verineural-tensor-slice-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("verineural-tensor-slice-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     LeanProofEngine::default()
         .verify_certified(&program, &Path::new(&dir).join("slice.lean"))

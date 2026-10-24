@@ -36,7 +36,10 @@ fn stable_select_inherits_only_the_chosen_branch_contract() {
     let positive = plan.classify(4.0).unwrap();
     assert_eq!(positive.side(), RneThresholdSide::Positive);
     assert_eq!(positive.selected(), Some(plan.yes()));
-    assert_eq!(positive.contract().unwrap(), plan.yes_plan().output_contract());
+    assert_eq!(
+        positive.contract().unwrap(),
+        plan.yes_plan().output_contract()
+    );
     assert_eq!(positive.contract().unwrap().epsilon_ticks(), 0);
 
     let nonpositive = plan.classify(-4.0).unwrap();
@@ -90,16 +93,20 @@ fn generated_rule_records_margin_and_selected_contract() {
     let plan = RneSelectPlan::compile(&graph, selected, 20, 8_388_608).unwrap();
 
     let positive = plan.lean_program(4.0).unwrap();
-    assert!(positive.source().contains(
-        "VeriNeural.approx_contract_positive_mask_select_positive"
-    ));
+    assert!(
+        positive
+            .source()
+            .contains("VeriNeural.approx_contract_positive_mask_select_positive")
+    );
     assert!(positive.source().contains("have hmargin"));
     assert_eq!(positive.theorem_names().len(), 1);
 
     let nonpositive = plan.lean_program(-4.0).unwrap();
-    assert!(nonpositive.source().contains(
-        "VeriNeural.approx_contract_positive_mask_select_nonpositive"
-    ));
+    assert!(
+        nonpositive
+            .source()
+            .contains("VeriNeural.approx_contract_positive_mask_select_nonpositive")
+    );
     assert_eq!(nonpositive.theorem_names().len(), 1);
 }
 
@@ -109,10 +116,8 @@ fn generated_rule_records_margin_and_selected_contract() {
 fn lean_checks_both_stable_select_rules() {
     let (graph, selected) = graph();
     let plan = RneSelectPlan::compile(&graph, selected, 20, 8_388_608).unwrap();
-    let dir = std::env::temp_dir().join(format!(
-        "verineural-numeric-branch-{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("verineural-numeric-branch-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let engine = LeanProofEngine::default();
 

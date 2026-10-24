@@ -78,9 +78,9 @@ pub use model::{Model, ModelBuilder, ModelError, SourceRole};
 pub use model_execution::{ModelExecution, ModelExecutionError};
 pub use modules::{Dense, ResidualAdd, ResidualFfn};
 pub use numeric::{
-    ExactFp32Plan, NumericError, RneConditionEvidence, RneErrorContract, RneFp32Plan,
-    RneFp32Trace, RneModuleErrorContract, RneRangePlan, RneSelectEvidence, RneSelectPlan,
-    RneStateRolloutPlan, RneStateStepContract, RneThresholdEvidence, RneThresholdSide,
+    ExactFp32Plan, NumericError, RneConditionEvidence, RneErrorContract, RneFp32Plan, RneFp32Trace,
+    RneModuleErrorContract, RneRangePlan, RneSelectEvidence, RneSelectPlan, RneStateRolloutPlan,
+    RneStateStepContract, RneThresholdEvidence, RneThresholdSide,
 };
 pub use primitive::{PointwiseExpr, PointwiseSpec, PrimitiveExpr, PrimitiveSpec};
 pub use proof::{

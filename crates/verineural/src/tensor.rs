@@ -183,12 +183,7 @@ impl<T: Clone> Tensor<T> {
     }
 
     /// Static contiguous slice of one row-major axis.
-    pub fn slice_axis(
-        &self,
-        axis: usize,
-        start: usize,
-        len: usize,
-    ) -> Result<Self, NeuralError> {
+    pub fn slice_axis(&self, axis: usize, start: usize, len: usize) -> Result<Self, NeuralError> {
         let operation = Operation::SliceAxis { axis, start, len };
         let shape = operation.infer_shape(std::slice::from_ref(&self.shape))?;
         let mut values = Vec::with_capacity(shape.element_count());
