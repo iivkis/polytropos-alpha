@@ -559,9 +559,13 @@ theorem approx_contract_positive_mask_select_positive
   rcases hcondition with ⟨_hbound, hepsilon, _hideal, herr⟩
   unfold ApproxWithin Within at herr
   rcases herr with ⟨_hlower, hupper⟩
-  have hactual : 0 < conditionActual := by omega
-  have hideal : 0 < conditionIdeal := by omega
-  have hzeroOne : (0 : Nat) < 1 := by decide
+  have hactual : 0 < conditionActual :=
+    lt_of_le_of_lt hepsilon hmargin
+  have hsub : conditionActual - conditionIdeal < conditionActual :=
+    lt_of_le_of_lt hupper hmargin
+  have hideal : 0 < conditionIdeal :=
+    (sub_lt_self_iff conditionActual).mp hsub
+  have hzeroOne : (0 : Nat) < 1 := Nat.zero_lt_succ 0
   rw [if_pos hideal, if_pos hzeroOne, if_pos hactual, if_pos hzeroOne]
   exact hyes
 
@@ -578,11 +582,19 @@ theorem approx_contract_positive_mask_select_nonpositive
   rcases hcondition with ⟨_hbound, hepsilon, _hideal, herr⟩
   unfold ApproxWithin Within at herr
   rcases herr with ⟨hlower, _hupper⟩
-  have hactual : conditionActual ≤ 0 := by omega
-  have hideal : conditionIdeal ≤ 0 := by omega
+  have hactualUpper :
+      conditionActual ≤ conditionActual + conditionEpsilon :=
+    le_add_of_nonneg_right hepsilon
+  have hactual : conditionActual ≤ 0 :=
+    le_trans hactualUpper hmargin
+  have hidealUpper :
+      conditionIdeal ≤ conditionActual + conditionEpsilon :=
+    (neg_le_sub_iff_le_add).mp hlower
+  have hideal : conditionIdeal ≤ 0 :=
+    le_trans hidealUpper hmargin
   have hactualNot : ¬ 0 < conditionActual := Int.not_lt.mpr hactual
   have hidealNot : ¬ 0 < conditionIdeal := Int.not_lt.mpr hideal
-  have hzeroZero : ¬ (0 : Nat) < 0 := by decide
+  have hzeroZero : ¬ (0 : Nat) < 0 := Nat.lt_irrefl 0
   rw [if_neg hidealNot, if_neg hzeroZero, if_neg hactualNot, if_neg hzeroZero]
   exact hno
 

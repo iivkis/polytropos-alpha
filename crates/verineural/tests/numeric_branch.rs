@@ -99,6 +99,8 @@ fn generated_rule_records_margin_and_selected_contract() {
             .contains("VeriNeural.approx_contract_positive_mask_select_positive")
     );
     assert!(positive.source().contains("have hmargin"));
+    assert!(positive.source().contains("have hmargin : 2 < (4194304 : Int) := by decide"));
+    assert!(!positive.source().contains("have hmargin : 2 < (4194304 : Int) := by omega"));
     assert!(positive.source().contains("theorem matmul_address_bounds"));
     assert!(
         positive
