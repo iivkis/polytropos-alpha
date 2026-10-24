@@ -392,14 +392,18 @@ mod tests {
         // Nested custom pointwise ReLU consumes a MatMul application. The
         // normalized global proof must not treat named (m/k/n) arguments
         // as arguments to ReLU.
-        assert!(plan.goals[0]
-            .1
-            .source()
-            .contains("VeriNeural.relu_nonnegative (VeriNeural.matmul"));
-        assert!(!plan.goals[0]
-            .1
-            .source()
-            .contains("VeriNeural.relu_nonnegative VeriNeural.matmul"));
+        assert!(
+            plan.goals[0]
+                .1
+                .source()
+                .contains("VeriNeural.relu_nonnegative (VeriNeural.matmul")
+        );
+        assert!(
+            !plan.goals[0]
+                .1
+                .source()
+                .contains("VeriNeural.relu_nonnegative VeriNeural.matmul")
+        );
         assert!(matches!(plan.gpu[0], PlannedGpu::Unsupported { .. }));
         assert!(matches!(
             ArchitectureAutoCompiler::default().plan(

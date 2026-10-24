@@ -347,10 +347,7 @@ mod lean_term_tests {
         let matmul = "VeriNeural.matmul (m := 2) (k := 2) (n := 2) p_0 p_1";
         let input = |_port| matmul.to_owned();
         let relu = PointwiseExpr::input(0).relu();
-        assert_eq!(
-            relu.lean(&input),
-            format!("(VeriNeural.relu ({matmul}))")
-        );
+        assert_eq!(relu.lean(&input), format!("(VeriNeural.relu ({matmul}))"));
         assert_eq!(
             relu.nonnegative_lean(&input),
             Some(format!("VeriNeural.relu_nonnegative ({matmul})"))
