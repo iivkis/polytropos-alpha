@@ -452,6 +452,31 @@ tasks:
     cmds:
       - cargo test -p torus16-mix-lab --test gpu_forward -- --ignored --nocapture
 
+  lab-torus16-ema4:
+    desc: Inspect the 4-layer streaming EMA4-LM architecture built from VeriNeural primitives
+    deps: [prepare]
+    cmds:
+      - cargo run -p torus16-mix-lab --example ema4 -- --inspect
+
+  test-lab-torus16-ema4:
+    desc: Validate research-sized parameter count, all named states and causal CPU reference
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test pointwise_gpu
+      - cargo test -p torus16-mix-lab --test ema4
+
+  lab-torus16-ema4-gpu:
+    desc: Execute three EMA4-LM autoregressive steps through one persistent CUDA Graph
+    deps: [prepare]
+    cmds:
+      - cargo run -p torus16-mix-lab --example ema4 -- --gpu
+
+  verify-gpu-torus16-ema4:
+    desc: NVIDIA acceptance for streaming EMA4-LM logits and on-device EMA feedback
+    deps: [prepare]
+    cmds:
+      - cargo test -p torus16-mix-lab --test ema4 -- --ignored --nocapture
+
   certify-lab-torus16-mix:
     desc: Fail closed on unsupported certified numerical semantics of pointwise Exp/Div
     deps: [prepare]

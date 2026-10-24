@@ -25,6 +25,7 @@ pub enum TranslationKind {
     DivRne,
     /// Explicit experimental ex2.approx-based natural exponential.
     ExpApprox,
+    SqrtRne,
     BiasAdd {
         columns: usize,
     },
@@ -80,6 +81,7 @@ impl TranslationKind {
             Self::Sub => "sub_rn",
             Self::DivRne => "div_rn",
             Self::ExpApprox => "exp_approx",
+            Self::SqrtRne => "sqrt_rn",
             Self::BiasAdd { .. } => "bias_add",
             Self::MatMul { .. } => "matmul",
             Self::Transpose2D { .. } => "transpose2d",
@@ -103,7 +105,7 @@ impl TranslationKind {
         match self {
             Self::Add | Self::BiasAdd { .. } => (1, 0, 0),
             Self::Mul => (0, 1, 0),
-            Self::Sub | Self::DivRne => (0, 0, 0),
+            Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
             Self::MatMul { .. } => (1, 1, 0),
             Self::Transpose2D { .. }
@@ -126,6 +128,7 @@ impl TranslationKind {
         match self {
             Self::Relu
             | Self::ExpApprox
+            | Self::SqrtRne
             | Self::Transpose2D { .. }
             | Self::ReverseRows2D { .. }
             | Self::ReverseColumns2D { .. }
@@ -173,6 +176,7 @@ impl TranslationKind {
             "sub_rn" => Self::Sub,
             "div_rn" => Self::DivRne,
             "exp_approx" => Self::ExpApprox,
+            "sqrt_rn" => Self::SqrtRne,
             "bias_add" => Self::BiasAdd { columns },
             "matmul" => Self::MatMul { inner, columns },
             "transpose2d" => Self::Transpose2D {
@@ -389,6 +393,7 @@ impl TranslationPlan {
                     | TranslationKind::Sub
                     | TranslationKind::DivRne
                     | TranslationKind::ExpApprox
+                    | TranslationKind::SqrtRne
                     | TranslationKind::Relu
                     | TranslationKind::AddRelu
                     | TranslationKind::MulRelu
@@ -656,6 +661,7 @@ impl TranslationPlan {
             if matches!(
                 kernel.kind,
                 TranslationKind::Sub | TranslationKind::DivRne | TranslationKind::ExpApprox
+                    | TranslationKind::SqrtRne
             ) {
                 let (instruction, bound_result, expected_asm) = match kernel.kind {
                     TranslationKind::Sub => (
@@ -668,6 +674,11 @@ impl TranslationPlan {
                         "%value = call float asm sideeffect \"div.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)",
                         1,
                     ),
+                    TranslationKind::SqrtRne => (
+                        "sqrt.rn.f32",
+                        "%value = call float asm sideeffect \"sqrt.rn.f32 $0, $1;\", \"=f,f\"(float %x)",
+                        1,
+                    ),
                     TranslationKind::ExpApprox => (
                         "ex2.approx.f32",
                         "%value = call float asm sideeffect \"ex2.approx.f32 $0, $1;\", \"=f,f\"(float %scaled)",
@@ -676,7 +687,9 @@ impl TranslationPlan {
                     _ => unreachable!(),
                 };
                 let fp32_scales = usize::from(matches!(kernel.kind, TranslationKind::ExpApprox));
-                let correct_operands = if matches!(kernel.kind, TranslationKind::ExpApprox) {
+                let correct_operands = if matches!(kernel.kind, TranslationKind::SqrtRne) {
+                    !ir.contains("%bp = getelementptr")
+                } else if matches!(kernel.kind, TranslationKind::ExpApprox) {
                     ir.contains(&format!("%scaled = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float {LOG2_E_F32_LLVM})"))
                         && !ir.contains("%bp = getelementptr")
                 } else {
@@ -837,6 +850,7 @@ impl TranslationPlan {
                 TranslationKind::Sub
                 | TranslationKind::DivRne
                 | TranslationKind::ExpApprox
+                | TranslationKind::SqrtRne
                 | TranslationKind::MatMul { .. }
                 | TranslationKind::Transpose2D { .. }
                 | TranslationKind::ReverseRows2D { .. }

@@ -1,9 +1,12 @@
 //! Torus16-Mix operator consumer. One shared 48x48 W and eight gated roles.
 //! All forward operations are built from the public VeriNeural Semantic IR.
-//! This is the operator vertical slice, not the original trained four-layer LM.
+//! The operator is reusable by the EMA4 streaming LM consumer in this lab.
 use verineural::{
     Domain, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph, NodeId, Shape, Tensor,
 };
+
+pub mod ema4;
+pub mod ema4_reference;
 
 pub const WIDTH: usize = 48;
 pub const ROLES: usize = 8;
@@ -111,7 +114,7 @@ fn roll_left_graph(g: &mut NeuralGraph, x: NodeId, shift: usize) -> Result<NodeI
     g.concat(1, &[tail, head])
 }
 
-fn projection_graph(
+pub(crate) fn projection_graph(
     g: &mut NeuralGraph,
     inputs: &[NodeId],
     role: usize,

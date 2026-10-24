@@ -138,6 +138,7 @@ pub enum PointwiseExpr {
     Sub(Box<Self>, Box<Self>),
     Div(Box<Self>, Box<Self>),
     Exp(Box<Self>),
+    Sqrt(Box<Self>),
     Relu(Box<Self>),
 }
 
@@ -165,6 +166,9 @@ impl PointwiseExpr {
     pub fn exp(self) -> Self {
         Self::Exp(Box::new(self))
     }
+    pub fn sqrt(self) -> Self {
+        Self::Sqrt(Box::new(self))
+    }
     pub fn relu(self) -> Self {
         Self::Relu(Box::new(self))
     }
@@ -176,7 +180,7 @@ impl PointwiseExpr {
                 a.has_ideal_int_semantics() && b.has_ideal_int_semantics()
             }
             Self::Relu(a) => a.has_ideal_int_semantics(),
-            Self::Sub(..) | Self::Div(..) | Self::Exp(..) => false,
+            Self::Sub(..) | Self::Div(..) | Self::Exp(..) | Self::Sqrt(..) => false,
         }
     }
 
@@ -189,7 +193,7 @@ impl PointwiseExpr {
             Self::Add(a, b) | Self::Mul(a, b) | Self::Sub(a, b) | Self::Div(a, b) => {
                 a.valid(arity, remaining_depth - 1) && b.valid(arity, remaining_depth - 1)
             }
-            Self::Relu(a) | Self::Exp(a) => a.valid(arity, remaining_depth - 1),
+            Self::Relu(a) | Self::Exp(a) | Self::Sqrt(a) => a.valid(arity, remaining_depth - 1),
         }
     }
 
@@ -202,6 +206,7 @@ impl PointwiseExpr {
             Self::Sub(a, b) => format!("sub({},{})", a.canonical(), b.canonical()),
             Self::Div(a, b) => format!("div({},{})", a.canonical(), b.canonical()),
             Self::Exp(a) => format!("exp({})", a.canonical()),
+            Self::Sqrt(a) => format!("sqrt({})", a.canonical()),
             Self::Relu(a) => format!("relu({})", a.canonical()),
         }
     }
@@ -221,7 +226,7 @@ impl PointwiseExpr {
                 format!("(VeriNeural.mul {} {})", a.lean(input), b.lean(input))
             }
             Self::Relu(a) => format!("(VeriNeural.relu {})", a.lean(input)),
-            Self::Sub(..) | Self::Div(..) | Self::Exp(..) => {
+            Self::Sub(..) | Self::Div(..) | Self::Exp(..) | Self::Sqrt(..) => {
                 unreachable!(
                     "unsupported pointwise expression must be rejected before Lean generation"
                 )
@@ -249,6 +254,7 @@ impl PointwiseExpr {
             Self::Sub(a, b) => a.evaluate(input) - b.evaluate(input),
             Self::Div(a, b) => a.evaluate(input) / b.evaluate(input),
             Self::Exp(a) => a.evaluate(input).exp(),
+            Self::Sqrt(a) => a.evaluate(input).sqrt(),
             Self::Relu(inner) => {
                 let value = inner.evaluate(input);
                 if value.is_nan() || value > 0.0 {

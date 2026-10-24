@@ -3,8 +3,9 @@
 Лаборатория-потребитель публичного API VeriNeural. Источник математики:
 исследовательский handoff от 2026-10-25, файл
 projects/virtual16_recurrent_operator/operator16.py, режим torus16_mix.
-Эта версия переносит **ядро оператора**; полный четырёхслойный EMA4-LM
-(Conv9, RMSNorm, SwiGLU, embedding, head), обучение и оценку BPC пока не переносит.
+Версия 0.1.0 сохраняет автономный оператор, а модуль `ema4` теперь
+собирает также 4-layer streaming EMA4-LM из тех же примитивов.
+Отдельное обучение и оценка BPC пока не реализованы.
 Не сравнивать эти данные с качеством обученной модели из handoff.
 
 ## Семантика
@@ -106,3 +107,55 @@ backpropagation, AdamW, оценка BPC и VRAM benchmarks. Число
 артефакта.
 
 PyTorch-паритет **намеренно не реализован**, как и требовалось.
+
+
+## EMA4-LM streaming architecture
+
+Файл `src/ema4.rs` собирает **полную структуру вычисления одного
+токена**, соответствующую исследовательскому `OperatorBlock.step`:
+
+- Размерность 48; 4 блока, по 8 ролей Torus16-Mix в каждом;
+  физическая матрица W одна **на блок**, виртуальные веса не хранятся.
+- По две LayerNorm и две causal depthwise Conv9 на блок.
+- EMA: `s[t] = sigmoid(decay_logit)*s[t-1] +
+  (1-sigmoid(decay_logit))*sigmoid(role1)*role2`.
+- Gate role0, readout role3, два входных/два выходных SwiGLU-оператора
+  в ролях 4..7 и повторное использование ролей 0,1 для down.
+- One-hot `[1,V]` → обучаемое `[V,48]` embedding → 4 блока
+  → final LayerNorm → `[1,V]` tied embedding/head.
+- `ModelBuilder::state` / `next_state` определяют 68
+  потоковых state tensors: 4 EMA + 4 * 2 * 8 Conv9 history vectors.
+  Никакого растущего KV-кэша или скрытого host recurrence.
+- При `V=104` ровно **24 908 trainable параметров** (формула
+  подсчитана для тех же групп параметров, что у исследовательской сети).
+  Нормировки, операторы и Conv9 имеют собственные веса каждого блока.
+  Встроенная `Ema4Weights::deterministic` создаёт **тестовые, а не
+  обученные** значения. Модуль `ema4_reference` является только
+  независимым численным оракулом, не отдельным backend.
+
+```sh
+task lab-torus16-ema4
+task test-lab-torus16-ema4
+task lab-torus16-ema4-gpu
+task verify-gpu-torus16-ema4
+```
+
+В GPU-режиме один вызов `prepare_model` компилирует общую архитектуру;
+дальше `ModelExecution.step` обновляет 68 state buffers на устройстве,
+а `set_input` заменяет токены без пересборки. На каждом шаге логиты и
+память сравниваются со скалярным Rust reference. Это **реальный
+CUDA Graph forward на одном токене за шаг**, а не обучающий запуск.
+
+Для LayerNorm добавлен общий pointwise `verineural.sqrt@1` с
+исполняемым `sqrt.rn.f32`, без фиктивного доказательства положительности
+произвольных промежуточных значений. Строгая FP32-модель экспоненты
+не реализована; обычный `Exp` в полном forward требует явного
+`with_approximate_exp()`. Численный прогон не означает Lean/IEEE/SASS
+сертификат. Универсальные GPU-операции живут в VeriNeural; вся
+EMA4-LM остаётся в `labs/`.
+
+**Не готово:** autograd, optimizer/AdamW, обучение, реальные веса
+из PyTorch checkpoint, BPC/качество, батч T>1, GPU throughput и
+сопоставление с исследовательской обученной моделью. Четырёхслойный
+потоковый inference и её обученное качество — разные вещи.
+

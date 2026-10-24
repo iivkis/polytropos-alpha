@@ -1256,9 +1256,17 @@ impl NeuralGraph {
         spec.apply(self, &[a, b])
     }
 
-    /// Elementwise natural exponential: host reference only, GPU/proof unsupported.
+    /// Elementwise natural exponential: experimental GPU lowering, proof unsupported.
     pub fn exp(&mut self, input: NodeId) -> Result<NodeId, NeuralError> {
         let spec = PointwiseSpec::new("verineural.exp", "1", 1, PointwiseExpr::input(0).exp())?;
+        spec.apply(self, &[input])
+    }
+
+    /// IEEE-style sqrt on any binary32 input, including NaN for negative inputs.
+    /// Unlike the contract-restricted Sqrt node, this pointwise primitive
+    /// accepts unrestricted inputs and is not a mathematical proof of positivity.
+    pub fn sqrt_ieee(&mut self, input: NodeId) -> Result<NodeId, NeuralError> {
+        let spec = PointwiseSpec::new("verineural.sqrt", "1", 1, PointwiseExpr::input(0).sqrt())?;
         spec.apply(self, &[input])
     }
 

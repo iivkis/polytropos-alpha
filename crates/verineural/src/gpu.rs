@@ -408,9 +408,11 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
     let expected_exp2s = llvm_ir
         .matches("call float asm sideeffect \"ex2.approx.f32")
         .count();
+    let expected_sqrts = llvm_ir.matches("call float asm sideeffect \"sqrt.rn.f32").count();
     let mut rounded_subs = 0usize;
     let mut rounded_divs = 0usize;
     let mut approximate_exp2s = 0usize;
+    let mut rounded_sqrts = 0usize;
     let mut rounded_adds = 0usize;
     let mut rounded_muls = 0usize;
     let mut block_comment = false;
@@ -460,6 +462,7 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
             "sub.rn.f32" => rounded_subs += 1,
             "div.rn.f32" => rounded_divs += 1,
             "ex2.approx.f32" => approximate_exp2s += 1,
+            "sqrt.rn.f32" => rounded_sqrts += 1,
             _ if opcode.starts_with("setp.")
                 || opcode.starts_with("selp.")
                 || opcode.starts_with("mov.")
@@ -471,9 +474,10 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
     if rounded_subs != expected_subs
         || rounded_divs != expected_divs
         || approximate_exp2s != expected_exp2s
+        || rounded_sqrts != expected_sqrts
     {
         return Err(rejected(format!(
-            "pointwise arithmetic count mismatch: LLVM sub/div/ex2={expected_subs}/{expected_divs}/{expected_exp2s}; PTX={rounded_subs}/{rounded_divs}/{approximate_exp2s}"
+            "pointwise arithmetic count mismatch: LLVM sub/div/ex2/sqrt={expected_subs}/{expected_divs}/{expected_exp2s}/{expected_sqrts}; PTX={rounded_subs}/{rounded_divs}/{approximate_exp2s}/{rounded_sqrts}"
         )));
     }
     if rounded_adds != expected_adds || rounded_muls != expected_muls {
@@ -500,6 +504,7 @@ fn supported_pointwise(spec: &crate::PointwiseSpec) -> Option<TranslationKind> {
         ("verineural.sub", "1", 2, "sub(arg:0,arg:1)") => Some(TranslationKind::Sub),
         ("verineural.div", "1", 2, "div(arg:0,arg:1)") => Some(TranslationKind::DivRne),
         ("verineural.exp", "1", 1, "exp(arg:0)") => Some(TranslationKind::ExpApprox),
+        ("verineural.sqrt", "1", 1, "sqrt(arg:0)") => Some(TranslationKind::SqrtRne),
         _ => None,
     }
 }
@@ -2437,6 +2442,9 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
                 "  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx\n\
                    %y = load float, ptr addrspace(1) %bp, align 4\n\
                    %value = call float asm sideeffect \"div.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n",
+            ),
+            Some(TranslationKind::SqrtRne) => String::from(
+                "  %value = call float asm sideeffect \"sqrt.rn.f32 $0, $1;\", \"=f,f\"(float %x)\n",
             ),
             Some(TranslationKind::ExpApprox) => format!(
                 "  %scaled = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float {LOG2_E_F32_LLVM})\n\

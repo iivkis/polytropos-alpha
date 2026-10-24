@@ -71,3 +71,18 @@ fn ptx_audit_rejects_unexpected_exponential() {
     assert!(audit_fp32_ptx("call float asm sideeffect \"ex2.approx.f32", fake_ptx).is_ok());
     assert!(audit_fp32_ptx("", "div.approx.f32 %f0, %f1, %f2;\n").is_err());
 }
+
+#[test]
+fn ieee_sqrt_has_generic_checked_gpu_lowering() {
+    let mut g = NeuralGraph::default();
+    let x = g.input(Shape::new(vec![1, 4]).unwrap(), Domain::Finite);
+    let sqrt = g.sqrt_ieee(x).unwrap();
+    let program = GpuEngine::default().compile(&g, sqrt).unwrap();
+    let plan = program.translation_plan().unwrap();
+    assert!(plan.kernels.iter().any(|k| k.kind == TranslationKind::SqrtRne));
+    assert!(program.llvm_ir().contains("sqrt.rn.f32"));
+    assert_eq!(TranslationPlan::from_text(&plan.to_text()).unwrap(), plan);
+    assert!(audit_fp32_ptx("call float asm sideeffect \"sqrt.rn.f32",
+                          "sqrt.rn.f32 %f0, %f1;\n").is_ok());
+    assert!(audit_fp32_ptx("", "sqrt.approx.f32 %f0, %f1;\n").is_err());
+}

@@ -255,3 +255,38 @@ Tensor reference. Авторские Cargo/Lean/CUDA проверки не за�
 recurrent state, backprop/AdamW, BPC и GPU memory benchmarks. Нельзя
 выдавать готовность operator forward за воспроизведение обученного
 результата 24 908-параметрической сети.
+
+### EMA4-LM: 4-layer streaming consumer architecture (программный срез, приёмка ожидается)
+
+В `labs/torus16-mix-0.1.0/src/ema4.rs` собрана полная конфигурация
+**одного авторегрессионного inference-шaга** исходной 4-layer EMA4-LM
+на универсальных VeriNeural primitives, без предметных компонентов в core:
+tied character embedding/head, два LayerNorm и causal depthwise Conv9 на блок,
+EMA с learnable decay, gated Torus16-Mix ролей 0..3, четыре SwiGLU
+проекции ролей 4..7 и down через повторно используемые роли 0..1.
+Потоковое состояние в `ModelBuilder`: 4 EMA vectors и 64 Conv9 history
+vectors. Каждый `next_state` привязан к реальной зависимости общего IR,
+исполняется persistent CUDA Graph через `ModelExecution.step()`;
+никакой host recurrence в GPU path. Для словаря 104 параметров 24 908,
+как в структуре исходного handoff (но значения не загружены из checkpoint).
+
+Требуемая математическая операция `sqrt` расширена **универсальным**
+versioned `PointwiseExpr::Sqrt`/`NeuralGraph::sqrt_ieee`
+с LLVM/PTX `sqrt.rn.f32` и template audit. Отличие от
+доменного `Operation::Sqrt` намеренно: pointwise-путь не придумывает
+`NonNegativeFinite` для вычисленной дисперсии, разрешает NaN по
+IEEE-семантике, а Lean proof для всего графа остаётся unsupported.
+Поддерживаемая численная область всего forward использует explicit
+experimental `ExpApprox`, в strict/certified-режиме fail-closed.
+
+Независимый scalar Rust reference в `src/ema4_reference.rs`
+проверяет последовательный причинный EMA/Conv9 step и logits.
+Численная NVIDIA-приёмка сравнивает три шага с сохранением GPU
+состояния (включая `mem_0`), task-команды
+`lab-torus16-ema4`, `test-lab-torus16-ema4`,
+`lab-torus16-ema4-gpu` и `verify-gpu-torus16-ema4`.
+Запуск Cargo/Lean/CUDA задач агентом **не производился**.
+Не реализованы autograd, AdamW, обучение, streaming quality/BPC,
+checkpoint importer и сопоставление GPU FP32 с исходными обученными
+весами. Это полный *streaming forward* на Rust/IR, не законченная
+система обучения.
