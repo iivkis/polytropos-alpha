@@ -389,20 +389,20 @@ mod tests {
                 .theorem_names()
                 .contains(&"architecture_property_tensor_heavy_output".to_owned())
         );
-        // Nested custom pointwise ReLU consumes a MatMul application. The
-        // normalized global proof must not treat named (m/k/n) arguments
-        // as arguments to ReLU.
+        // The normalized module definition must apply its custom ReLU to
+        // the entire MatMul term. Its nonnegative theorem may instead use
+        // the final ReLU directly, without traversing this intermediate.
         assert!(
             plan.goals[0]
                 .1
                 .source()
-                .contains("VeriNeural.relu_nonnegative (VeriNeural.matmul")
+                .contains("(VeriNeural.relu (VeriNeural.matmul (m := 2) (k := 2) (n := 2)")
         );
         assert!(
             !plan.goals[0]
                 .1
                 .source()
-                .contains("VeriNeural.relu_nonnegative VeriNeural.matmul")
+                .contains("VeriNeural.relu VeriNeural.matmul")
         );
         assert!(matches!(plan.gpu[0], PlannedGpu::Unsupported { .. }));
         assert!(matches!(
