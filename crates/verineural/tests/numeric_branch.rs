@@ -99,6 +99,10 @@ fn generated_rule_records_margin_and_selected_contract() {
             .contains("VeriNeural.approx_contract_positive_mask_select_positive")
     );
     assert!(positive.source().contains("have hmargin"));
+    assert!(positive.source().contains("theorem matmul_address_bounds"));
+    assert!(positive.source().contains(
+        "exact VeriNeural.approx_contract_positive_mask_select_positive"
+    ));
     assert_eq!(positive.theorem_names().len(), 1);
 
     let nonpositive = plan.lean_program(-4.0).unwrap();

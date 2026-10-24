@@ -2186,12 +2186,12 @@ fn normalized_module_expression(
     };
     let result = match &node.operation {
         Operation::Add => format!(
-            "VeriNeural.add {} {}",
+            "VeriNeural.add ({}) ({})",
             expr(node.inputs[0], cache)?,
             expr(node.inputs[1], cache)?
         ),
         Operation::Mul => format!(
-            "VeriNeural.mul {} {}",
+            "VeriNeural.mul ({}) ({})",
             expr(node.inputs[0], cache)?,
             expr(node.inputs[1], cache)?
         ),
@@ -2199,7 +2199,7 @@ fn normalized_module_expression(
             let left = graph.node(node.inputs[0])?;
             let right = graph.node(node.inputs[1])?;
             format!(
-                "VeriNeural.matmul (m := {}) (k := {}) (n := {}) {} {}",
+                "VeriNeural.matmul (m := {}) (k := {}) (n := {}) ({}) ({})",
                 left.shape.dims()[0],
                 left.shape.dims()[1],
                 right.shape.dims()[1],
@@ -2208,40 +2208,40 @@ fn normalized_module_expression(
             )
         }
         Operation::BiasAdd => format!(
-            "VeriNeural.biasAdd (m := {}) (n := {}) {} {}",
+            "VeriNeural.biasAdd (m := {}) (n := {}) ({}) ({})",
             node.shape.dims()[0],
             node.shape.dims()[1],
             expr(node.inputs[0], cache)?,
             expr(node.inputs[1], cache)?
         ),
-        Operation::Relu => format!("VeriNeural.relu {}", expr(node.inputs[0], cache)?),
+        Operation::Relu => format!("VeriNeural.relu ({})", expr(node.inputs[0], cache)?),
         Operation::PositiveMask => {
-            format!("VeriNeural.positiveMask {}", expr(node.inputs[0], cache)?)
+            format!("VeriNeural.positiveMask ({})", expr(node.inputs[0], cache)?)
         }
         Operation::SelectPositive => format!(
-            "VeriNeural.selectPositive {} {} {}",
+            "VeriNeural.selectPositive ({}) ({}) ({})",
             expr(node.inputs[0], cache)?,
             expr(node.inputs[1], cache)?,
             expr(node.inputs[2], cache)?
         ),
         Operation::Reshape(_) => {
-            format!("VeriNeural.reshape {}", expr(node.inputs[0], cache)?)
+            format!("VeriNeural.reshape ({})", expr(node.inputs[0], cache)?)
         }
         Operation::ReduceSum { axis } => {
             let input = graph.node(node.inputs[0])?;
             let (outer, width, inner) = axis_factors(&input.shape, *axis);
             format!(
-                "VeriNeural.reduceSumAxis (outer := {outer}) (width := {width}) (inner := {inner}) {}",
+                "VeriNeural.reduceSumAxis (outer := {outer}) (width := {width}) (inner := {inner}) ({})",
                 expr(node.inputs[0], cache)?
             )
         }
         Operation::Permute { axes } => {
             let input = graph.node(node.inputs[0])?;
             if axes.iter().copied().eq(0..axes.len()) {
-                format!("VeriNeural.reshape {}", expr(node.inputs[0], cache)?)
+                format!("VeriNeural.reshape ({})", expr(node.inputs[0], cache)?)
             } else if input.shape.rank() == 2 && axes.as_slice() == [1, 0] {
                 format!(
-                    "VeriNeural.transpose2D (rows := {}) (cols := {}) {}",
+                    "VeriNeural.transpose2D (rows := {}) (cols := {}) ({})",
                     input.shape.dims()[0],
                     input.shape.dims()[1],
                     expr(node.inputs[0], cache)?
@@ -2257,7 +2257,7 @@ fn normalized_module_expression(
             let input = graph.node(node.inputs[0])?;
             let (outer, width, inner) = axis_factors(&input.shape, *axis);
             format!(
-                "VeriNeural.reverseAxis (outer := {outer}) (width := {width}) (inner := {inner}) {}",
+                "VeriNeural.reverseAxis (outer := {outer}) (width := {width}) (inner := {inner}) ({})",
                 expr(node.inputs[0], cache)?
             )
         }
@@ -2267,7 +2267,7 @@ fn normalized_module_expression(
             let (outer, left_width, inner) = axis_factors(&left.shape, *axis);
             let (_, right_width, _) = axis_factors(&right.shape, *axis);
             format!(
-                "VeriNeural.concatAxis (outer := {outer}) (leftWidth := {left_width}) (rightWidth := {right_width}) (inner := {inner}) {} {}",
+                "VeriNeural.concatAxis (outer := {outer}) (leftWidth := {left_width}) (rightWidth := {right_width}) (inner := {inner}) ({}) ({})",
                 expr(node.inputs[0], cache)?,
                 expr(node.inputs[1], cache)?
             )
@@ -2276,7 +2276,7 @@ fn normalized_module_expression(
             let input = graph.node(node.inputs[0])?;
             let (outer, width, inner) = axis_factors(&input.shape, *axis);
             format!(
-                "VeriNeural.sliceAxis (outer := {outer}) (width := {width}) (inner := {inner}) (start := {start}) (len := {len}) {}",
+                "VeriNeural.sliceAxis (outer := {outer}) (width := {width}) (inner := {inner}) (start := {start}) (len := {len}) ({})",
                 expr(node.inputs[0], cache)?
             )
         }
@@ -2375,12 +2375,18 @@ fn normalized_module_nonnegative_proof(
                 ),
                 _ => unreachable!(),
             };
-            format!("{lemma} {} {} ({hl}) ({hr})", term(left)?, term(right)?)
+            format!(
+                "{lemma} ({}) ({}) ({hl}) ({hr})",
+                term(left)?,
+                term(right)?
+            )
         }
-        Operation::Relu => format!("VeriNeural.relu_nonnegative {}", term(node.inputs[0])?),
+        Operation::Relu => {
+            format!("VeriNeural.relu_nonnegative ({})", term(node.inputs[0])?)
+        }
         Operation::PositiveMask => {
             format!(
-                "VeriNeural.positiveMask_nonnegative {}",
+                "VeriNeural.positiveMask_nonnegative ({})",
                 term(node.inputs[0])?
             )
         }
@@ -2390,7 +2396,7 @@ fn normalized_module_nonnegative_proof(
             let hy = prove(yes, required_ports, cache)?;
             let hn = prove(no, required_ports, cache)?;
             format!(
-                "VeriNeural.selectPositive_nonnegative {} {} {} ({hy}) ({hn})",
+                "VeriNeural.selectPositive_nonnegative ({}) ({}) ({}) ({hy}) ({hn})",
                 term(node.inputs[0])?,
                 term(yes)?,
                 term(no)?
@@ -2399,17 +2405,17 @@ fn normalized_module_nonnegative_proof(
         Operation::Reshape(_) => {
             let input = node.inputs[0];
             let h = prove(input, required_ports, cache)?;
-            format!("VeriNeural.reshape_nonnegative {} ({h})", term(input)?)
+            format!("VeriNeural.reshape_nonnegative ({}) ({h})", term(input)?)
         }
         Operation::Permute { axes } => {
             let input = node.inputs[0];
             let h = prove(input, required_ports, cache)?;
             let input_node = graph.node(input)?;
             if axes.iter().copied().eq(0..axes.len()) {
-                format!("VeriNeural.reshape_nonnegative {} ({h})", term(input)?)
+                format!("VeriNeural.reshape_nonnegative ({}) ({h})", term(input)?)
             } else if input_node.shape.rank() == 2 && axes.as_slice() == [1, 0] {
                 format!(
-                    "VeriNeural.transpose2D_nonnegative (rows := {}) (cols := {}) {} ({h})",
+                    "VeriNeural.transpose2D_nonnegative (rows := {}) (cols := {}) ({}) ({h})",
                     input_node.shape.dims()[0],
                     input_node.shape.dims()[1],
                     term(input)?
@@ -2423,7 +2429,7 @@ fn normalized_module_nonnegative_proof(
             let (outer, width, inner) = axis_factors(&graph.node(input)?.shape, *axis);
             let h = prove(input, required_ports, cache)?;
             format!(
-                "VeriNeural.reverseAxis_nonnegative (outer := {outer}) (width := {width}) (inner := {inner}) {} ({h})",
+                "VeriNeural.reverseAxis_nonnegative (outer := {outer}) (width := {width}) (inner := {inner}) ({}) ({h})",
                 term(input)?
             )
         }
@@ -2435,7 +2441,7 @@ fn normalized_module_nonnegative_proof(
             let hl = prove(left, required_ports, cache)?;
             let hr = prove(right, required_ports, cache)?;
             format!(
-                "VeriNeural.concatAxis_nonnegative (outer := {outer}) (leftWidth := {left_width}) (rightWidth := {right_width}) (inner := {inner}) {} {} ({hl}) ({hr})",
+                "VeriNeural.concatAxis_nonnegative (outer := {outer}) (leftWidth := {left_width}) (rightWidth := {right_width}) (inner := {inner}) ({}) ({}) ({hl}) ({hr})",
                 term(left)?,
                 term(right)?
             )
@@ -2445,7 +2451,7 @@ fn normalized_module_nonnegative_proof(
             let (outer, width, inner) = axis_factors(&graph.node(input)?.shape, *axis);
             let h = prove(input, required_ports, cache)?;
             format!(
-                "VeriNeural.sliceAxis_nonnegative (outer := {outer}) (width := {width}) (inner := {inner}) (start := {start}) (len := {len}) {} ({h})",
+                "VeriNeural.sliceAxis_nonnegative (outer := {outer}) (width := {width}) (inner := {inner}) (start := {start}) (len := {len}) ({}) ({h})",
                 term(input)?
             )
         }
@@ -2454,7 +2460,7 @@ fn normalized_module_nonnegative_proof(
             let (outer, width, inner) = axis_factors(&graph.node(input)?.shape, *axis);
             let h = prove(input, required_ports, cache)?;
             format!(
-                "VeriNeural.reduceSumAxis_nonnegative (outer := {outer}) (width := {width}) (inner := {inner}) {} ({h})",
+                "VeriNeural.reduceSumAxis_nonnegative (outer := {outer}) (width := {width}) (inner := {inner}) ({}) ({h})",
                 term(input)?
             )
         }
