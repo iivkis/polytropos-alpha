@@ -165,6 +165,40 @@ pub fn tensor_heavy() -> (NeuralGraph, NodeId, ProofGoal) {
     (graph, output, goal)
 }
 
+/// Attention-like tensor flow assembled only from general primitives. The
+/// packed source is statically sliced into Q/K/V-shaped regions; there is no
+/// Attention/Transformer component in VeriNeural. Static SliceAxis has ideal-Int
+/// proof support but intentionally no GPU lowering in this P1 slice.
+pub fn attention_like_slices() -> (NeuralGraph, NodeId, ProofGoal) {
+    let mut graph = NeuralGraph::default();
+    let packed = graph.input(shape(&[2, 6]), Domain::NonNegativeFinite);
+    let contract = MathContract::new(
+        vec![PortContract::nonnegative(shape(&[2, 6]))],
+        PortContract::any(shape(&[2, 2])),
+    )
+    .nonnegative();
+    let output = graph
+        .compose(
+            "fixture_attention_like_slices",
+            "1",
+            &contract,
+            &[packed],
+            |graph, inputs| {
+                let q = graph.slice_axis(inputs[0], 1, 0, 2)?;
+                let k = graph.slice_axis(inputs[0], 1, 2, 2)?;
+                let v = graph.slice_axis(inputs[0], 1, 4, 2)?;
+                let kt = graph.permute(k, &[1, 0])?;
+                let scores = graph.matmul(q, kt)?;
+                let weights = graph.relu(scores)?;
+                let context = graph.matmul(weights, v)?;
+                graph.relu(context)
+            },
+        )
+        .unwrap();
+    let goal = ProofGoal::nonnegative("attention_like_output", output, vec![packed]);
+    (graph, output, goal)
+}
+
 /// Build plans are inspectable evidence statements, not GPU or Lean proofs.
 pub fn plan_nested() -> Result<(usize, Vec<String>), AutoBuildError> {
     let (graph, output, goal) = nested();
@@ -368,6 +402,47 @@ mod tests {
     }
 
     #[test]
+    fn attention_like_dataflow_uses_static_slices_and_fails_closed_on_gpu() {
+        let (graph, output, goal) = attention_like_slices();
+        let ir = graph.canonical_ir();
+        assert!(ir.contains("slice_axis:1:start=0:len=2"));
+        assert!(ir.contains("slice_axis:1:start=2:len=2"));
+        assert!(ir.contains("slice_axis:1:start=4:len=2"));
+        assert_eq!(
+            graph
+                .nodes()
+                .iter()
+                .filter(|node| matches!(node.operation, Operation::SliceAxis { .. }))
+                .count(),
+            3
+        );
+
+        let tasks = [ArchitectureProofTask::Goal(goal)];
+        let plan = ArchitectureAutoCompiler::default()
+            .plan(&graph, &[output], &tasks, GpuRequirement::AllowUnsupported)
+            .unwrap();
+        assert!(
+            plan.goals[0]
+                .1
+                .source()
+                .contains("VeriNeural.sliceAxis_nonnegative")
+        );
+        assert!(matches!(plan.gpu[0], PlannedGpu::Unsupported { .. }));
+        assert!(matches!(
+            ArchitectureAutoCompiler::default().plan(
+                &graph,
+                &[output],
+                &tasks,
+                GpuRequirement::AllOutputs
+            ),
+            Err(AutoBuildError::Gpu(GpuError::UnsupportedOperation {
+                operation: "slice_axis",
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn invalid_consumer_claim_cannot_be_called_a_proof() {
         let mut graph = NeuralGraph::default();
         let x = graph.input(shape(&[2]), Domain::Finite);
@@ -413,6 +488,12 @@ mod tests {
             .certify(&tensor_graph, &lean, &root.join("tensor_heavy.lean"))
             .unwrap();
         assert!(!tensor_audit.theorem_names.is_empty());
+
+        let (attention_graph, _, attention_goal) = attention_like_slices();
+        let (_, attention_audit) = attention_goal
+            .certify(&attention_graph, &lean, &root.join("attention_like.lean"))
+            .unwrap();
+        assert!(!attention_audit.theorem_names.is_empty());
 
         // Independent property of the consumer-defined atomic operation,
         // not just of an unrelated final ReLU node.

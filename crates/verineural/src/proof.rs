@@ -309,6 +309,7 @@ impl LeanProofEngine {
                 | Operation::ReduceSum { .. }
                 | Operation::ReverseAxis { .. }
                 | Operation::Concat { .. }
+                | Operation::SliceAxis { .. }
                 | Operation::ArgMax { .. }
                 | Operation::Take { .. } => {}
                 Operation::Permute { ref axes } => {
@@ -485,6 +486,14 @@ impl LeanProofEngine {
                         call(node.inputs[0].index())
                     )
                 }
+                Operation::SliceAxis { axis, start, len } => {
+                    let input = graph.node(node.inputs[0])?;
+                    let (outer, width, inner) = axis_factors(&input.shape, *axis);
+                    format!(
+                        "VeriNeural.sliceAxis (outer := {outer}) (width := {width})                          (inner := {inner}) (start := {start}) (len := {len}) {}",
+                        call(node.inputs[0].index())
+                    )
+                }
                 Operation::Concat { axis } => {
                     let left = graph.node(node.inputs[0])?;
                     let right = graph.node(node.inputs[1])?;
@@ -584,6 +593,16 @@ impl LeanProofEngine {
                         "VeriNeural.shapeSize {} = VeriNeural.shapeSize {}",
                         shape_expr(&predecessor.shape),
                         shape_expr(&node.shape)
+                    )
+                } else if matches!(node.operation, Operation::SliceAxis { .. }) {
+                    let (axis, start, len) = match &node.operation {
+                        Operation::SliceAxis { axis, start, len } => (*axis, *start, *len),
+                        _ => unreachable!(),
+                    };
+                    let (outer, width, inner) = axis_factors(&predecessor.shape, axis);
+                    format!(
+                        "VeriNeural.shapeSize {} = {outer} * {width} * {inner} ∧                          {start} + {len} ≤ {width}",
+                        shape_expr(&predecessor.shape)
                     )
                 } else if matches!(node.operation, Operation::Concat { .. }) {
                     let axis = match &node.operation {
@@ -706,6 +725,16 @@ impl LeanProofEngine {
                              (width := {width}) (inner := {inner}) {} ({})",
                             call(prev),
                             proof_call(prev)
+                        )
+                    }
+                    Operation::SliceAxis { axis, start, len } => {
+                        let input = node.inputs[0].index();
+                        let (outer, width, inner) =
+                            axis_factors(&graph.nodes()[input].shape, axis);
+                        format!(
+                            "VeriNeural.sliceAxis_nonnegative (outer := {outer})                              (width := {width}) (inner := {inner}) (start := {start})                              (len := {len}) {} ({})",
+                            call(input),
+                            proof_call(input)
                         )
                     }
                     Operation::Concat { axis } => {
@@ -2084,6 +2113,23 @@ fn prove_module_node_nonnegative(
                 call(input)
             )
         }
+        Operation::SliceAxis { axis, start, len } => {
+            let input = node.inputs[0].index();
+            let (outer, width, inner) = axis_factors(&graph.nodes()[input].shape, axis);
+            let input_proof = prove_module_node_nonnegative(
+                graph,
+                module_index,
+                input,
+                arguments,
+                boundary,
+                traversal,
+                module_proofs,
+            )?;
+            format!(
+                "VeriNeural.sliceAxis_nonnegative (outer := {outer})                  (width := {width}) (inner := {inner}) (start := {start})                  (len := {len}) {} ({input_proof})",
+                call(input)
+            )
+        }
         Operation::Concat { axis } => {
             let left = node.inputs[0].index();
             let right = node.inputs[1].index();
@@ -2235,6 +2281,15 @@ fn prove_ideal_nonnegative(
             format!(
                 "VeriNeural.reverseAxis_nonnegative (outer := {outer}) \
                  (width := {width}) (inner := {inner}) {} ({h})",
+                call(input)
+            )
+        }
+        Operation::SliceAxis { axis, start, len } => {
+            let input = node.inputs[0];
+            let (outer, width, inner) = axis_factors(&graph.node(input)?.shape, axis);
+            let h = prove_ideal_nonnegative(graph, input, arguments, source_hypotheses, cache)?;
+            format!(
+                "VeriNeural.sliceAxis_nonnegative (outer := {outer})                  (width := {width}) (inner := {inner}) (start := {start})                  (len := {len}) {} ({h})",
                 call(input)
             )
         }

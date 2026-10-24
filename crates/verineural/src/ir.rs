@@ -163,6 +163,12 @@ pub enum Operation {
     Concat {
         axis: usize,
     },
+    /// Select a static contiguous interval of one axis, preserving rank.
+    SliceAxis {
+        axis: usize,
+        start: usize,
+        len: usize,
+    },
     /// Reduce one axis to deterministic index values. F32 NaN/tie behavior is
     /// fixed by the selected policy instead of delegated to a backend accident.
     ArgMax {
@@ -195,6 +201,7 @@ impl Operation {
             Self::Permute { .. } => "permute",
             Self::ReverseAxis { .. } => "reverse_axis",
             Self::Concat { .. } => "concat",
+            Self::SliceAxis { .. } => "slice_axis",
             Self::ArgMax { .. } => "argmax",
             Self::Take { .. } => "take",
         }
@@ -215,6 +222,7 @@ impl Operation {
             | Self::ReduceMax { .. }
             | Self::Permute { .. }
             | Self::ReverseAxis { .. }
+            | Self::SliceAxis { .. }
             | Self::ArgMax { .. } => 1,
             Self::Concat { .. } | Self::Take { .. } => 2,
         }
@@ -349,6 +357,33 @@ impl Operation {
                     });
                 }
                 Ok(inputs[0].clone())
+            }
+            Self::SliceAxis { axis, start, len } => {
+                let input = &inputs[0];
+                if *axis >= input.rank() {
+                    return Err(NeuralError::InvalidAxis {
+                        axis: *axis,
+                        rank: input.rank(),
+                    });
+                }
+                let extent = input.dims()[*axis];
+                let end = start.checked_add(*len).ok_or(NeuralError::InvalidSlice {
+                    axis: *axis,
+                    start: *start,
+                    len: *len,
+                    extent,
+                })?;
+                if *len == 0 || *start >= extent || end > extent {
+                    return Err(NeuralError::InvalidSlice {
+                        axis: *axis,
+                        start: *start,
+                        len: *len,
+                        extent,
+                    });
+                }
+                let mut dims = input.dims().to_vec();
+                dims[*axis] = *len;
+                Shape::new(dims)
             }
             Self::Concat { axis } => {
                 let left = &inputs[0];
@@ -490,7 +525,8 @@ impl Operation {
             | Self::BroadcastTo(_)
             | Self::ReduceMax { .. }
             | Self::Permute { .. }
-            | Self::ReverseAxis { .. } => inputs[0],
+            | Self::ReverseAxis { .. }
+            | Self::SliceAxis { .. } => inputs[0],
             Self::Concat { .. } => {
                 if inputs
                     .iter()
@@ -1170,6 +1206,18 @@ impl NeuralGraph {
 
     pub fn reverse_axis(&mut self, input: NodeId, axis: usize) -> Result<NodeId, NeuralError> {
         self.apply(Operation::ReverseAxis { axis }, &[input])
+    }
+
+    /// Static contiguous slice of one axis. Bounds are part of Semantic IR,
+    /// so host/proof/backends cannot silently disagree about the interval.
+    pub fn slice_axis(
+        &mut self,
+        input: NodeId,
+        axis: usize,
+        start: usize,
+        len: usize,
+    ) -> Result<NodeId, NeuralError> {
+        self.apply(Operation::SliceAxis { axis, start, len }, &[input])
     }
 
     /// Concatenate one or more tensors by lowering the public variadic API to

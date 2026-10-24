@@ -48,6 +48,12 @@ pub enum NeuralError {
         rank: usize,
         axes: Vec<usize>,
     },
+    InvalidSlice {
+        axis: usize,
+        start: usize,
+        len: usize,
+        extent: usize,
+    },
     EmptyConcat,
     IndexElementCountMismatch {
         expected: usize,
@@ -136,6 +142,16 @@ impl fmt::Display for NeuralError {
             Self::InvalidPermutation { rank, axes } => {
                 write!(f, "invalid rank-{rank} axis permutation {axes:?}")
             }
+            Self::InvalidSlice {
+                axis,
+                start,
+                len,
+                extent,
+            } => write!(
+                f,
+                "slice axis {axis} interval [{start}, {}) is outside extent {extent}",
+                start.saturating_add(*len)
+            ),
             Self::EmptyConcat => write!(f, "concat requires at least one tensor"),
             Self::IndexElementCountMismatch { expected, actual } => write!(
                 f,

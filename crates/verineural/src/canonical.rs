@@ -63,6 +63,9 @@ fn operation(operation: &Operation) -> String {
         ),
         Operation::ReverseAxis { axis } => format!("reverse_axis:{axis}"),
         Operation::Concat { axis } => format!("concat_axis:{axis}"),
+        Operation::SliceAxis { axis, start, len } => {
+            format!("slice_axis:{axis}:start={start}:len={len}")
+        }
         Operation::ArgMax { axis, tie_break } => {
             format!("argmax_axis:{axis}:tie={}", tie_break.name())
         }

@@ -169,6 +169,24 @@ impl<T: Clone> Tensor<T> {
         Self::new(shape, values)
     }
 
+    /// Static contiguous slice of one row-major axis.
+    pub fn slice_axis(
+        &self,
+        axis: usize,
+        start: usize,
+        len: usize,
+    ) -> Result<Self, NeuralError> {
+        let operation = Operation::SliceAxis { axis, start, len };
+        let shape = operation.infer_shape(std::slice::from_ref(&self.shape))?;
+        let mut values = Vec::with_capacity(shape.element_count());
+        for output_index in 0..shape.element_count() {
+            let mut input_coords = unravel_index(output_index, shape.dims());
+            input_coords[axis] += start;
+            values.push(self.values[ravel_index(&input_coords, self.shape.dims())].clone());
+        }
+        Self::new(shape, values)
+    }
+
     /// Concatenate two tensors along one axis.
     pub fn concat(&self, rhs: &Self, axis: usize) -> Result<Self, NeuralError> {
         let operation = Operation::Concat { axis };

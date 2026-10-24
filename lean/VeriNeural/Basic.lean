@@ -78,6 +78,16 @@ def concatAxis {outer leftWidth rightWidth inner : Nat}
     else
       flatGet b ((outerIndex * rightWidth + (lane - leftWidth)) * inner + suffix)
 
+/-- Static contiguous row-major interval of one axis. Rust construction proves
+    start + len <= width; the total Lean definition still uses flatGet. -/
+def sliceAxis {outer width inner start len : Nat}
+    (a : Tensor (outer * width * inner)) : Tensor (outer * len * inner) :=
+  fun i =>
+    let outerIndex := i.val / (len * inner)
+    let lane := (i.val / inner) % len
+    let suffix := i.val % inner
+    flatGet a ((outerIndex * width + (start + lane)) * inner + suffix)
+
 /-- Deterministic argmax along one axis. Strict `>` keeps the first lane on ties. -/
 def argMaxFirstAxis {outer width inner : Nat}
     (a : Tensor (outer * width * inner)) : IndexTensor (outer * inner) :=
@@ -219,6 +229,12 @@ theorem concatAxis_nonnegative {outer leftWidth rightWidth inner : Nat}
 theorem takeAxis_nonnegative {outer width inner : Nat}
     (a : Tensor (outer * width * inner)) (selected : IndexTensor 1)
     (ha : Nonnegative a) : Nonnegative (takeAxis a selected) := by
+  intro i
+  exact flatGet_nonnegative a ha _
+
+theorem sliceAxis_nonnegative {outer width inner start len : Nat}
+    (a : Tensor (outer * width * inner)) (ha : Nonnegative a) :
+    Nonnegative (sliceAxis (start := start) (len := len) a) := by
   intro i
   exact flatGet_nonnegative a ha _
 

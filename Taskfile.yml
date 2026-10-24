@@ -303,6 +303,13 @@ tasks:
     cmds:
       - cargo test -p verineural --test tensor_reductions -- --ignored
 
+  verify-tensor-slice:
+    desc: Check P1 static axis slice host/IR semantics, Lean preservation and explicit GPU fail-closed
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test tensor_slice
+      - cargo test -p verineural --test tensor_slice -- --ignored
+
   p2-consumers:
     desc: Exercise three independent P2 consumer architectures, positive/negative contracts and honest GPU profiles
     deps: [prepare]

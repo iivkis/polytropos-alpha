@@ -593,6 +593,7 @@ pub fn snapshot_architecture(
                         | Operation::ReduceMax { axis }
                         | Operation::ReverseAxis { axis }
                         | Operation::Concat { axis }
+                        | Operation::SliceAxis { axis, .. }
                         | Operation::ArgMax { axis, .. }
                         | Operation::Take { axis } => axis.to_string(),
                         _ => String::new(),
@@ -783,6 +784,7 @@ pub fn snapshot_architecture(
                 Operation::ReduceMax { .. } => "axis-reduction-max",
                 Operation::ReverseAxis { .. } => "axis-reversal",
                 Operation::Concat { .. } => "axis-concatenation",
+                Operation::SliceAxis { .. } => "axis-slice",
                 Operation::ArgMax { .. } => "argmax-indexing",
                 Operation::Take { .. } if port == 1 => "index-selection",
                 Operation::Take { .. } => "axis-selection",
@@ -1011,6 +1013,7 @@ pub(crate) fn auto_architecture_dot(
                         | Operation::ReduceMax { axis }
                         | Operation::ReverseAxis { axis }
                         | Operation::Concat { axis }
+                        | Operation::SliceAxis { axis, .. }
                         | Operation::ArgMax { axis, .. }
                         | Operation::Take { axis } => axis.to_string(),
                         _ => String::new(),
@@ -1176,6 +1179,7 @@ pub(crate) fn auto_architecture_dot(
                 Operation::ReduceMax { .. } => "axis-reduction-max",
                 Operation::ReverseAxis { .. } => "axis-reversal",
                 Operation::Concat { .. } => "axis-concatenation",
+                Operation::SliceAxis { .. } => "axis-slice",
                 Operation::ArgMax { .. } => "argmax-indexing",
                 Operation::Take { .. } if port == 1 => "index-selection",
                 Operation::Take { .. } => "axis-selection",
