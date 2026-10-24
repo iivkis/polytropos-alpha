@@ -705,6 +705,27 @@ impl TranslationPlan {
                     )));
                 }
                 audit_fp32_ptx(ir, asm).map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                // This branch returns early, before the generic PTX-order
+                // check below. Enforce it here as well: counts alone do not
+                // establish mul-before-add semantics.
+                let sequence = asm
+                    .lines()
+                    .map(|line| line.split("//").next().unwrap_or(""))
+                    .filter_map(|line| {
+                        if line.contains("mul.rn.f32") {
+                            Some("mul")
+                        } else if line.contains("add.rn.f32") {
+                            Some("add")
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if sequence != ["mul", "add"] {
+                    return Err(invalid(format!(
+                        "PTX MulAdd instruction order changed at node {node}"
+                    )));
+                }
                 report.rounded_adds += 1;
                 report.rounded_muls += 1;
                 report.details.push_str(&format!(
@@ -920,7 +941,10 @@ impl TranslationPlan {
                 | TranslationKind::ArgMaxLast { .. }
                 | TranslationKind::TakeAxis0 { .. }
                 | TranslationKind::AddBiasRelu { .. }
-                | TranslationKind::MulBiasRelu { .. } => None,
+                | TranslationKind::MulBiasRelu { .. }
+                // Validated above with its own three-source binding and
+                // early continue. Keep exhaustive matching fail-closed.
+                | TranslationKind::MulAdd { .. } => None,
             };
             if required_binding.is_some_and(|binding| !ir.contains(binding)) {
                 return Err(invalid(format!(
