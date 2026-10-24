@@ -323,3 +323,46 @@ GPU dL/d(final_beta), host AdamW и обновление параметра
 all-parameter train/optimizer на GPU, loss reduction внутри
 Semantic IR, полноценная загрузка корпуса, стабильность градиента
 на реальных данных, Lean численная сертификация reverse-pass.
+
+
+### Finite-window BPTT and real-corpus EMA4 training: implementation awaiting local acceptance
+
+Architecture-neutral verineural::unroll_model composes a named recurrent
+Model across 1..=16 timesteps by cloning ordinary typed Semantic IR
+operations, sharing single parameter sources, and wiring next_state
+producers to later State consumers. It introduces explicit per-step
+Input and cotangent sources and a scalar dot-product objective, so
+the existing generic differentiate() produces reverse-mode VJPs
+through time without lab backward kernels. Initial recurrent states
+are explicit window-boundary sources, cutting the gradient graph there.
+The new temporal.rs performs strict binding validation and rejects
+unregistered sources, wrong shapes and missing transitions.
+A tiny two-step CUDA test tests the *through-time* gradient analytically:
+2.25 with the cross-time edge, versus 1.875 when detached.
+
+The EMA4 consumer lists **all** nonconstant trainable parameters
+(24,908 at vocab=104, including a single tied embedding/head and one
+physical W per block), then uses a full-parameter window VJP and
+generic host AdamW to update them. Between windows a snapshot of 68
+terminal states is copied out before any state inputs are updated,
+avoiding unsafe D2D overlap while retaining recurrent data and
+explicitly detaching the past for TBPTT. Training uses a stable
+host cross-entropy seed, compiled GPU forward+backward via CUDA Graph
+and a held-out reset-state streaming validation pass.
+
+The lab's CharCorpus::from_text uses a sorted Unicode character alphabet
+and a 90/10 chronological split. An explicit TORUS16_CORPUS path is
+required, so the handoff's corpus_snapshot.txt is never silently replaced.
+Expected handoff data: 524859 characters, 104 symbols. Commands:
+task temporal-bptt-stage, task verify-gpu-temporal-bptt,
+task train-lab-torus16-ema4-bptt (with the corpus path).
+Training default is BPTT=2 and two windows; the validation position
+count is explicitly reported and by default capped at 64. No GPU run
+of this new stage was performed by the agent, and full all-parameter
+GPU compilation cost/VRAM are unknown.
+
+Unfinished: proving floating-point reverse-mode correctness,
+measuring end-to-end optimizer throughput, implementing in-GPU
+AdamW/CE, ensuring parity of the research checkpoint/architecture,
+exact handoff 51,648 validation positions protocol, checkpoint I/O,
+long multi-seed learning and evaluating whether holdout BPC improves.

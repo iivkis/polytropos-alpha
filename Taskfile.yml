@@ -452,6 +452,25 @@ tasks:
     cmds:
       - cargo test -p torus16-mix-lab --test gpu_forward -- --ignored --nocapture
 
+  temporal-bptt-stage:
+    desc: Test generic recurrent IR unroll, through-time dependency and full EMA4 parameter inventory
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test temporal
+      - cargo test -p torus16-mix-lab --test ema4
+
+  verify-gpu-temporal-bptt:
+    desc: Verify a two-step recurrent gradient with a hand-derived NVIDIA CUDA oracle
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test temporal -- --ignored --nocapture
+
+  train-lab-torus16-ema4-bptt:
+    desc: Experimental full-parameter GPU BPTT with explicit TORUS16_CORPUS path and holdout BPC
+    deps: [prepare]
+    cmds:
+      - cargo run -p torus16-mix-lab --example ema4_bptt
+
   autodiff-stage:
     desc: Validate architecture-neutral reverse-mode IR rules, finite difference checks and atomic AdamW
     deps: [prepare]

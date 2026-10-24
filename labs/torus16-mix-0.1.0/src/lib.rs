@@ -5,6 +5,7 @@ use verineural::{
     Domain, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph, NodeId, Shape, Tensor,
 };
 
+pub mod corpus;
 pub mod ema4;
 pub mod ema4_reference;
 

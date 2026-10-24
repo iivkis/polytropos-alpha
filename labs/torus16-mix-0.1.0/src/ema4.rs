@@ -86,6 +86,31 @@ impl Ema4Weights {
             + 2 * WIDTH
     }
 
+    /// Physical trainable tensors only. Excludes one-hot input, fixed numerical
+    /// constants, Conv9 history and EMA memory. Derived from the same named
+    /// binding schema as inference, preserving tied embedding and shared W.
+    pub fn trainable_parameters(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
+        let fixed = [
+            "ones_column", "inv_width", "inv_sqrt_width", "one_scalar",
+            "epsilon_scalar", "one_vec", "minus_vec", "minus_scalar",
+            "half_vec", "one_up", "minus_up",
+        ];
+        let parameters = self.bindings(0)?.into_iter().filter(|(name, _)| {
+            name != "token" && !name.starts_with("history_")
+                && !name.starts_with("mem_")
+                && !fixed.contains(&name.as_str())
+        }).collect::<std::collections::BTreeMap<_,_>>();
+        let elements: usize = parameters.values().map(|t| t.values().len()).sum();
+        if elements != Self::parameter_count(self.vocabulary) {
+            return Err(ModelError::Invalid(format!(
+                "trainable parameter inventory mismatch: {elements}"
+            )));
+        }
+        Ok(parameters)
+    }
+
     /// Named weights, fixed numeric constants and the zero initial recurrent
     /// state. This is setup data, not a CPU implementation of the architecture.
     pub fn bindings(&self, token: usize) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {

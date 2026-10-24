@@ -194,3 +194,71 @@ update исполняется на host; не называем его GPU optimi
 `task autodiff-stage` и `task verify-gpu-autodiff` проверяют
 универсальные правила, в том числе аналитику против finite differences.
 Все новые тесты после добавления подлежат отдельной локальной проверке.
+
+
+## Full-parameter finite-window BPTT and holdout BPC (experimental)
+
+The architecture-neutral library API is now verineural::unroll_model.
+It turns a Model with named Input/Parameter/State/next_state roles into
+a single pure time-expanded Semantic Neural IR graph. All timesteps use
+ONE shared source per parameter, and every next_state is connected to the
+following step. The scalar objective is sum over timesteps of
+dot(logits[t], explicit_cotangent[t]); stable softmax/CE is computed by
+the lab and supplies these cotangents. Calling differentiate over the
+shared 24,908 trainable values includes the recurrent gradients across
+the **entire chosen window**. Initial state is detached at each window
+boundary: this is truncated BPTT, not infinite-horizon differentiation.
+
+Command sequence:
+
+    task temporal-bptt-stage
+    task verify-gpu-temporal-bptt
+
+    # Extract the attached research handoff. Use its original corpus snapshot.
+    export TORUS16_CORPUS=/absolute/path/to/corpus_snapshot.txt
+    export TORUS16_BPTT=2
+    export TORUS16_TRAIN_WINDOWS=2
+    export TORUS16_VAL_LIMIT=64
+    task train-lab-torus16-ema4-bptt
+
+Corpus must be an existing UTF-8 file. Alphabet is the sorted set of
+Unicode scalar values in the entire file. The first 90% of characters
+are train-only, the final 10% is strict chronological holdout, following
+the research data preparation. For the original 524,859-character handoff
+snapshot this gives a vocabulary of 104, 472,373 train symbols and
+52,486 validation symbols. Changing source text changes the experiment;
+nothing is downloaded or guessed silently.
+
+Training uses one persistent, compiled CUDA Graph for multi-timestep
+forward and reverse VJP, host stable CE and host AdamW across **all
+physical trainable parameters**. Constant numerical source tensors are
+excluded from optimization. In the demo, train windows are consecutive;
+between windows the 68 final recurrent state tensors are snapshotted to
+host memory BEFORE any initial state buffer is overwritten, then loaded
+into the next window. This avoids unsafe overlapping CUDA feedback and
+preserves values while cutting derivative edges at window boundaries.
+One window computes one averaged loss and optimizer update.
+
+After training, a separate streaming ModelExecution is prepared using
+the updated parameters. It **resets recurrent state** and scores
+next-character prediction exclusively on the final-10%-corpus holdout,
+for at most TORUS16_VAL_LIMIT positions. Scored count is printed; this
+bounded holdout BPC is not equivalent to the handoff's full validation
+benchmark and MUST NOT be compared numerically to its trained checkpoint
+BPC without matching all evaluation details. The deterministic default
+weights are untrained and the original PyTorch checkpoint is not imported.
+
+Known limitations and trusted boundaries:
+- Reverse-mode rules are validated structurally/numerically in a bounded
+  fragment, not formally certified GPU derivatives or exact IEEE float.
+- Pointwise exp2.approx is explicitly opted in. Mathematical derivative
+  of exp does not establish equivalence to NVIDIA's approximation.
+- This is an experimental giant graph: compiling all trainable VJPs may
+  require substantial GPU/host memory and time. No performance claims.
+- GPU training implements CE/AdamW on host and CUDA forward/VJP. It does
+  NOT implement a fused GPU optimizer, global loss graph or a general
+  recurrent training scheduler.
+- Default BPTT=2, train windows=2, holdout scored positions=64. The user
+  must increase them for a meaningful training run. There is no guarantee
+  the short smoke test improves heldout BPC.
+- Reproducible checkpoint export/load and multi-seed studies remain open.

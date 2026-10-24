@@ -1,7 +1,7 @@
 //! Reusable reverse-mode and AdamW acceptance, independent of neural architectures.
 use std::collections::BTreeMap;
 use verineural::{
-    AdamW, Domain, GpuEngine, NeuralGraph, Operation, PointwiseExpr, PointwiseSpec, Shape, Tensor,
+    AdamW, Domain, GpuEngine, NeuralGraph, PointwiseExpr, PointwiseSpec, Shape, Tensor,
     differentiate,
 };
 
