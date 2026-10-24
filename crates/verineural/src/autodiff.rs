@@ -233,7 +233,9 @@ fn differentiate_impl(
     external_seed: Option<NodeId>,
 ) -> Result<ReverseGraph, DifferentiationError> {
     let Some(&(root, _)) = roots.first() else {
-        return Err(DifferentiationError::Invalid("at least one output/seed pair required"));
+        return Err(DifferentiationError::Invalid(
+            "at least one output/seed pair required",
+        ));
     };
     let mut unique_roots = BTreeSet::new();
     for &(output, seed) in roots {

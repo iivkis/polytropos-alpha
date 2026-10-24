@@ -192,20 +192,37 @@ fn main() -> Result<(), Box<dyn Error>> {
         if !fresh && checkpoint_path.exists() {
             let ckpt = Ema4Checkpoint::read(&checkpoint_path)?;
             ckpt.validate(
-                window_len, vocab, corpus_hash, train_windows,
-                &trainable_initial, &expected_states,
+                window_len,
+                vocab,
+                corpus_hash,
+                train_windows,
+                &trainable_initial,
+                &expected_states,
             )?;
             let opt = AdamW::from_checkpoint(ckpt.optimizer, &ckpt.parameters)?;
-            println!("checkpoint_resumed={} completed_windows={}", checkpoint_path.display(), ckpt.completed_windows);
+            println!(
+                "checkpoint_resumed={} completed_windows={}",
+                checkpoint_path.display(),
+                ckpt.completed_windows
+            );
             (ckpt.parameters, ckpt.states, opt, ckpt.completed_windows)
         } else {
-            (trainable_initial, expected_states, AdamW::new(0.002, 0.01)?, 0usize)
+            (
+                trainable_initial,
+                expected_states,
+                AdamW::new(0.002, 0.01)?,
+                0usize,
+            )
         };
     let base = all
         .into_iter()
         .filter(|(name, _)| name != "token")
         .map(|(name, value)| {
-            let value = params.get(&name).or_else(|| states.get(&name)).cloned().unwrap_or(value);
+            let value = params
+                .get(&name)
+                .or_else(|| states.get(&name))
+                .cloned()
+                .unwrap_or(value);
             (name, value)
         })
         .collect::<Vec<_>>();
@@ -224,7 +241,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut supplied = supplied;
     supplied.extend(reverse.constants().iter().cloned());
     supplied.push((ones_id, Tensor::from_vec(vec![vocab, 1], vec![1.; vocab])?));
-    supplied.push((scale_id, Tensor::from_slice(vec![1, 1], &[1. / window_len as f32])?));
+    supplied.push((
+        scale_id,
+        Tensor::from_slice(vec![1, 1], &[1. / window_len as f32])?,
+    ));
     let supplied = supplied
         .into_iter()
         .filter(|(id, _)| program.source_inputs().contains(id))
@@ -329,7 +349,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .terminal_states()
             .keys()
             .enumerate()
-            .map(|(i, name)| (name.clone(), outputs[output_count + names.len() + i].1.clone()))
+            .map(|(i, name)| {
+                (
+                    name.clone(),
+                    outputs[output_count + names.len() + i].1.clone(),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         optimizer.step(&mut params, &derivative)?;
         let adam_ms = timing.elapsed().as_secs_f64() * 1000.;

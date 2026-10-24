@@ -210,12 +210,28 @@ fn graph_provided_multi_output_vjp_rejects_bad_seeds() {
     let first_seed = graph.mul(square, input).unwrap();
     let second_seed = graph.sub(input, weight).unwrap();
     let reverse = differentiate_with_seeds(
-        &graph, &[(square, first_seed), (output, second_seed)], &[weight],
-    ).unwrap();
-    assert_eq!(reverse.graph().node(reverse.gradient_of(weight).unwrap()).unwrap().shape, shape);
-    assert!(reverse.bindings(&[], Tensor::from_slice(vec![1, 1], &[1.]).unwrap()).is_err());
+        &graph,
+        &[(square, first_seed), (output, second_seed)],
+        &[weight],
+    )
+    .unwrap();
+    assert_eq!(
+        reverse
+            .graph()
+            .node(reverse.gradient_of(weight).unwrap())
+            .unwrap()
+            .shape,
+        shape
+    );
+    assert!(
+        reverse
+            .bindings(&[], Tensor::from_slice(vec![1, 1], &[1.]).unwrap())
+            .is_err()
+    );
     assert!(differentiate_with_seeds(&graph, &[], &[weight]).is_err());
-    assert!(differentiate_with_seeds(&graph, &[(square, input), (square, input)], &[weight]).is_err());
+    assert!(
+        differentiate_with_seeds(&graph, &[(square, input), (square, input)], &[weight]).is_err()
+    );
 }
 
 #[test]
@@ -229,10 +245,20 @@ fn gpu_graph_provided_multi_output_vjp_stops_gradient_at_cotangents() {
     let output = graph.add(square, input).unwrap();
     let first_seed = graph.mul(square, input).unwrap();
     let second_seed = graph.sub(input, weight).unwrap();
-    let reverse = differentiate_with_seeds(&graph, &[(square, first_seed), (output, second_seed)], &[weight]).unwrap();
+    let reverse = differentiate_with_seeds(
+        &graph,
+        &[(square, first_seed), (output, second_seed)],
+        &[weight],
+    )
+    .unwrap();
     let gradient = reverse.gradient_of(weight).unwrap();
-    let engine = GpuEngine::new("llc", std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()));
-    let program = engine.compile_outputs(reverse.graph(), &[gradient]).unwrap();
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    );
+    let program = engine
+        .compile_outputs(reverse.graph(), &[gradient])
+        .unwrap();
     let values = vec![
         (weight, Tensor::from_slice(vec![1, 1], &[2.]).unwrap()),
         (input, Tensor::from_slice(vec![1, 1], &[3.]).unwrap()),
