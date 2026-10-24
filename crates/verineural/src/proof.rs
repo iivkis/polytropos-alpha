@@ -1374,8 +1374,7 @@ impl LeanProofEngine {
             if !selected.insert(module_index) {
                 continue;
             }
-            let definition =
-                normalize_module_global_nonnegative_definition(graph, module_index)?;
+            let definition = normalize_module_global_nonnegative_definition(graph, module_index)?;
             for &port in &definition.required_ports {
                 let input = modules[module_index].inputs[port];
                 if assumption_set.contains(&input.index()) {
@@ -1471,12 +1470,12 @@ impl LeanProofEngine {
                 let input_node = graph.node(input)?;
                 let value_type =
                     lean_value_type(input_node.dtype, input_node.shape.element_count());
-                let definition_binder =
-                    if expression_tokens.contains(format!("p_{port}").as_str()) {
-                        format!("p_{port}")
-                    } else {
-                        format!("_p_{port}")
-                    };
+                let definition_binder = if expression_tokens.contains(format!("p_{port}").as_str())
+                {
+                    format!("p_{port}")
+                } else {
+                    format!("_p_{port}")
+                };
                 definition_port_params.push(format!("({definition_binder} : {value_type})"));
                 theorem_port_params.push(format!("(p_{port} : {value_type})"));
             }
