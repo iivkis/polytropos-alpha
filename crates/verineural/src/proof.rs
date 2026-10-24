@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{
-    ContractClaim, DType, Domain, FixedScan, NeuralError, NeuralGraph, NodeId, Operation,
-    Predicate, Shape, ValueRef,
+    ContractClaim, DType, Domain, FixedScan, ModuleInstanceRef, NeuralError, NeuralGraph, NodeId,
+    Operation, Predicate, Shape, ValueRef,
 };
 
 const LEAN_LIBRARY: &str = include_str!("../../../lean/VeriNeural/Basic.lean");
@@ -1556,28 +1556,45 @@ impl LeanProofEngine {
             .join(" ");
         let call = |index: usize| format!("(node_{index} {arguments})");
 
-        let modules = graph.modules();
-        let eligible = modules
+        // Module hierarchy is heterogeneous: one application order contains
+        // both single- and multi-output invocations. Global composition reasons
+        // about a concrete output port, not merely a module index.
+        let ordered = ordered_global_module_keys(graph);
+        let eligible = ordered
             .iter()
-            .enumerate()
-            .filter_map(|(index, module)| used.contains(&module.output.index()).then_some(index))
+            .copied()
+            .filter(|&(_, key)| {
+                global_module_outputs(graph, key)
+                    .is_ok_and(|outputs| outputs.iter().any(|id| used.contains(&id.index())))
+            })
             .collect::<Vec<_>>();
         let top_level = eligible
             .iter()
             .copied()
-            .filter(|&child_index| {
+            .filter(|&child| {
                 !eligible
                     .iter()
                     .copied()
-                    .any(|parent_index| module_contains(graph, parent_index, child_index))
+                    .any(|parent| global_module_contains(graph, parent, child))
             })
             .collect::<Vec<_>>();
 
-        let mut producers = BTreeMap::<usize, usize>::new();
-        for module_index in top_level {
-            let output_index = modules[module_index].output.index();
-            if producers.insert(output_index, module_index).is_some() {
-                return Err(ProofError::UnsupportedGuarantee { node: output_index });
+        let mut producers = BTreeMap::<usize, GlobalModuleOutputKey>::new();
+        for (sequence, module) in top_level {
+            for (port, output) in global_module_outputs(graph, module)?.into_iter().enumerate() {
+                if !used.contains(&output.index()) {
+                    continue;
+                }
+                let key = GlobalModuleOutputKey {
+                    sequence,
+                    module,
+                    port,
+                };
+                if producers.insert(output.index(), key).is_some() {
+                    return Err(ProofError::UnsupportedGuarantee {
+                        node: output.index(),
+                    });
+                }
             }
         }
         let Some(&final_module) = producers.get(&output.index()) else {
@@ -1587,34 +1604,35 @@ impl LeanProofEngine {
         };
 
         let mut normalized_definitions =
-            BTreeMap::<usize, NormalizedModuleNonnegativeDefinition>::new();
-        let mut selected = BTreeSet::<usize>::new();
+            BTreeMap::<GlobalModuleOutputKey, NormalizedModuleNonnegativeDefinition>::new();
+        let mut selected = BTreeSet::<GlobalModuleOutputKey>::new();
         let mut required_assumptions = BTreeSet::<usize>::new();
         let mut pending = vec![final_module];
-        while let Some(module_index) = pending.pop() {
-            if !selected.insert(module_index) {
+        while let Some(module_key) = pending.pop() {
+            if !selected.insert(module_key) {
                 continue;
             }
-            let definition = normalize_module_global_nonnegative_definition(graph, module_index)?;
+            let definition = normalize_global_module_output(graph, module_key)?;
+            let inputs = global_module_inputs(graph, module_key.module)?;
             for &port in &definition.required_ports {
-                let input = modules[module_index].inputs[port];
+                let input = inputs[port];
                 if assumption_set.contains(&input.index()) {
                     required_assumptions.insert(input.index());
                     continue;
                 }
-                let Some(&producer_index) = producers.get(&input.index()) else {
+                let Some(&producer) = producers.get(&input.index()) else {
                     return Err(ProofError::UnsupportedGuarantee {
                         node: input.index(),
                     });
                 };
-                if producer_index >= module_index {
+                if producer.sequence >= module_key.sequence {
                     return Err(ProofError::UnsupportedGuarantee {
                         node: input.index(),
                     });
                 }
-                pending.push(producer_index);
+                pending.push(producer);
             }
-            normalized_definitions.insert(module_index, definition);
+            normalized_definitions.insert(module_key, definition);
         }
 
         let namespace_end = "end VeriNeural.Generated\n";
@@ -1627,28 +1645,26 @@ impl LeanProofEngine {
             .source
             .truncate(program.source.len() - namespace_end.len());
 
-        // Group concrete module invocations by stable identity first, then
-        // require their normalized ideal-Int definitions to agree exactly.
-        // This prevents a consumer from reusing a name/version/contract for a
-        // semantically different body while still sharing one theorem for
-        // genuinely identical definitions.
-        let mut definition_groups = Vec::<Vec<usize>>::new();
-        for &module_index in &selected {
-            let module = &modules[module_index];
+        // Reuse a definition theorem only for the same module kind, stable
+        // name/version/full interface, target output port and normalized proof.
+        let mut definition_groups = Vec::<Vec<GlobalModuleOutputKey>>::new();
+        for &module_key in &selected {
             let mut matching_group = None;
             for (group_index, group) in definition_groups.iter().enumerate() {
-                let representative_index = group[0];
-                let representative = &modules[representative_index];
-                if module.name == representative.name
-                    && module.semantic_version == representative.semantic_version
-                    && module.contract == representative.contract
+                let representative = group[0];
+                if module_key.port == representative.port
+                    && global_module_same_interface(
+                        graph,
+                        module_key.module,
+                        representative.module,
+                    )?
                 {
-                    if normalized_definitions[&module_index]
-                        != normalized_definitions[&representative_index]
+                    if normalized_definitions[&module_key]
+                        != normalized_definitions[&representative]
                     {
                         return Err(ProofError::ModuleDefinitionMismatch {
-                            representative: representative_index,
-                            other: module_index,
+                            representative: representative.sequence,
+                            other: module_key.sequence,
                         });
                     }
                     matching_group = Some(group_index);
@@ -1662,20 +1678,24 @@ impl LeanProofEngine {
                     definition_groups.len() - 1
                 }
             };
-            definition_groups[group_index].push(module_index);
+            definition_groups[group_index].push(module_key);
         }
 
         for group in &definition_groups {
-            let representative_index = group[0];
-            let representative = &modules[representative_index];
-            let representative_output = graph.node(representative.output)?;
+            let representative_key = group[0];
+            let inputs = global_module_inputs(graph, representative_key.module)?;
+            let representative_output = graph.node(global_module_output(
+                graph,
+                representative_key.module,
+                representative_key.port,
+            )?)?;
             if representative_output.dtype != DType::F32 {
                 return Err(ProofError::UnsupportedGuarantee {
-                    node: representative.output.index(),
+                    node: representative_output.id.index(),
                 });
             }
-            let definition = &normalized_definitions[&representative_index];
-            let definition_name = format!("architecture_module_definition_{representative_index}");
+            let definition = &normalized_definitions[&representative_key];
+            let definition_name = global_definition_name(representative_key);
             let theorem_name = format!("{definition_name}_nonnegative");
             let expression_tokens = definition
                 .expression
@@ -1687,7 +1707,7 @@ impl LeanProofEngine {
                 .collect::<BTreeSet<_>>();
             let mut definition_port_params = Vec::new();
             let mut theorem_port_params = Vec::new();
-            for (port, &input) in representative.inputs.iter().enumerate() {
+            for (port, &input) in inputs.iter().enumerate() {
                 let input_node = graph.node(input)?;
                 let value_type =
                     lean_value_type(input_node.dtype, input_node.shape.element_count());
@@ -1723,7 +1743,7 @@ impl LeanProofEngine {
                 representative_output.shape.element_count(),
                 definition.expression,
                 theorem_port_params.join(" "),
-                (0..representative.inputs.len())
+                (0..inputs.len())
                     .map(|port| format!("p_{port}"))
                     .collect::<Vec<_>>()
                     .join(" "),
@@ -1731,11 +1751,11 @@ impl LeanProofEngine {
             ));
             program.theorems.push(theorem_name.clone());
 
-            for &module_index in group {
-                let module = &modules[module_index];
-                let definition = &normalized_definitions[&module_index];
-                let port_values = module
-                    .inputs
+            for &module_key in group {
+                let inputs = global_module_inputs(graph, module_key.module)?;
+                let output = global_module_output(graph, module_key.module, module_key.port)?;
+                let definition = &normalized_definitions[&module_key];
+                let port_values = inputs
                     .iter()
                     .map(|input| call(input.index()))
                     .collect::<Vec<_>>();
@@ -1744,8 +1764,9 @@ impl LeanProofEngine {
                     .iter()
                     .map(|&port| {
                         format!(
-                            "(h_module_{module_index}_input_{port} : VeriNeural.Nonnegative {})",
-                            call(module.inputs[port].index())
+                            "({} : VeriNeural.Nonnegative {})",
+                            global_input_hypothesis_name(module_key, port),
+                            call(inputs[port].index())
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1758,17 +1779,17 @@ impl LeanProofEngine {
                 let input_proofs = definition
                     .required_ports
                     .iter()
-                    .map(|&port| format!("h_module_{module_index}_input_{port}"))
+                    .map(|&port| global_input_hypothesis_name(module_key, port))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let instance_name = format!("architecture_module_instance_{module_index}");
+                let instance_name = global_instance_name(module_key);
                 program.source.push_str(&format!(
                     "-- Concrete invocation: only its premises are instance-specific.\n\
                      theorem {instance_name} {theorem_params} :\n  \
                      VeriNeural.Nonnegative {} := by\n  \
                      change VeriNeural.Nonnegative ({definition_name} {})\n  \
                      exact {theorem_name} {}{}\n\n",
-                    call(module.output.index()),
+                    call(output.index()),
                     port_values.join(" "),
                     port_values.join(" "),
                     if input_proofs.is_empty() {
@@ -1802,26 +1823,28 @@ impl LeanProofEngine {
             .iter()
             .map(|&index| (index, format!("arch_h_{index}")))
             .collect::<BTreeMap<_, _>>();
-        for &module_index in &selected {
-            let module = &modules[module_index];
-            let definition = &normalized_definitions[&module_index];
+        for &module_key in &selected {
+            let definition = &normalized_definitions[&module_key];
+            let inputs = global_module_inputs(graph, module_key.module)?;
+            let output = global_module_output(graph, module_key.module, module_key.port)?;
             let mut args = sources
                 .iter()
                 .map(|&index| format!("x_{index}"))
                 .collect::<Vec<_>>();
             for &port in &definition.required_ports {
-                let input = module.inputs[port].index();
+                let input = inputs[port].index();
                 let Some(input_proof) = proofs.get(&input) else {
                     return Err(ProofError::UnsupportedGuarantee { node: input });
                 };
                 args.push(input_proof.clone());
             }
-            let have_name = format!("arch_module_{module_index}");
+            let have_name = global_have_name(module_key);
+            let instance_name = global_instance_name(module_key);
             program.source.push_str(&format!(
-                "  have {have_name} := architecture_module_instance_{module_index} {}\n",
+                "  have {have_name} := {instance_name} {}\n",
                 args.join(" ")
             ));
-            proofs.insert(module.output.index(), have_name);
+            proofs.insert(output.index(), have_name);
         }
         let Some(final_proof) = proofs.get(&output.index()) else {
             return Err(ProofError::UnsupportedGuarantee {
@@ -2948,14 +2971,256 @@ fn collect_used_nodes(graph: &NeuralGraph, output: NodeId) -> Result<BTreeSet<us
     Ok(graph.dependency_scope(&[output])?)
 }
 
-fn module_contains(graph: &NeuralGraph, parent_index: usize, child_index: usize) -> bool {
-    if child_index >= parent_index {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum GlobalModuleKey {
+    Single(usize),
+    Multi(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GlobalModuleOutputKey {
+    sequence: usize,
+    module: GlobalModuleKey,
+    port: usize,
+}
+
+fn ordered_global_module_keys(graph: &NeuralGraph) -> Vec<(usize, GlobalModuleKey)> {
+    let mut single = 0usize;
+    let mut multi = 0usize;
+    graph
+        .module_instances()
+        .enumerate()
+        .map(|(sequence, instance)| {
+            let key = match instance {
+                ModuleInstanceRef::Single(_) => {
+                    let key = GlobalModuleKey::Single(single);
+                    single += 1;
+                    key
+                }
+                ModuleInstanceRef::Multi(_) => {
+                    let key = GlobalModuleKey::Multi(multi);
+                    multi += 1;
+                    key
+                }
+            };
+            (sequence, key)
+        })
+        .collect()
+}
+
+fn global_module_ref(
+    graph: &NeuralGraph,
+    key: GlobalModuleKey,
+) -> Result<ModuleInstanceRef<'_>, ProofError> {
+    match key {
+        GlobalModuleKey::Single(index) => graph
+            .modules()
+            .get(index)
+            .map(ModuleInstanceRef::Single)
+            .ok_or(ProofError::InvalidOutputs),
+        GlobalModuleKey::Multi(index) => graph
+            .multi_modules()
+            .get(index)
+            .map(ModuleInstanceRef::Multi)
+            .ok_or(ProofError::InvalidOutputs),
+    }
+}
+
+fn global_module_inputs(
+    graph: &NeuralGraph,
+    key: GlobalModuleKey,
+) -> Result<&[NodeId], ProofError> {
+    Ok(global_module_ref(graph, key)?.inputs())
+}
+
+fn global_module_outputs(
+    graph: &NeuralGraph,
+    key: GlobalModuleKey,
+) -> Result<Vec<NodeId>, ProofError> {
+    Ok(global_module_ref(graph, key)?.outputs())
+}
+
+fn global_module_output(
+    graph: &NeuralGraph,
+    key: GlobalModuleKey,
+    port: usize,
+) -> Result<NodeId, ProofError> {
+    global_module_outputs(graph, key)?
+        .get(port)
+        .copied()
+        .ok_or(ProofError::InvalidOutputs)
+}
+
+fn global_module_contains(
+    graph: &NeuralGraph,
+    parent: (usize, GlobalModuleKey),
+    child: (usize, GlobalModuleKey),
+) -> bool {
+    if child.0 >= parent.0 {
         return false;
     }
-    let modules = graph.modules();
-    let parent = &modules[parent_index];
-    let child = &modules[child_index];
-    child.body_start >= parent.body_start && child.body_end <= parent.body_end
+    let Ok(parent) = global_module_ref(graph, parent.1) else {
+        return false;
+    };
+    let Ok(child) = global_module_ref(graph, child.1) else {
+        return false;
+    };
+    let parent = parent.body_range();
+    let child = child.body_range();
+    child.start >= parent.start && child.end <= parent.end
+}
+
+fn global_module_same_interface(
+    graph: &NeuralGraph,
+    left: GlobalModuleKey,
+    right: GlobalModuleKey,
+) -> Result<bool, ProofError> {
+    Ok(match (left, right) {
+        (GlobalModuleKey::Single(left), GlobalModuleKey::Single(right)) => {
+            let left = graph.modules().get(left).ok_or(ProofError::InvalidOutputs)?;
+            let right = graph
+                .modules()
+                .get(right)
+                .ok_or(ProofError::InvalidOutputs)?;
+            left.name == right.name
+                && left.semantic_version == right.semantic_version
+                && left.contract == right.contract
+        }
+        (GlobalModuleKey::Multi(left), GlobalModuleKey::Multi(right)) => {
+            let left = graph
+                .multi_modules()
+                .get(left)
+                .ok_or(ProofError::InvalidOutputs)?;
+            let right = graph
+                .multi_modules()
+                .get(right)
+                .ok_or(ProofError::InvalidOutputs)?;
+            left.name == right.name
+                && left.semantic_version == right.semantic_version
+                && left.contract == right.contract
+        }
+        _ => false,
+    })
+}
+
+fn normalize_multi_global_nonnegative_definition(
+    graph: &NeuralGraph,
+    index: usize,
+    output_port: usize,
+) -> Result<NormalizedModuleNonnegativeDefinition, ProofError> {
+    let module = graph
+        .multi_modules()
+        .get(index)
+        .ok_or(ProofError::InvalidOutputs)?;
+    let output = module
+        .outputs
+        .get(output_port)
+        .copied()
+        .ok_or(ProofError::InvalidOutputs)?;
+    if graph.node(output)?.dtype != DType::F32 {
+        return Err(ProofError::UnsupportedGuarantee {
+            node: output.index(),
+        });
+    }
+    let boundary = module
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(port, input)| (input.index(), port))
+        .collect::<BTreeMap<_, _>>();
+    let expression = normalized_module_expression(
+        graph,
+        module.body_start,
+        module.body_end,
+        output.index(),
+        &boundary,
+        &mut BTreeMap::new(),
+    )?;
+    let mut required_ports = BTreeSet::new();
+    let proof_term = normalized_module_nonnegative_proof(
+        graph,
+        module.body_start,
+        module.body_end,
+        output.index(),
+        &boundary,
+        &mut required_ports,
+        &mut BTreeMap::new(),
+    )?;
+    // A concrete global application still owes every declared nonnegative
+    // interface requirement, even if this particular output proof ignores it.
+    for (port, input) in module.contract.inputs.iter().enumerate() {
+        if input.port.domain == Domain::NonNegativeFinite {
+            if input.port.dtype != DType::F32 {
+                return Err(ProofError::UnsupportedGuarantee {
+                    node: output.index(),
+                });
+            }
+            required_ports.insert(port);
+        }
+    }
+    Ok(NormalizedModuleNonnegativeDefinition {
+        expression,
+        proof_term,
+        required_ports: required_ports.into_iter().collect(),
+    })
+}
+
+fn normalize_global_module_output(
+    graph: &NeuralGraph,
+    key: GlobalModuleOutputKey,
+) -> Result<NormalizedModuleNonnegativeDefinition, ProofError> {
+    match key.module {
+        GlobalModuleKey::Single(index) => {
+            if key.port != 0 {
+                return Err(ProofError::InvalidOutputs);
+            }
+            normalize_module_global_nonnegative_definition(graph, index)
+        }
+        GlobalModuleKey::Multi(index) => {
+            normalize_multi_global_nonnegative_definition(graph, index, key.port)
+        }
+    }
+}
+
+fn global_definition_name(key: GlobalModuleOutputKey) -> String {
+    match key.module {
+        GlobalModuleKey::Single(_) => {
+            format!("architecture_module_definition_{}", key.sequence)
+        }
+        GlobalModuleKey::Multi(_) => format!(
+            "architecture_module_definition_{}_port_{}",
+            key.sequence, key.port
+        ),
+    }
+}
+
+fn global_instance_name(key: GlobalModuleOutputKey) -> String {
+    match key.module {
+        GlobalModuleKey::Single(_) => format!("architecture_module_instance_{}", key.sequence),
+        GlobalModuleKey::Multi(_) => format!(
+            "architecture_module_instance_{}_port_{}",
+            key.sequence, key.port
+        ),
+    }
+}
+
+fn global_input_hypothesis_name(key: GlobalModuleOutputKey, input_port: usize) -> String {
+    match key.module {
+        GlobalModuleKey::Single(_) => {
+            format!("h_module_{}_input_{input_port}", key.sequence)
+        }
+        GlobalModuleKey::Multi(_) => format!(
+            "h_module_{}_port_{}_input_{input_port}",
+            key.sequence, key.port
+        ),
+    }
+}
+
+fn global_have_name(key: GlobalModuleOutputKey) -> String {
+    match key.module {
+        GlobalModuleKey::Single(_) => format!("arch_module_{}", key.sequence),
+        GlobalModuleKey::Multi(_) => format!("arch_module_{}_port_{}", key.sequence, key.port),
+    }
 }
 
 /// A claim is about the ideal-Int interpretation of the graph, not the

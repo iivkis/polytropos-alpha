@@ -2,9 +2,11 @@
 //! Host references are concrete f32/index calculations; Lean models the ideal
 //! integer structure. GPU lowering supports the deliberately narrow routing
 //! profile exercised by rotating-matrices and fails closed outside it.
+use std::path::Path;
+
 use verineural::{
     ArgMaxTieBreak, DType, Domain, GpuEngine, LeanProofEngine, NeuralError, NeuralGraph, Operation,
-    ProofError, Shape, Tensor,
+    ProofError, Shape, Tensor, TensorValue,
 };
 
 #[test]
@@ -93,6 +95,36 @@ fn graph_uses_a_real_index_dtype_and_rejects_float_indices() {
             extent: 2,
         })
     ));
+}
+
+#[test]
+#[ignore = "requires pinned LLVM/CUDA and an NVIDIA GPU from the Nix devShell"]
+fn gpu_public_argmax_output_preserves_index_dtype_and_values() {
+    let mut graph = NeuralGraph::default();
+    let logits = graph.input(Shape::new(vec![2, 4]).unwrap(), Domain::Finite);
+    let action = graph
+        .argmax(logits, 1, ArgMaxTieBreak::First)
+        .unwrap();
+    let values = Tensor::new(
+        Shape::new(vec![2, 4]).unwrap(),
+        vec![1.0, 5.0, 5.0, 2.0, 9.0, 8.0, 7.0, 9.0],
+    )
+    .unwrap();
+    let engine = GpuEngine::default();
+    let program = engine.compile(&graph, action).unwrap();
+    let observed = engine
+        .execute_value(
+            &program,
+            &[(logits, values)],
+            Path::new("target/verineural/index-output"),
+        )
+        .unwrap();
+
+    assert_eq!(observed.dtype(), DType::Index);
+    let TensorValue::Index(indices) = observed else {
+        panic!("ArgMax GPU output lost its Index dtype");
+    };
+    assert_eq!(indices.values(), &[1, 0]);
 }
 
 #[test]

@@ -104,7 +104,7 @@ pub use symbolic::{
     Dimension, DimensionBindings, DimensionConstraint, ParametricModule, ParametricSignature,
     SymbolicPort, SymbolicShape,
 };
-pub use tensor::{Shape, Tensor, TensorShape};
+pub use tensor::{Shape, Tensor, TensorShape, TensorValue};
 pub use translation::{
     TranslationError, TranslationKernel, TranslationKind, TranslationPlan, TranslationReport,
 };

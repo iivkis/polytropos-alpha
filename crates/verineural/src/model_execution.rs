@@ -5,7 +5,9 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
-use crate::{GpuEngine, GpuError, GpuExecution, Model, ModelError, NodeId, SourceRole, Tensor};
+use crate::{
+    GpuEngine, GpuError, GpuExecution, Model, ModelError, NodeId, SourceRole, Tensor, TensorValue,
+};
 
 #[derive(Debug)]
 pub enum ModelExecutionError {
@@ -190,13 +192,23 @@ impl ModelExecution {
         Ok(self.gpu.feedback_state(&links)?)
     }
 
-    /// Read a public named output after run()/step().
-    pub fn output(&mut self, name: &str) -> Result<Tensor<f32>, ModelExecutionError> {
-        let id = self
-            .outputs
+    fn named_output(&self, name: &str) -> Result<NodeId, ModelExecutionError> {
+        self.outputs
             .get(name)
             .copied()
-            .ok_or_else(|| ModelExecutionError::Invalid(format!("unknown output: {name}")))?;
+            .ok_or_else(|| ModelExecutionError::Invalid(format!("unknown output: {name}")))
+    }
+
+    /// Read a public named output while preserving its Semantic IR dtype.
+    pub fn output_value(&mut self, name: &str) -> Result<TensorValue, ModelExecutionError> {
+        let id = self.named_output(name)?;
+        Ok(self.gpu.read_selected_value(id)?)
+    }
+
+    /// Backward-compatible F32 output reader. Index outputs must use
+    /// `output_value`, and fail closed here instead of reinterpreting bits.
+    pub fn output(&mut self, name: &str) -> Result<Tensor<f32>, ModelExecutionError> {
+        let id = self.named_output(name)?;
         Ok(self.gpu.read_selected_output(id)?)
     }
 

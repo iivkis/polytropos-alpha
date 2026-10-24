@@ -13,7 +13,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::translation::{TranslationKernel, TranslationKind, TranslationPlan};
-use crate::{LeanProgram, NeuralError, NeuralGraph, NodeId, NodeStorage, Operation, Shape, Tensor};
+use crate::{
+    DType, LeanProgram, NeuralError, NeuralGraph, NodeId, NodeStorage, Operation, Shape, Tensor,
+    TensorValue,
+};
 
 use super::cuda::CudaSession;
 
@@ -1383,13 +1386,45 @@ impl GpuExecution {
         Ok(())
     }
 
-    /// Read just one selected output (not every public and private root).
-    pub(crate) fn read_selected_output(&mut self, id: NodeId) -> Result<Tensor<f32>, GpuError> {
+    fn read_value_at(
+        &mut self,
+        id: NodeId,
+        shape: &Shape,
+        address: u64,
+    ) -> Result<TensorValue, GpuError> {
+        match self.program.graph.node(id)?.dtype {
+            DType::F32 => {
+                let mut values = vec![0.0f32; shape.element_count()];
+                self.execution_health
+                    .record_io(self.session.copy_to_host(&mut values, address))?;
+                Ok(TensorValue::F32(Tensor::new(shape.clone(), values)?))
+            }
+            DType::Index => {
+                let mut raw = vec![0i32; shape.element_count()];
+                self.execution_health
+                    .record_io(self.session.copy_indices_to_host(&mut raw, address))?;
+                let values = raw
+                    .into_iter()
+                    .map(|value| {
+                        usize::try_from(value).map_err(|_| GpuError::InvalidInput {
+                            node: id.index(),
+                            reason: "device index output is negative",
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(TensorValue::Index(Tensor::new(shape.clone(), values)?))
+            }
+        }
+    }
+
+    /// Read one selected output while preserving its Semantic IR dtype.
+    pub(crate) fn read_selected_value(&mut self, id: NodeId) -> Result<TensorValue, GpuError> {
         self.execution_health.ensure_outputs_ready()?;
         let (_, shape, live) = self
             .output_addresses
             .iter()
             .find(|(node, _, _)| *node == id)
+            .cloned()
             .ok_or(GpuError::InvalidInput {
                 node: id.index(),
                 reason: "requested output is not selected",
@@ -1398,14 +1433,23 @@ impl GpuExecution {
             self.preserved_output_addresses
                 .get(&id.index())
                 .copied()
-                .unwrap_or(*live)
+                .unwrap_or(live)
         } else {
-            *live
+            live
         };
-        let mut values = vec![0.0f32; shape.element_count()];
-        self.execution_health
-            .record_io(self.session.copy_to_host(&mut values, address))?;
-        Ok(Tensor::new(shape.clone(), values)?)
+        self.read_value_at(id, &shape, address)
+    }
+
+    /// Backward-compatible F32 reader. Index outputs must use the typed API.
+    pub(crate) fn read_selected_output(&mut self, id: NodeId) -> Result<Tensor<f32>, GpuError> {
+        match self.read_selected_value(id)? {
+            TensorValue::F32(tensor) => Ok(tensor),
+            TensorValue::Index(_) => Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
+                operation: "read_selected_output",
+                expected: DType::F32,
+                actual: DType::Index,
+            })),
+        }
     }
 
     /// Validate feedback shape, dtype, domain, liveness and alias order.
@@ -1522,26 +1566,53 @@ impl GpuExecution {
         Ok(())
     }
 
-    pub fn read_output(&mut self) -> Result<Tensor<f32>, GpuError> {
+    /// Read the primary output while preserving its Semantic IR dtype.
+    pub fn read_value(&mut self) -> Result<TensorValue, GpuError> {
         self.execution_health.ensure_outputs_ready()?;
-        let mut values = vec![0.0f32; self.output_shape.element_count()];
-        self.execution_health
-            .record_io(self.session.copy_to_host(&mut values, self.output_address))?;
-        Ok(Tensor::new(self.output_shape.clone(), values)?)
+        let id = self.program.output;
+        let shape = self.output_shape.clone();
+        let address = self.output_address;
+        self.read_value_at(id, &shape, address)
     }
 
-    /// Read each selected output in declaration order. One CUDA Graph replay
-    /// computes all results, with common intermediate tensors evaluated once.
-    pub fn read_outputs(&mut self) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
+    /// Backward-compatible F32 primary-output reader.
+    pub fn read_output(&mut self) -> Result<Tensor<f32>, GpuError> {
+        match self.read_value()? {
+            TensorValue::F32(tensor) => Ok(tensor),
+            TensorValue::Index(_) => Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
+                operation: "read_output",
+                expected: DType::F32,
+                actual: DType::Index,
+            })),
+        }
+    }
+
+    /// Read each selected output in declaration order, preserving every dtype.
+    pub fn read_values(&mut self) -> Result<Vec<(NodeId, TensorValue)>, GpuError> {
         self.execution_health.ensure_outputs_ready()?;
-        let mut result = Vec::with_capacity(self.output_addresses.len());
-        for (node, shape, pointer) in &self.output_addresses {
-            let mut values = vec![0.0f32; shape.element_count()];
-            self.execution_health
-                .record_io(self.session.copy_to_host(&mut values, *pointer))?;
-            result.push((*node, Tensor::new(shape.clone(), values)?));
+        let outputs = self.output_addresses.clone();
+        let mut result = Vec::with_capacity(outputs.len());
+        for (node, shape, pointer) in outputs {
+            result.push((node, self.read_value_at(node, &shape, pointer)?));
         }
         Ok(result)
+    }
+
+    /// Backward-compatible all-F32 reader. Mixed/Index output sets fail closed.
+    pub fn read_outputs(&mut self) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
+        self.read_values()?
+            .into_iter()
+            .map(|(node, value)| match value {
+                TensorValue::F32(tensor) => Ok((node, tensor)),
+                TensorValue::Index(_) => {
+                    Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
+                        operation: "read_outputs",
+                        expected: DType::F32,
+                        actual: DType::Index,
+                    }))
+                }
+            })
+            .collect()
     }
 
     pub fn benchmark(
@@ -2049,9 +2120,20 @@ impl GpuEngine {
         })
     }
 
-    /// Evaluate all outputs with one shared CUDA Graph capture and replay.
-    /// Results follow program.outputs(), and inputs must cover the union of
-    /// all selected output dependencies.
+    /// Evaluate all outputs with one shared CUDA Graph capture and replay,
+    /// preserving each output's Semantic IR dtype.
+    pub fn execute_values(
+        &self,
+        program: &GpuProgram,
+        inputs: &[(NodeId, Tensor<f32>)],
+        output_dir: &Path,
+    ) -> Result<Vec<(NodeId, TensorValue)>, GpuError> {
+        let mut execution = self.prepare(program, inputs, output_dir)?;
+        execution.replay()?;
+        execution.read_values()
+    }
+
+    /// Backward-compatible all-F32 shared execution.
     pub fn execute_outputs(
         &self,
         program: &GpuProgram,
@@ -2063,6 +2145,19 @@ impl GpuEngine {
         execution.read_outputs()
     }
 
+    /// Evaluate the primary output while preserving its Semantic IR dtype.
+    pub fn execute_value(
+        &self,
+        program: &GpuProgram,
+        inputs: &[(NodeId, Tensor<f32>)],
+        output_dir: &Path,
+    ) -> Result<TensorValue, GpuError> {
+        let mut execution = self.prepare(program, inputs, output_dir)?;
+        execution.replay()?;
+        execution.read_value()
+    }
+
+    /// Backward-compatible F32 primary execution.
     pub fn execute(
         &self,
         program: &GpuProgram,

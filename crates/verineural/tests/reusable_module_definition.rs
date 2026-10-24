@@ -425,6 +425,108 @@ fn lean_checks_multi_output_shared_theorem_and_all_applications() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn global_composition_reuses_multi_output_definition_port_and_checks_instances() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(), Domain::NonNegativeFinite);
+    let y = graph.input(shape(), Domain::NonNegativeFinite);
+    let z = graph.input(shape(), Domain::NonNegativeFinite);
+    let pair = PositivePair::new(Body::Add, true, true);
+    let left = graph.apply_multi_module(&pair, &[x, y]).unwrap();
+    let right = graph.apply_multi_module(&pair, &[x, z]).unwrap();
+    let output = graph
+        .apply_module(&GlobalJoin::new(), &[left[1], right[1]])
+        .unwrap();
+
+    let program = LeanProofEngine::default()
+        .generate_global_nonnegative(&graph, output, &[x, y, z])
+        .unwrap();
+    let source = program.source();
+
+    assert_eq!(
+        source
+            .matches("theorem architecture_module_definition_0_port_1_nonnegative ")
+            .count(),
+        1
+    );
+    assert!(!source.contains("theorem architecture_module_definition_1_port_1_nonnegative "));
+    assert!(source.contains("theorem architecture_module_instance_0_port_1 "));
+    assert!(source.contains("theorem architecture_module_instance_1_port_1 "));
+    assert!(source.contains("theorem architecture_module_instance_2 "));
+    assert!(source.contains(
+        "have arch_module_0_port_1 := architecture_module_instance_0_port_1"
+    ));
+    assert!(source.contains(
+        "have arch_module_1_port_1 := architecture_module_instance_1_port_1"
+    ));
+    assert!(source.contains("have arch_module_2 := architecture_module_instance_2"));
+}
+
+#[test]
+fn global_multi_output_reuse_rejects_same_identity_with_different_selected_port_semantics() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(), Domain::NonNegativeFinite);
+    let y = graph.input(shape(), Domain::NonNegativeFinite);
+    let z = graph.input(shape(), Domain::NonNegativeFinite);
+    let left = graph
+        .apply_multi_module(&PositivePair::new(Body::Add, true, true), &[x, y])
+        .unwrap();
+    let right = graph
+        .apply_multi_module(&PositivePair::new(Body::Mul, true, true), &[x, z])
+        .unwrap();
+    let output = graph
+        .apply_module(&GlobalJoin::new(), &[left[0], right[0]])
+        .unwrap();
+
+    assert!(matches!(
+        LeanProofEngine::default().generate_global_nonnegative(&graph, output, &[x, y, z]),
+        Err(ProofError::ModuleDefinitionMismatch {
+            representative: 0,
+            other: 1
+        })
+    ));
+}
+
+/// Global composition must be checked by Lean too, not only by substring tests.
+#[test]
+#[ignore = "requires pinned Lean 4 from Nix devShell"]
+fn lean_checks_global_multi_output_reuse_and_port_applications() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(), Domain::NonNegativeFinite);
+    let y = graph.input(shape(), Domain::NonNegativeFinite);
+    let z = graph.input(shape(), Domain::NonNegativeFinite);
+    let pair = PositivePair::new(Body::Add, true, true);
+    let left = graph.apply_multi_module(&pair, &[x, y]).unwrap();
+    let right = graph.apply_multi_module(&pair, &[x, z]).unwrap();
+    let output = graph
+        .apply_module(&GlobalJoin::new(), &[left[1], right[1]])
+        .unwrap();
+    let program = LeanProofEngine::default()
+        .generate_global_nonnegative(&graph, output, &[x, y, z])
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "verineural-global-multi-reusable-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (_checked, audit) = LeanProofEngine::default()
+        .verify_certified(&program, &dir.join("global_multi_reusable.lean"))
+        .unwrap();
+    assert!(
+        audit
+            .theorem_names
+            .iter()
+            .any(|t| t == "architecture_global_nonnegative")
+    );
+    assert!(
+        audit
+            .theorem_names
+            .iter()
+            .any(|t| t == "architecture_module_instance_1_port_1")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Global composition must be checked by Lean too, not only by substring tests.
 #[test]
 #[ignore = "requires pinned Lean 4 from Nix devShell"]

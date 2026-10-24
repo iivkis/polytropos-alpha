@@ -59,8 +59,32 @@ pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
     files
 }
 
+fn identity_without_graph_allocation(text: &str) -> String {
+    let mut normalized = text.to_owned();
+    const MARKER: &str = "NodeId { graph: ";
+    while let Some(start) = normalized.find(MARKER) {
+        let search_from = start + MARKER.len();
+        let Some(relative) = normalized[search_from..].find(", index: ") else {
+            break;
+        };
+        let comma = search_from + relative;
+        // Preserve the old Debug-shaped declaration except for the graph
+        // allocation identity, which has no semantic meaning.
+        normalized.replace_range(start..comma + 2, "NodeId { ");
+    }
+    normalized
+}
+
+fn compatible_identity(saved: &str, expected: &str) -> bool {
+    saved == expected
+        || identity_without_graph_allocation(saved)
+            == identity_without_graph_allocation(expected)
+}
+
 /// Reject foreign or legacy bundles before starting a new staged build.
 /// Identity is checked again during replay, and SHA256SUMS covers its bytes.
+/// Older v1 identities are accepted only when removing NodeId graph allocation
+/// numbers makes the complete declarations byte-for-byte equal.
 pub(super) fn check_existing_identity(dir: &Path, expected: &str) -> Result<(), AutoBuildError> {
     match fs::symlink_metadata(dir) {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -81,7 +105,7 @@ pub(super) fn check_existing_identity(dir: &Path, expected: &str) -> Result<(), 
     let saved = fs::read_to_string(dir.join("identity.txt")).map_err(|_| {
         AutoBuildError::Integrity("existing bundle lacks a readable certified identity".into())
     })?;
-    if saved != expected {
+    if !compatible_identity(&saved, expected) {
         return Err(AutoBuildError::Integrity(
             "existing bundle belongs to a different model identity or declaration".into(),
         ));
@@ -214,6 +238,29 @@ mod tests {
             Err(AutoBuildError::Integrity(_))
         ));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_identity_migrates_only_graph_allocation_numbers() {
+        let root = std::env::temp_dir().join(format!(
+            "verineural-identity-graph-migration-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let old = "verineural-certified-model-v1\nid=lab\nversion=1\n\
+goal=p;node=2;kind=Predicate(PointwiseLe(Node(NodeId { graph: 77, index: 0 }), Output))\n";
+        let stable = "verineural-certified-model-v1\nid=lab\nversion=1\n\
+goal=p;node=2;kind=Predicate(PointwiseLe(Node(NodeId { index: 0 }), Output))\n";
+        fs::write(root.join("identity.txt"), old).unwrap();
+        check_existing_identity(&root, stable).unwrap();
+
+        let changed = stable.replace("index: 0", "index: 1");
+        assert!(matches!(
+            check_existing_identity(&root, &changed),
+            Err(AutoBuildError::Integrity(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::{ArgMaxTieBreak, Domain, NeuralError, Operation};
+use crate::{ArgMaxTieBreak, DType, Domain, NeuralError, Operation};
 
 /// Validated, immutable tensor dimensions. An empty dimension list is a scalar.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +59,59 @@ impl TensorShape for Shape {
 pub struct Tensor<T, S: TensorShape = Shape> {
     shape: S,
     values: Vec<T>,
+}
+
+/// Runtime value preserving the Semantic IR element type across host/device
+/// boundaries. Index tensors use host `usize`, while the supported CUDA ABI
+/// stores them as checked nonnegative i32 values.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TensorValue {
+    F32(Tensor<f32>),
+    Index(Tensor<usize>),
+}
+
+impl TensorValue {
+    pub const fn dtype(&self) -> DType {
+        match self {
+            Self::F32(_) => DType::F32,
+            Self::Index(_) => DType::Index,
+        }
+    }
+
+    pub fn shape(&self) -> &Shape {
+        match self {
+            Self::F32(tensor) => tensor.shape(),
+            Self::Index(tensor) => tensor.shape(),
+        }
+    }
+
+    pub const fn as_f32(&self) -> Option<&Tensor<f32>> {
+        match self {
+            Self::F32(tensor) => Some(tensor),
+            Self::Index(_) => None,
+        }
+    }
+
+    pub const fn as_index(&self) -> Option<&Tensor<usize>> {
+        match self {
+            Self::F32(_) => None,
+            Self::Index(tensor) => Some(tensor),
+        }
+    }
+
+    pub fn into_f32(self) -> Option<Tensor<f32>> {
+        match self {
+            Self::F32(tensor) => Some(tensor),
+            Self::Index(_) => None,
+        }
+    }
+
+    pub fn into_index(self) -> Option<Tensor<usize>> {
+        match self {
+            Self::F32(_) => None,
+            Self::Index(tensor) => Some(tensor),
+        }
+    }
 }
 
 fn unravel_index(mut index: usize, dims: &[usize]) -> Vec<usize> {

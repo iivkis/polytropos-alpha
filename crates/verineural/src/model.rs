@@ -3,7 +3,8 @@
 use crate::{
     ArchitectureAutoCompiler, ArchitectureMetadata, ArchitectureProofTask, AutoBuildError,
     AutoBuildPlan, AutoBuildReport, CertifiedBuildConfig, Domain, FP32Policy, GpuRequirement,
-    NeuralError, NeuralGraph, NodeId, Operation, ProofGoal, Shape, Tensor,
+    NeuralError, NeuralGraph, NodeId, Operation, Predicate, ProofGoal, ProofGoalKind, Shape,
+    Tensor, ValueRef,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -67,6 +68,75 @@ fn valid_identity(name: &str) -> bool {
         && name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-._".contains(&c))
+}
+
+fn identity_shape(shape: &Shape) -> String {
+    format!(
+        "[{}]",
+        shape
+            .dims()
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn identity_domain(domain: Domain) -> &'static str {
+    match domain {
+        Domain::Any => "Any",
+        Domain::Finite => "Finite",
+        Domain::NonNegativeFinite => "NonNegativeFinite",
+    }
+}
+
+fn identity_node(node: NodeId) -> String {
+    format!("NodeId {{ index: {} }}", node.index())
+}
+
+fn identity_value_ref(value: &ValueRef) -> String {
+    match value {
+        ValueRef::Input(port) => format!("Input({port})"),
+        ValueRef::Output => "Output".to_owned(),
+        ValueRef::Node(node) => format!("Node({})", identity_node(*node)),
+    }
+}
+
+fn identity_predicate(predicate: &Predicate) -> String {
+    match predicate {
+        Predicate::Nonnegative(value) => {
+            format!("Nonnegative({})", identity_value_ref(value))
+        }
+        Predicate::Equal(left, right) => format!(
+            "Equal({}, {})",
+            identity_value_ref(left),
+            identity_value_ref(right)
+        ),
+        Predicate::PointwiseLe(left, right) => format!(
+            "PointwiseLe({}, {})",
+            identity_value_ref(left),
+            identity_value_ref(right)
+        ),
+    }
+}
+
+fn identity_goal_kind(kind: &ProofGoalKind) -> String {
+    match kind {
+        ProofGoalKind::Nonnegative { assumptions } => format!(
+            "Nonnegative {{ assumptions: [{}] }}",
+            assumptions
+                .iter()
+                .map(|&node| identity_node(node))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ProofGoalKind::EqualTo { other } => {
+            format!("EqualTo {{ other: {} }}", identity_node(*other))
+        }
+        ProofGoalKind::Predicate(predicate) => {
+            format!("Predicate({})", identity_predicate(predicate))
+        }
+    }
 }
 
 /// Consumer model declaration; all tensor operations use NeuralGraph.
@@ -426,7 +496,8 @@ impl Model {
     }
 
     /// Stable identity binds id/version, named sources/roles, outputs and
-    /// obligations. SHA256SUMS also binds the full canonical IR and artifacts.
+    /// obligations. It deliberately excludes graph allocation identity and
+    /// Rust Debug formatting. SHA256SUMS separately binds canonical IR bytes.
     fn certified_identity(&self) -> String {
         let mut identity = format!(
             "verineural-certified-model-v1\nid={}\nversion={}\n",
@@ -438,11 +509,11 @@ impl Model {
                 .node(*node)
                 .expect("finished model source exists");
             identity.push_str(&format!(
-                "source={name};node={};role={};shape={:?};domain={:?}\n",
+                "source={name};node={};role={};shape={};domain={}\n",
                 node.index(),
                 role.as_str(),
-                source.shape.dims(),
-                source.domain
+                identity_shape(&source.shape),
+                identity_domain(source.domain)
             ));
         }
         for (name, output) in &self.outputs {
@@ -453,9 +524,9 @@ impl Model {
         }
         for (name, goal) in &self.goals {
             identity.push_str(&format!(
-                "goal={name};node={};kind={:?}\n",
+                "goal={name};node={};kind={}\n",
                 goal.output.index(),
-                goal.kind
+                identity_goal_kind(&goal.kind)
             ));
         }
         identity
@@ -594,6 +665,36 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(bound.len(), 3);
+    }
+
+    #[test]
+    fn certified_identity_is_independent_of_graph_allocation_history() {
+        fn build_identity() -> String {
+            let mut builder = ModelBuilder::new("stable_ident", "1");
+            let x = builder
+                .input("x", [2], Domain::NonNegativeFinite)
+                .unwrap();
+            let y = builder.graph_mut().relu(x).unwrap();
+            builder.output("y", y).unwrap();
+            builder
+                .proof_goal(ProofGoal {
+                    name: "ordered".into(),
+                    output: y,
+                    kind: ProofGoalKind::Predicate(Predicate::pointwise_le(
+                        ValueRef::Node(x),
+                        ValueRef::Output,
+                    )),
+                })
+                .unwrap();
+            builder.finish().unwrap().certified_identity()
+        }
+
+        let first = build_identity();
+        let _unrelated = NeuralGraph::default();
+        let second = build_identity();
+        assert_eq!(first, second);
+        assert!(!first.contains("graph:"));
+        assert!(first.contains("Predicate(PointwiseLe(Node(NodeId { index: 0 }), Output))"));
     }
 
     #[test]

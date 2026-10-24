@@ -408,25 +408,52 @@ mod platform {
             })
         }
 
+        fn copy_to_host_bytes(
+            &mut self,
+            out: *mut c_void,
+            bytes: usize,
+            address: DevicePtr,
+        ) -> Result<(), GpuError> {
+            let _context = self.enter_context()?;
+            let staging = self.staging_buffer(bytes)?;
+            let pinned = staging.address;
+            self.staging_pending.push(staging);
+            // SAFETY: pinned staging remains live until synchronization completes.
+            check("cuMemcpyDtoHAsync_v2", unsafe {
+                (self.functions.device_to_host)(pinned, address, bytes, self.stream)
+            })?;
+            self.synchronize()?;
+            // SAFETY: the async transfer completed and the caller supplied a
+            // writable destination covering exactly `bytes`.
+            unsafe {
+                ptr::copy_nonoverlapping(pinned.cast::<u8>(), out.cast::<u8>(), bytes)
+            };
+            self.release_completed_staging();
+            Ok(())
+        }
+
         pub fn copy_to_host(
             &mut self,
             out: &mut [f32],
             address: DevicePtr,
         ) -> Result<(), GpuError> {
-            let _context = self.enter_context()?;
-            let bytes = std::mem::size_of_val(out);
-            let staging = self.staging_buffer(bytes)?;
-            let pinned = staging.address;
-            self.staging_pending.push(staging);
-            // SAFETY: destination remains valid through synchronization.
-            check("cuMemcpyDtoHAsync_v2", unsafe {
-                (self.functions.device_to_host)(pinned, address, bytes, self.stream)
-            })?;
-            self.synchronize()?;
-            // SAFETY: the async transfer completed; Rust out is valid for out.len() f32s.
-            unsafe { ptr::copy_nonoverlapping(pinned.cast::<f32>(), out.as_mut_ptr(), out.len()) };
-            self.release_completed_staging();
-            Ok(())
+            self.copy_to_host_bytes(
+                out.as_mut_ptr().cast::<c_void>(),
+                std::mem::size_of_val(out),
+                address,
+            )
+        }
+
+        pub fn copy_indices_to_host(
+            &mut self,
+            out: &mut [i32],
+            address: DevicePtr,
+        ) -> Result<(), GpuError> {
+            self.copy_to_host_bytes(
+                out.as_mut_ptr().cast::<c_void>(),
+                std::mem::size_of_val(out),
+                address,
+            )
         }
 
         // Reuse completed staging buffers instead of allocating/freeing pinned
@@ -793,6 +820,12 @@ mod platform {
         }
 
         pub fn copy_to_host(&mut self, _: &mut [f32], _: u64) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn copy_indices_to_host(&mut self, _: &mut [i32], _: u64) -> Result<(), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))
