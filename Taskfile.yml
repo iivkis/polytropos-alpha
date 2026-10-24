@@ -413,3 +413,28 @@ tasks:
     deps: [prepare]
     cmds:
       - cargo run -p rotating-matrices-lab --example rotating_matrices -- --certify-architecture
+
+  lab-torus16-mix:
+    desc: Inspect the VeriNeural Torus16-Mix operator and execute the Tensor host reference
+    deps: [prepare]
+    cmds:
+      - cargo run -p torus16-mix-lab --example torus16_mix -- --inspect
+
+  inspect-ir-torus16-mix:
+    desc: Print the complete canonical Torus16-Mix operator Semantic IR
+    deps: [prepare]
+    cmds:
+      - cargo run -p torus16-mix-lab --example torus16_mix -- --ir
+
+  test-lab-torus16-mix:
+    desc: Run Torus16-Mix operator tests against an independent Rust scalar oracle (no PyTorch)
+    deps: [prepare]
+    cmds:
+      - cargo test -p torus16-mix-lab
+
+  certify-lab-torus16-mix:
+    desc: Fail closed on unsupported Torus16-Mix Exp/Div/Broadcast/Slice backend operations
+    deps: [prepare]
+    cmds:
+      - cargo run -p torus16-mix-lab --example torus16_mix -- --certify
+
