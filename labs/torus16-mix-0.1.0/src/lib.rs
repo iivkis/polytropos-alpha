@@ -1,7 +1,9 @@
 //! Torus16-Mix operator consumer. One shared 48x48 W and eight gated roles.
 //! All forward operations are built from the public VeriNeural Semantic IR.
 //! This is the operator vertical slice, not the original trained four-layer LM.
-use verineural::{Domain, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph, NodeId, Shape, Tensor};
+use verineural::{
+    Domain, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph, NodeId, Shape, Tensor,
+};
 
 pub const WIDTH: usize = 48;
 pub const ROLES: usize = 8;
@@ -39,7 +41,10 @@ impl Default for Parameters {
         let weight = std::array::from_fn(|i| {
             std::array::from_fn(|j| ((i * 53 + j * 17 + 19) % 101) as f32 * 0.0004 - 0.02)
         });
-        Self { weight, roles: std::array::from_fn(|_| RoleParameters::default()) }
+        Self {
+            weight,
+            roles: std::array::from_fn(|_| RoleParameters::default()),
+        }
     }
 }
 
@@ -58,13 +63,22 @@ impl Parameters {
                 "weight".into(),
                 Tensor::from_vec(
                     vec![WIDTH, WIDTH],
-                    self.weight.iter().flat_map(|row| row.iter().copied()).collect(),
+                    self.weight
+                        .iter()
+                        .flat_map(|row| row.iter().copied())
+                        .collect(),
                 )?,
             ),
-            ("ones_column".into(), Tensor::from_vec(vec![WIDTH, 1], vec![1.0; WIDTH])?),
+            (
+                "ones_column".into(),
+                Tensor::from_vec(vec![WIDTH, 1], vec![1.0; WIDTH])?,
+            ),
             ("one".into(), Tensor::from_slice(vec![1, 1], &[1.0])?),
             ("minus_one".into(), Tensor::from_slice(vec![1, 1], &[-1.0])?),
-            ("inv_sqrt_width".into(), Tensor::from_slice(vec![1, 1], &[1.0 / (WIDTH as f32).sqrt()])?),
+            (
+                "inv_sqrt_width".into(),
+                Tensor::from_slice(vec![1, 1], &[1.0 / (WIDTH as f32).sqrt()])?,
+            ),
         ];
         for (role, p) in self.roles.iter().enumerate() {
             for (name, data) in [
@@ -89,7 +103,9 @@ impl Parameters {
 
 fn roll_left_graph(g: &mut NeuralGraph, x: NodeId, shift: usize) -> Result<NodeId, NeuralError> {
     let shift = shift % WIDTH;
-    if shift == 0 { return Ok(x); }
+    if shift == 0 {
+        return Ok(x);
+    }
     let tail = g.slice_axis(x, 1, shift, WIDTH - shift)?;
     let head = g.slice_axis(x, 1, 0, shift)?;
     g.concat(1, &[tail, head])
@@ -147,13 +163,25 @@ pub fn architecture_model() -> Result<Model, ModelError> {
         let row = model.parameter(format!("row_{role}"), vec![1, WIDTH], Domain::Finite)?;
         let col = model.parameter(format!("col_{role}"), vec![1, WIDTH], Domain::Finite)?;
         let bias = model.parameter(format!("bias_{role}"), vec![1, WIDTH], Domain::Finite)?;
-        let mix_gate = model.parameter(format!("mix_gate_{role}"), vec![1, WIDTH], Domain::Finite)?;
+        let mix_gate =
+            model.parameter(format!("mix_gate_{role}"), vec![1, WIDTH], Domain::Finite)?;
         let mix_bias = model.parameter(format!("mix_bias_{role}"), vec![1, 1], Domain::Finite)?;
         let matrix = if role % 2 == 0 { w_transposed } else { w };
         let output = model.block(
             "torus16_mix_projection",
-            &[x, matrix, row, col, bias, mix_gate, mix_bias,
-              ones_column, one, minus_one, inv_sqrt],
+            &[
+                x,
+                matrix,
+                row,
+                col,
+                bias,
+                mix_gate,
+                mix_bias,
+                ones_column,
+                one,
+                minus_one,
+                inv_sqrt,
+            ],
             |g, inputs| projection_graph(g, inputs, role),
         )?;
         model.output(format!("role_{role}"), output)?;
@@ -163,7 +191,9 @@ pub fn architecture_model() -> Result<Model, ModelError> {
 
 fn roll_left_tensor(x: &Tensor<f32>, shift: usize) -> Result<Tensor<f32>, NeuralError> {
     let shift = shift % WIDTH;
-    if shift == 0 { return Ok(x.clone()); }
+    if shift == 0 {
+        return Ok(x.clone());
+    }
     let a = x.slice_axis(1, shift, WIDTH - shift)?;
     let b = x.slice_axis(1, 0, shift)?;
     a.concat(&b, 1)
@@ -184,7 +214,11 @@ pub fn reference_project(
     let bias = Tensor::from_slice(vec![1, 1], &[p.mix_bias])?;
     let one = Tensor::from_slice(vec![1, 1], &[1.0])?;
     let negative = Tensor::from_slice(vec![1, 1], &[-1.0])?;
-    let logit = x.mul(&gate_weight)?.matmul(&ones)?.mul(&scale)?.add(&bias)?;
+    let logit = x
+        .mul(&gate_weight)?
+        .matmul(&ones)?
+        .mul(&scale)?
+        .add(&bias)?;
     let denominator = one.add(&logit.mul(&negative)?.exp()?)?;
     let gate = one.div(&denominator)?;
     let other = one.sub(&gate)?;
@@ -199,11 +233,20 @@ pub fn reference_project(
     let mixed = a.add(&b)?;
     let weight = Tensor::from_vec(
         vec![WIDTH, WIDTH],
-        parameters.weight.iter().flat_map(|row| row.iter().copied()).collect(),
+        parameters
+            .weight
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .collect(),
     )?;
-    let weight = if role % 2 == 0 { weight.permute(&[1, 0])? } else { weight };
+    let weight = if role % 2 == 0 {
+        weight.permute(&[1, 0])?
+    } else {
+        weight
+    };
     let result = roll_left_tensor(&mixed.matmul(&weight)?, (WIDTH - r) % WIDTH)?;
-    let result = result.mul(&Tensor::from_slice(vec![1, WIDTH], &p.row)?)?
+    let result = result
+        .mul(&Tensor::from_slice(vec![1, WIDTH], &p.row)?)?
         .add(&Tensor::from_slice(vec![1, WIDTH], &p.bias)?)?;
     Ok(std::array::from_fn(|i| result.values()[i]))
 }
@@ -213,26 +256,27 @@ pub fn reference_project(
 #[cfg(test)]
 fn explicit_oracle(x: &[f32; WIDTH], parameters: &Parameters, role: usize) -> [f32; WIDTH] {
     let p = &parameters.roles[role];
-    let logit = x.iter().zip(p.mix_gate).map(|(a,b)| *a * b).sum::<f32>()
-        / (WIDTH as f32).sqrt() + p.mix_bias;
+    let logit = x.iter().zip(p.mix_gate).map(|(a, b)| *a * b).sum::<f32>() / (WIDTH as f32).sqrt()
+        + p.mix_bias;
     let gate = 1.0 / (1.0 + (-logit).exp());
     let r = (role * 7 + 1) % WIDTH;
     let c = (role * 11 + 3) % WIDTH;
     std::array::from_fn(|out| {
         let row = (out + WIDTH - r) % WIDTH;
         let basis = |shift: usize| {
-            (0..WIDTH).map(|j| {
-                let input = (j + shift) % WIDTH;
-                let w = if role % 2 == 0 {
-                    parameters.weight[row][j]
-                } else {
-                    parameters.weight[j][row]
-                };
-                x[input] * p.col[input] * w
-            }).sum::<f32>()
+            (0..WIDTH)
+                .map(|j| {
+                    let input = (j + shift) % WIDTH;
+                    let w = if role % 2 == 0 {
+                        parameters.weight[row][j]
+                    } else {
+                        parameters.weight[j][row]
+                    };
+                    x[input] * p.col[input] * w
+                })
+                .sum::<f32>()
         };
-        (gate * basis(c) + (1.0 - gate) * basis((c + 17) % WIDTH))
-            * p.row[out] + p.bias[out]
+        (gate * basis(c) + (1.0 - gate) * basis((c + 17) % WIDTH)) * p.row[out] + p.bias[out]
     })
 }
 
@@ -257,8 +301,12 @@ mod tests {
                 let got = reference_project(&x, &p, role).unwrap();
                 let expected = explicit_oracle(&x, &p, role);
                 for i in 0..WIDTH {
-                    assert!((got[i] - expected[i]).abs() < 2e-5,
-                        "role={role} bias={gate} lane={i} got={} expected={}", got[i], expected[i]);
+                    assert!(
+                        (got[i] - expected[i]).abs() < 2e-5,
+                        "role={role} bias={gate} lane={i} got={} expected={}",
+                        got[i],
+                        expected[i]
+                    );
                 }
             }
         }
@@ -270,20 +318,45 @@ mod tests {
         assert_eq!(model.outputs().len(), ROLES);
         assert_eq!(Parameters::trainable_count(), 3848);
         let x = [0.25; WIDTH];
-        assert_eq!(model.bind(Parameters::default().bindings(&x).unwrap()).unwrap().len(), 46);
+        assert_eq!(
+            model
+                .bind(Parameters::default().bindings(&x).unwrap())
+                .unwrap()
+                .len(),
+            46
+        );
         for role in 0..ROLES {
-            let node = model.graph().node(model.output(&format!("role_{role}")).unwrap()).unwrap();
+            let node = model
+                .graph()
+                .node(model.output(&format!("role_{role}")).unwrap())
+                .unwrap();
             assert_eq!(node.shape.dims(), &[1, WIDTH]);
         }
-        assert!(model.graph().nodes().iter().any(|n| matches!(n.operation, Operation::Pointwise(_))));
-        assert!(model.graph().nodes().iter().any(|n| matches!(n.operation, Operation::SliceAxis { .. })));
+        assert!(
+            model
+                .graph()
+                .nodes()
+                .iter()
+                .any(|n| matches!(n.operation, Operation::Pointwise(_)))
+        );
+        assert!(
+            model
+                .graph()
+                .nodes()
+                .iter()
+                .any(|n| matches!(n.operation, Operation::SliceAxis { .. }))
+        );
     }
 
     #[test]
     fn unsupported_gpu_operations_are_not_silently_bypassed() {
         let model = architecture_model().unwrap();
         let roots: Vec<_> = model.outputs().values().copied().collect();
-        assert!(GpuEngine::default().compile_outputs(model.graph(), &roots).is_err());
+        assert!(
+            GpuEngine::default()
+                .compile_outputs(model.graph(), &roots)
+                .is_err()
+        );
     }
 
     #[test]
@@ -293,7 +366,9 @@ mod tests {
         for role in 0..ROLES {
             p.roles[role].bias.fill(role as f32 * 0.125);
             let output = reference_project(&[0.37; WIDTH], &p, role).unwrap();
-            for actual in output { assert!((actual - role as f32 * 0.125).abs() < 1e-6); }
+            for actual in output {
+                assert!((actual - role as f32 * 0.125).abs() < 1e-6);
+            }
         }
     }
 }
