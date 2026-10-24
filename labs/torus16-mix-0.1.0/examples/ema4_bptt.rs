@@ -186,12 +186,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
     let mut gpu = engine.prepare(&program, &supplied, &artifact)?;
-    println!("setup_compile_and_cuda_prepare_ms={:.3}",compile_clock.elapsed().as_secs_f64()*1000.);
+    println!(
+        "setup_compile_and_cuda_prepare_ms={:.3}",
+        compile_clock.elapsed().as_secs_f64() * 1000.
+    );
 
     if let Some(baseline_ms) = baseline_replay_ms {
         let fused_ms = gpu.benchmark(3, 10)?.average().as_secs_f64() * 1000.;
-        println!("cuda_graph_replay_baseline_ms={baseline_ms:.5} cuda_graph_replay_fused_ms={fused_ms:.5} cuda_graph_replay_speedup={:.3} scope=GPU_only",
-            baseline_ms / fused_ms);
+        println!(
+            "cuda_graph_replay_baseline_ms={baseline_ms:.5} cuda_graph_replay_fused_ms={fused_ms:.5} cuda_graph_replay_speedup={:.3} scope=GPU_only",
+            baseline_ms / fused_ms
+        );
     }
     // Device CUDA-event timing of the fused graph alone. Compilation,
     // HtoD copies, host CE, AdamW and holdout scoring are excluded.
@@ -268,12 +273,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             total / window_len as f32,
             total / (window_len as f32 * std::f32::consts::LN_2),
             optimizer.steps(),
-            step_start.elapsed().as_secs_f64()*1000.
+            step_start.elapsed().as_secs_f64() * 1000.
         );
     }
     let train_elapsed = train_start.elapsed().as_secs_f64();
-    println!("training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} scope=GPU_replay_plus_host_CE_AdamW_transfers",
-        train_elapsed, train_windows*window_len, (train_windows*window_len) as f64/train_elapsed);
+    println!(
+        "training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} scope=GPU_replay_plus_host_CE_AdamW_transfers",
+        train_elapsed,
+        train_windows * window_len,
+        (train_windows * window_len) as f64 / train_elapsed
+    );
     // Real holdout: chronological final 10% only. One recurrent inference
     // step per symbol, with state reset to zero at the validation boundary.
     let mut eval_bindings = weights.bindings(0)?;

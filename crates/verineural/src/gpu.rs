@@ -631,8 +631,11 @@ impl GpuProgram {
                     let inner = &self.graph.nodes()[mul];
                     let middle = &self.graph.nodes()[add];
                     (
-                        vec![inner.inputs[0].index(), inner.inputs[1].index(),
-                             middle.inputs[1-slot].index()],
+                        vec![
+                            inner.inputs[0].index(),
+                            inner.inputs[1].index(),
+                            middle.inputs[1 - slot].index(),
+                        ],
                         GpuMemoryPattern::Pointwise,
                     )
                 } else if let Some(&(mul, slot)) = self.fused_mul_adds.get(&index) {
@@ -944,7 +947,9 @@ impl GpuProgram {
         let mut kernels = Vec::new();
         for contract in self.memory_contracts()? {
             let node = &self.graph.nodes()[contract.kernel_node];
-            let kind = if let Some(&(_, _, add_slot, outer_slot, reuse)) = self.fused_mul_add_muls.get(&contract.kernel_node) {
+            let kind = if let Some(&(_, _, add_slot, outer_slot, reuse)) =
+                self.fused_mul_add_muls.get(&contract.kernel_node)
+            {
                 TranslationKind::MulAddMul {
                     add_mul_on_right: add_slot == 1,
                     mul_add_on_right: outer_slot == 1,
@@ -1274,7 +1279,11 @@ impl GpuProgram {
             let inner = &self.graph.nodes()[mul];
             let valid_slots = add_slot < 2 && outer_slot < 2 && reuse < 3;
             let external = if valid_slots {
-                [inner.inputs[0], inner.inputs[1], middle.inputs[1 - add_slot]]
+                [
+                    inner.inputs[0],
+                    inner.inputs[1],
+                    middle.inputs[1 - add_slot],
+                ]
             } else {
                 return Err(GpuError::Fp32PtxRejected {
                     reason: format!("invalid mul-add-mul slots at node {root}"),
@@ -1288,10 +1297,15 @@ impl GpuProgram {
                 && root_node.inputs[1 - outer_slot] == external[reuse]
                 && root_node.shape == middle.shape
                 && middle.shape == inner.shape
-                && external.iter().all(|id| self.graph.nodes()[id.index()].shape == root_node.shape)
-                && uses[mul] == 1 && uses[add] == 1
-                && !selected.contains(&mul) && !selected.contains(&add)
-                && !covered_removed.contains(&mul) && !covered_removed.contains(&add)
+                && external
+                    .iter()
+                    .all(|id| self.graph.nodes()[id.index()].shape == root_node.shape)
+                && uses[mul] == 1
+                && uses[add] == 1
+                && !selected.contains(&mul)
+                && !selected.contains(&add)
+                && !covered_removed.contains(&mul)
+                && !covered_removed.contains(&add)
                 && !self.fused_relus.contains_key(&root)
                 && !self.fused_pointwise_chains.contains_key(&root)
                 && !self.fused_mul_adds.contains_key(&root);
@@ -2162,14 +2176,30 @@ impl GpuEngine {
                             continue;
                         }
                         let externals = [
-                            inner.inputs[0], inner.inputs[1], middle.inputs[1 - add_slot],
+                            inner.inputs[0],
+                            inner.inputs[1],
+                            middle.inputs[1 - add_slot],
                         ];
-                        if externals.iter().any(|&id| graph.nodes()[id.index()].shape != root.shape) {
+                        if externals
+                            .iter()
+                            .any(|&id| graph.nodes()[id.index()].shape != root.shape)
+                        {
                             continue;
                         }
-                        if let Some(reuse) = externals.iter().position(|&id| id == root.inputs[1 - outer_slot]) {
-                            fused_mul_add_muls.insert(index, (inner.id.index(),
-                                middle.id.index(), add_slot, outer_slot, reuse));
+                        if let Some(reuse) = externals
+                            .iter()
+                            .position(|&id| id == root.inputs[1 - outer_slot])
+                        {
+                            fused_mul_add_muls.insert(
+                                index,
+                                (
+                                    inner.id.index(),
+                                    middle.id.index(),
+                                    add_slot,
+                                    outer_slot,
+                                    reuse,
+                                ),
+                            );
                             skipped.insert(inner.id.index());
                             skipped.insert(middle.id.index());
                             break 'outer;
@@ -2218,7 +2248,12 @@ impl GpuEngine {
                 continue;
             }
             if let Some(&(_, _, add_slot, outer_slot, reuse)) = fused_mul_add_muls.get(&index) {
-                llvm_ir.push_str(&mul_add_mul_kernel_ir(index, add_slot == 1, outer_slot == 1, reuse));
+                llvm_ir.push_str(&mul_add_mul_kernel_ir(
+                    index,
+                    add_slot == 1,
+                    outer_slot == 1,
+                    reuse,
+                ));
             } else if let Some(&(mul, slot)) = fused_mul_adds.get(&index) {
                 debug_assert!(matches!(graph.nodes()[mul].operation, Operation::Mul));
                 llvm_ir.push_str(&mul_add_kernel_ir(index, slot == 1));
@@ -2705,8 +2740,11 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
 /// Strictly preserve BOTH binary operand orders and two explicit mul.rn
 /// instructions; no reassociation or implicit FMA.
 fn mul_add_mul_kernel_ir(index: usize, add_right: bool, outer_right: bool, reuse: usize) -> String {
-    let add_operands = if add_right { "(float %z, float %product)" }
-                       else { "(float %product, float %z)" };
+    let add_operands = if add_right {
+        "(float %z, float %product)"
+    } else {
+        "(float %product, float %z)"
+    };
     let factor = ["%x", "%y", "%z"][reuse];
     let outer_operands = if outer_right {
         format!("(float {factor}, float %middle)")

@@ -149,8 +149,10 @@ impl TranslationKind {
             | Self::SliceLastRow { .. }
             | Self::BroadcastScalar
             | Self::ArgMaxLast { .. } => 1,
-            Self::AddBiasRelu { .. } | Self::MulBiasRelu { .. }
-            | Self::MulAdd { .. } | Self::MulAddMul { .. } => 3,
+            Self::AddBiasRelu { .. }
+            | Self::MulBiasRelu { .. }
+            | Self::MulAdd { .. }
+            | Self::MulAddMul { .. } => 3,
             _ => 2,
         }
     }
@@ -181,9 +183,15 @@ impl TranslationKind {
             Self::ArgMaxLast { width } => width,
             Self::TakeAxis0 { lane } => lane,
             Self::MulAdd { multiply_on_right } => usize::from(multiply_on_right),
-            Self::MulAddMul { add_mul_on_right, mul_add_on_right, reused_source } =>
-                usize::from(add_mul_on_right) + 2 * usize::from(mul_add_on_right)
-                    + 4 * usize::from(reused_source),
+            Self::MulAddMul {
+                add_mul_on_right,
+                mul_add_on_right,
+                reused_source,
+            } => {
+                usize::from(add_mul_on_right)
+                    + 2 * usize::from(mul_add_on_right)
+                    + 4 * usize::from(reused_source)
+            }
             _ => 0,
         }
     }
@@ -341,7 +349,10 @@ impl TranslationPlan {
                     return Err(invalid("MatMul source shape differs from reduction shape"));
                 }
             }
-            if matches!(kernel.kind, TranslationKind::MulAdd { .. } | TranslationKind::MulAddMul { .. }) {
+            if matches!(
+                kernel.kind,
+                TranslationKind::MulAdd { .. } | TranslationKind::MulAddMul { .. }
+            ) {
                 if kernel.reads.iter().any(|&(_, size)| size != kernel.writes) {
                     return Err(invalid("mul-add source shape mismatch"));
                 }
@@ -693,12 +704,20 @@ impl TranslationPlan {
                 ));
                 continue;
             }
-            if let TranslationKind::MulAddMul { add_mul_on_right, mul_add_on_right, reused_source } = kernel.kind {
+            if let TranslationKind::MulAddMul {
+                add_mul_on_right,
+                mul_add_on_right,
+                reused_source,
+            } = kernel.kind
+            {
                 if reused_source > 2 {
                     return Err(invalid("invalid MulAddMul source selector"));
                 }
-                let additive = if add_mul_on_right { "(float %z, float %product)" }
-                               else { "(float %product, float %z)" };
+                let additive = if add_mul_on_right {
+                    "(float %z, float %product)"
+                } else {
+                    "(float %product, float %z)"
+                };
                 let factor = ["%x", "%y", "%z"][usize::from(reused_source)];
                 let final_args = if mul_add_on_right {
                     format!("(float {factor}, float %middle)")
@@ -729,18 +748,28 @@ impl TranslationPlan {
                     || ir.matches("call float asm sideeffect").count() != 3
                     || ir.matches("fcmp ").count() != 0
                 {
-                    return Err(invalid(format!("MulAddMul LLVM template mismatch at node {node}")));
+                    return Err(invalid(format!(
+                        "MulAddMul LLVM template mismatch at node {node}"
+                    )));
                 }
                 audit_fp32_ptx(ir, asm).map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
-                let sequence = asm.lines()
+                let sequence = asm
+                    .lines()
                     .map(|line| line.split("//").next().unwrap_or(""))
                     .filter_map(|line| {
-                        if line.contains("mul.rn.f32") { Some("mul") }
-                        else if line.contains("add.rn.f32") { Some("add") }
-                        else { None }
-                    }).collect::<Vec<_>>();
+                        if line.contains("mul.rn.f32") {
+                            Some("mul")
+                        } else if line.contains("add.rn.f32") {
+                            Some("add")
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 if sequence != ["mul", "add", "mul"] {
-                    return Err(invalid(format!("MulAddMul PTX instruction order changed at node {node}")));
+                    return Err(invalid(format!(
+                        "MulAddMul PTX instruction order changed at node {node}"
+                    )));
                 }
                 report.rounded_adds += 1;
                 report.rounded_muls += 2;
