@@ -58,8 +58,8 @@ mod proof;
 mod special;
 mod subnormal;
 mod symbolic;
-mod tensor;
 mod temporal;
+mod tensor;
 mod translation;
 
 pub use architecture::{ArchitectureMetadata, ArchitectureSnapshot, snapshot_architecture};

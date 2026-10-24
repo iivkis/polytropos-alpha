@@ -156,35 +156,57 @@ fn ema4_single_step_gradient_stays_on_public_semantic_ir() {
 
 #[test]
 fn all_physical_ema4_parameters_are_identified_without_constants_or_states() {
-    let weights=Ema4Weights::deterministic(RESEARCH_VOCAB).unwrap();
-    let trainable=weights.trainable_parameters().unwrap();
-    let count: usize=trainable.values().map(|v|v.values().len()).sum();
-    assert_eq!(count,24_908);
-    assert_eq!(trainable["embedding"].values().len(),RESEARCH_VOCAB*WIDTH);
+    let weights = Ema4Weights::deterministic(RESEARCH_VOCAB).unwrap();
+    let trainable = weights.trainable_parameters().unwrap();
+    let count: usize = trainable.values().map(|v| v.values().len()).sum();
+    assert_eq!(count, 24_908);
+    assert_eq!(
+        trainable["embedding"].values().len(),
+        RESEARCH_VOCAB * WIDTH
+    );
     assert!(trainable.contains_key("weight_0"));
     assert!(trainable.contains_key("weight_3"));
     assert!(trainable.contains_key("mix_gate_0_7"));
     assert!(trainable.contains_key("dw_3_2_8"));
     assert!(trainable.contains_key("final_beta"));
-    for fixed in ["ones_column","epsilon_scalar","one_vec","minus_vec","inv_sqrt_width"] {
+    for fixed in [
+        "ones_column",
+        "epsilon_scalar",
+        "one_vec",
+        "minus_vec",
+        "inv_sqrt_width",
+    ] {
         assert!(!trainable.contains_key(fixed));
     }
-    assert!(trainable.keys().all(|key| !key.starts_with("history_") && !key.starts_with("mem_")));
+    assert!(
+        trainable
+            .keys()
+            .all(|key| !key.starts_with("history_") && !key.starts_with("mem_"))
+    );
 }
 
 #[test]
 #[ignore = "expensive full two-step reverse graph; may require ample host memory"]
 fn full_bptt_gradient_graph_targets_every_trainable_parameter() {
-    let weights=Ema4Weights::deterministic(16).unwrap();
-    let model=architecture_model(16).unwrap();
-    let unrolled=verineural::unroll_model(&model,"logits",2).unwrap();
-    let trainable=weights.trainable_parameters().unwrap();
-    let targets=trainable.keys().map(|name|unrolled.parameters()[name])
+    let weights = Ema4Weights::deterministic(16).unwrap();
+    let model = architecture_model(16).unwrap();
+    let unrolled = verineural::unroll_model(&model, "logits", 2).unwrap();
+    let trainable = weights.trainable_parameters().unwrap();
+    let targets = trainable
+        .keys()
+        .map(|name| unrolled.parameters()[name])
         .collect::<Vec<_>>();
-    let reverse=verineural::differentiate(unrolled.graph(),unrolled.objective(),&targets).unwrap();
-    assert_eq!(reverse.gradients().len(),trainable.len());
+    let reverse =
+        verineural::differentiate(unrolled.graph(), unrolled.objective(), &targets).unwrap();
+    assert_eq!(reverse.gradients().len(), trainable.len());
     for &id in &targets {
-        assert_eq!(reverse.graph().node(reverse.gradient_of(id).unwrap()).unwrap().shape,
-                   unrolled.graph().node(id).unwrap().shape);
+        assert_eq!(
+            reverse
+                .graph()
+                .node(reverse.gradient_of(id).unwrap())
+                .unwrap()
+                .shape,
+            unrolled.graph().node(id).unwrap().shape
+        );
     }
 }
