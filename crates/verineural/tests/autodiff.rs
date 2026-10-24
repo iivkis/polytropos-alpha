@@ -184,10 +184,10 @@ fn gpu_reverse_graph_matches_scalar_matmul_finite_difference() {
     let outputs = engine.execute_outputs(&program, &active, &path).unwrap();
     let z: [f32; 2] =
         std::array::from_fn(|j| (0..3).map(|i| a[i] * b[i * 2 + j]).sum::<f32>() + c[j]);
-    for row in 0..3 {
+    for (row, &a_row) in a.iter().enumerate() {
         for col in 0..2 {
             let actual = outputs[1].1.values()[row * 2 + col];
-            let expected = 2. * z[col] * seed[col] * a[row];
+            let expected = 2. * z[col] * seed[col] * a_row;
             assert!(
                 (actual - expected).abs() < 2e-5,
                 "{row},{col}: {actual} vs {expected}"

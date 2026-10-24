@@ -272,7 +272,7 @@ fn explicit_oracle(x: &[f32; WIDTH], parameters: &Parameters, role: usize) -> [f
             (0..WIDTH)
                 .map(|j| {
                     let input = (j + shift) % WIDTH;
-                    let w = if role % 2 == 0 {
+                    let w = if role.is_multiple_of(2) {
                         parameters.weight[row][j]
                     } else {
                         parameters.weight[j][row]
@@ -366,8 +366,10 @@ mod tests {
 
     #[test]
     fn one_shared_weight_zeros_to_role_bias() {
-        let mut p = Parameters::default();
-        p.weight = [[0.0; WIDTH]; WIDTH];
+        let mut p = Parameters {
+            weight: [[0.0; WIDTH]; WIDTH],
+            ..Parameters::default()
+        };
         for role in 0..ROLES {
             p.roles[role].bias.fill(role as f32 * 0.125);
             let output = reference_project(&[0.37; WIDTH], &p, role).unwrap();
