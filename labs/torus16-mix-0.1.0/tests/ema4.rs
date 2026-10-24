@@ -24,7 +24,10 @@ fn validate_model(model: &Model, vocab: usize) {
         for stage in 1..=2 {
             for i in 0..HISTORY {
                 let name = format!("history_{layer}_{stage}_{i}");
-                let &next = model.state_links().get(&name).expect("explicit history transition");
+                let &next = model
+                    .state_links()
+                    .get(&name)
+                    .expect("explicit history transition");
                 let next_node = model.graph().node(next).unwrap();
                 if i + 1 < HISTORY {
                     // Materialized address-only copy; simultaneous GPU feedback
@@ -32,7 +35,9 @@ fn validate_model(model: &Model, vocab: usize) {
                     assert!(matches!(
                         next_node.operation,
                         verineural::Operation::SliceAxis {
-                            axis: 1, start: 0, len: WIDTH
+                            axis: 1,
+                            start: 0,
+                            len: WIDTH
                         }
                     ));
                 }
@@ -48,8 +53,15 @@ fn research_shape_and_named_bindings() {
     let model = architecture_model(RESEARCH_VOCAB).unwrap();
     validate_model(&model, RESEARCH_VOCAB);
     let bound = model.bind(weights.bindings(0).unwrap()).unwrap();
-    assert_eq!(bound.len(), model.graph().nodes().iter().filter(|n|
-        matches!(n.operation, verineural::Operation::Input)).count());
+    assert_eq!(
+        bound.len(),
+        model
+            .graph()
+            .nodes()
+            .iter()
+            .filter(|n| matches!(n.operation, verineural::Operation::Input))
+            .count()
+    );
     assert!(Ema4Weights::deterministic(0).is_err());
     assert!(weights.bindings(RESEARCH_VOCAB).is_err());
 }
@@ -65,8 +77,11 @@ fn reference_streaming_is_causal_and_resets() {
     assert_eq!(first.0[0].memory, second.0[0].memory);
     let next = reference_step(&weights, 7, &mut first).unwrap();
     assert!(next.iter().all(|v| v.is_finite()));
-    assert_eq!(first.0[0].history1[HISTORY-1].len(), WIDTH);
-    assert_ne!(first.0[0].history1[HISTORY-1], second.0[0].history1[HISTORY-1]);
+    assert_eq!(first.0[0].history1[HISTORY - 1].len(), WIDTH);
+    assert_ne!(
+        first.0[0].history1[HISTORY - 1],
+        second.0[0].history1[HISTORY - 1]
+    );
 }
 
 #[test]
@@ -75,21 +90,29 @@ fn gpu_streaming_logits_and_state_match_cpu_oracle() {
     let vocabulary = 16;
     let weights = Ema4Weights::deterministic(vocabulary).unwrap();
     let model = architecture_model(vocabulary).unwrap();
-    let engine = GpuEngine::new("llc",
-        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".to_string()))
-        .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".to_string()),
+    )
+    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
     let workspace = std::env::temp_dir().join(format!("vn_ema4_{}", std::process::id()));
-    let mut runner = engine.prepare_model(&model, weights.bindings(3).unwrap(), &workspace).unwrap();
+    let mut runner = engine
+        .prepare_model(&model, weights.bindings(3).unwrap(), &workspace)
+        .unwrap();
     let mut state = Ema4State::default();
     for token in [3, 7, 2] {
-        runner.set_input("token", &onehot(token, vocabulary)).unwrap();
+        runner
+            .set_input("token", &onehot(token, vocabulary))
+            .unwrap();
         runner.step().unwrap();
         let actual = runner.output("logits").unwrap();
         let expected = reference_step(&weights, token, &mut state).unwrap();
         for (i, (a, b)) in actual.values().iter().zip(expected.iter()).enumerate() {
             assert!(a.is_finite());
-            assert!((a - b).abs() <= 1e-3 + b.abs() * 1e-3,
-                "token={token} logit={i} actual={a} expected={b}");
+            assert!(
+                (a - b).abs() <= 1e-3 + b.abs() * 1e-3,
+                "token={token} logit={i} actual={a} expected={b}"
+            );
         }
         let gpu_memory = runner.state("mem_0").unwrap();
         for lane in 0..WIDTH {

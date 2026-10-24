@@ -5,7 +5,9 @@
 //! All temporal memory is explicit ModelBuilder state/next_state.
 //! There are no lab CUDA kernels, opaque forward callbacks or extra IR.
 use crate::{Parameters, ROLES, WIDTH, projection_graph};
-use verineural::{Domain, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph, NodeId, Shape, Tensor};
+use verineural::{
+    Domain, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph, NodeId, Shape, Tensor,
+};
 
 pub const LAYERS: usize = 4;
 pub const KERNEL: usize = 9;
@@ -78,8 +80,9 @@ impl Ema4Weights {
     pub const fn parameter_count(vocabulary: usize) -> usize {
         // Eight physical projection roles share one W per block. The head is
         // tied to the embedding rather than a second trainable matrix.
-        vocabulary * WIDTH + LAYERS * (Parameters::trainable_count()
-            + 4 * WIDTH + WIDTH + 1 + 2 * KERNEL * WIDTH + 2)
+        vocabulary * WIDTH
+            + LAYERS
+                * (Parameters::trainable_count() + 4 * WIDTH + WIDTH + 1 + 2 * KERNEL * WIDTH + 2)
             + 2 * WIDTH
     }
 
@@ -87,40 +90,91 @@ impl Ema4Weights {
     /// state. This is setup data, not a CPU implementation of the architecture.
     pub fn bindings(&self, token: usize) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
         if token >= self.vocabulary || self.embedding.len() != self.vocabulary * WIDTH {
-            return Err(ModelError::Invalid("token outside vocabulary or bad embedding".into()));
+            return Err(ModelError::Invalid(
+                "token outside vocabulary or bad embedding".into(),
+            ));
         }
         let mut result = Vec::new();
         let mut token_onehot = vec![0.; self.vocabulary];
         token_onehot[token] = 1.;
         insert(&mut result, "token", vec![1, self.vocabulary], token_onehot)?;
-        insert(&mut result, "embedding", vec![self.vocabulary, WIDTH], self.embedding.clone())?;
+        insert(
+            &mut result,
+            "embedding",
+            vec![self.vocabulary, WIDTH],
+            self.embedding.clone(),
+        )?;
         insert(&mut result, "ones_column", vec![WIDTH, 1], vec![1.; WIDTH])?;
-        insert(&mut result, "inv_width", vec![1, 1], vec![1. / (WIDTH as f32)])?;
-        insert(&mut result, "inv_sqrt_width", vec![1, 1], vec![1. / (WIDTH as f32).sqrt()])?;
+        insert(
+            &mut result,
+            "inv_width",
+            vec![1, 1],
+            vec![1. / (WIDTH as f32)],
+        )?;
+        insert(
+            &mut result,
+            "inv_sqrt_width",
+            vec![1, 1],
+            vec![1. / (WIDTH as f32).sqrt()],
+        )?;
         insert(&mut result, "one_scalar", vec![1, 1], vec![1.])?;
         insert(&mut result, "epsilon_scalar", vec![1, 1], vec![1e-5])?;
         insert(&mut result, "one_vec", vec![1, WIDTH], vec![1.; WIDTH])?;
         insert(&mut result, "minus_vec", vec![1, WIDTH], vec![-1.; WIDTH])?;
         insert(&mut result, "minus_scalar", vec![1, 1], vec![-1.])?;
         insert(&mut result, "half_vec", vec![1, WIDTH], vec![0.5; WIDTH])?;
-        insert(&mut result, "one_up", vec![1, 2 * WIDTH], vec![1.; 2 * WIDTH])?;
-        insert(&mut result, "minus_up", vec![1, 2 * WIDTH], vec![-1.; 2 * WIDTH])?;
-        insert(&mut result, "final_gamma", vec![1, WIDTH], self.final_gamma.to_vec())?;
-        insert(&mut result, "final_beta", vec![1, WIDTH], self.final_beta.to_vec())?;
+        insert(
+            &mut result,
+            "one_up",
+            vec![1, 2 * WIDTH],
+            vec![1.; 2 * WIDTH],
+        )?;
+        insert(
+            &mut result,
+            "minus_up",
+            vec![1, 2 * WIDTH],
+            vec![-1.; 2 * WIDTH],
+        )?;
+        insert(
+            &mut result,
+            "final_gamma",
+            vec![1, WIDTH],
+            self.final_gamma.to_vec(),
+        )?;
+        insert(
+            &mut result,
+            "final_beta",
+            vec![1, WIDTH],
+            self.final_beta.to_vec(),
+        )?;
         for (layer, b) in self.blocks.iter().enumerate() {
-            insert(&mut result, &format!("weight_{layer}"), vec![WIDTH, WIDTH],
-                b.operator.weight.iter().flatten().copied().collect())?;
+            insert(
+                &mut result,
+                &format!("weight_{layer}"),
+                vec![WIDTH, WIDTH],
+                b.operator.weight.iter().flatten().copied().collect(),
+            )?;
             for role in 0..ROLES {
                 let p = &b.operator.roles[role];
                 for (label, values) in [
-                    ("row", &p.row), ("col", &p.col),
-                    ("bias", &p.bias), ("mix_gate", &p.mix_gate),
+                    ("row", &p.row),
+                    ("col", &p.col),
+                    ("bias", &p.bias),
+                    ("mix_gate", &p.mix_gate),
                 ] {
-                    insert(&mut result, &format!("{label}_{layer}_{role}"),
-                        vec![1, WIDTH], values.to_vec())?;
+                    insert(
+                        &mut result,
+                        &format!("{label}_{layer}_{role}"),
+                        vec![1, WIDTH],
+                        values.to_vec(),
+                    )?;
                 }
-                insert(&mut result, &format!("mix_bias_{layer}_{role}"),
-                    vec![1, 1], vec![p.mix_bias])?;
+                insert(
+                    &mut result,
+                    &format!("mix_bias_{layer}_{role}"),
+                    vec![1, 1],
+                    vec![p.mix_bias],
+                )?;
             }
             for (label, values) in [
                 ("norm1_gamma", &b.norm1_gamma),
@@ -129,26 +183,54 @@ impl Ema4Weights {
                 ("norm2_beta", &b.norm2_beta),
                 ("decay_logit", &b.decay_logit),
             ] {
-                insert(&mut result, &format!("{label}_{layer}"), vec![1, WIDTH], values.to_vec())?;
+                insert(
+                    &mut result,
+                    &format!("{label}_{layer}"),
+                    vec![1, WIDTH],
+                    values.to_vec(),
+                )?;
             }
             for (label, value) in [
                 ("gate_scale", b.gate_scale),
                 ("conv_scale_1", b.conv_scale1),
                 ("conv_scale_2", b.conv_scale2),
             ] {
-                insert(&mut result, &format!("{label}_{layer}"), vec![1, 1], vec![value])?;
+                insert(
+                    &mut result,
+                    &format!("{label}_{layer}"),
+                    vec![1, 1],
+                    vec![value],
+                )?;
             }
             for stage in 1..=2 {
                 for tap in 0..KERNEL {
-                    insert(&mut result, &format!("dw_{layer}_{stage}_{tap}"),
-                        vec![1, WIDTH], (if stage == 1 { &b.depthwise1 } else { &b.depthwise2 })[tap].to_vec())?;
+                    insert(
+                        &mut result,
+                        &format!("dw_{layer}_{stage}_{tap}"),
+                        vec![1, WIDTH],
+                        (if stage == 1 {
+                            &b.depthwise1
+                        } else {
+                            &b.depthwise2
+                        })[tap]
+                            .to_vec(),
+                    )?;
                 }
                 for offset in 0..HISTORY {
-                    insert(&mut result, &history_name(layer, stage, offset),
-                        vec![1, WIDTH], vec![0.; WIDTH])?;
+                    insert(
+                        &mut result,
+                        &history_name(layer, stage, offset),
+                        vec![1, WIDTH],
+                        vec![0.; WIDTH],
+                    )?;
                 }
             }
-            insert(&mut result, &format!("mem_{layer}"), vec![1, WIDTH], vec![0.; WIDTH])?;
+            insert(
+                &mut result,
+                &format!("mem_{layer}"),
+                vec![1, WIDTH],
+                vec![0.; WIDTH],
+            )?;
         }
         Ok(result)
     }
@@ -201,7 +283,12 @@ fn layer_norm(
     g.add(scaled, beta)
 }
 
-fn sigmoid(g: &mut NeuralGraph, x: NodeId, one: NodeId, minus: NodeId) -> Result<NodeId, NeuralError> {
+fn sigmoid(
+    g: &mut NeuralGraph,
+    x: NodeId,
+    one: NodeId,
+    minus: NodeId,
+) -> Result<NodeId, NeuralError> {
     let negative = g.mul(x, minus)?;
     let e = g.exp(negative)?;
     let denom = g.add(one, e)?;
@@ -233,11 +320,28 @@ fn project(
     p: &ProjectionPorts,
 ) -> Result<NodeId, ModelError> {
     let ports = &p.roles[role];
-    let w = if role % 2 == 0 { p.transposed } else { p.weight };
-    model.block("torus16_mix_projection",
-        &[x, w, ports.row, ports.col, ports.bias, ports.gate, ports.gate_bias,
-          p.ones_column, p.one_scalar, p.minus_scalar, p.inv_sqrt],
-        |graph, inputs| projection_graph(graph, inputs, role))
+    let w = if role % 2 == 0 {
+        p.transposed
+    } else {
+        p.weight
+    };
+    model.block(
+        "torus16_mix_projection",
+        &[
+            x,
+            w,
+            ports.row,
+            ports.col,
+            ports.bias,
+            ports.gate,
+            ports.gate_bias,
+            p.ones_column,
+            p.one_scalar,
+            p.minus_scalar,
+            p.inv_sqrt,
+        ],
+        |graph, inputs| projection_graph(graph, inputs, role),
+    )
 }
 
 fn conv_step(
@@ -255,10 +359,18 @@ fn conv_step(
     }
     let mut conv = None;
     for tap in 0..KERNEL {
-        let weight = model.parameter(format!("dw_{layer}_{stage}_{tap}"), vec![1, WIDTH], Domain::Finite)?;
+        let weight = model.parameter(
+            format!("dw_{layer}_{stage}_{tap}"),
+            vec![1, WIDTH],
+            Domain::Finite,
+        )?;
         let source = if tap == HISTORY { x } else { history[tap] };
         let term = model.graph_mut().mul(source, weight)?;
-        conv = Some(if let Some(sum) = conv { model.graph_mut().add(sum, term)? } else { term });
+        conv = Some(if let Some(sum) = conv {
+            model.graph_mut().add(sum, term)?
+        } else {
+            term
+        });
     }
     for offset in 0..HISTORY {
         // ModelExecution rejects overlapping D2D state feedback sources.
@@ -268,12 +380,18 @@ fn conv_step(
         let next = if offset + 1 == HISTORY {
             x
         } else {
-            model.graph_mut().slice_axis(history[offset + 1], 1, 0, WIDTH)?
+            model
+                .graph_mut()
+                .slice_axis(history[offset + 1], 1, 0, WIDTH)?
         };
         model.next_state(&history_name(layer, stage, offset), next)?;
     }
-    let scale = model.graph_mut().broadcast_to(scale, Shape::new(vec![1, WIDTH])?)?;
-    let scaled = model.graph_mut().mul(scale, conv.expect("nonempty convolution"))?;
+    let scale = model
+        .graph_mut()
+        .broadcast_to(scale, Shape::new(vec![1, WIDTH])?)?;
+    let scaled = model
+        .graph_mut()
+        .mul(scale, conv.expect("nonempty convolution"))?;
     Ok(model.graph_mut().add(x, scaled)?)
 }
 
@@ -290,36 +408,93 @@ fn block_step(
     inv_sqrt: NodeId,
     minus_scalar: NodeId,
 ) -> Result<NodeId, ModelError> {
-    let weight = model.parameter(format!("weight_{layer}"), vec![WIDTH, WIDTH], Domain::Finite)?;
+    let weight = model.parameter(
+        format!("weight_{layer}"),
+        vec![WIDTH, WIDTH],
+        Domain::Finite,
+    )?;
     let transposed = model.graph_mut().permute(weight, &[1, 0])?;
     let mut roles = Vec::with_capacity(ROLES);
     for role in 0..ROLES {
-        let row = model.parameter(format!("row_{layer}_{role}"), vec![1, WIDTH], Domain::Finite)?;
-        let col = model.parameter(format!("col_{layer}_{role}"), vec![1, WIDTH], Domain::Finite)?;
-        let bias = model.parameter(format!("bias_{layer}_{role}"), vec![1, WIDTH], Domain::Finite)?;
-        let gate = model.parameter(format!("mix_gate_{layer}_{role}"), vec![1, WIDTH], Domain::Finite)?;
-        let gate_bias = model.parameter(format!("mix_bias_{layer}_{role}"), vec![1, 1], Domain::Finite)?;
-        roles.push(RoleNodes {row, col, bias, gate, gate_bias});
+        let row = model.parameter(
+            format!("row_{layer}_{role}"),
+            vec![1, WIDTH],
+            Domain::Finite,
+        )?;
+        let col = model.parameter(
+            format!("col_{layer}_{role}"),
+            vec![1, WIDTH],
+            Domain::Finite,
+        )?;
+        let bias = model.parameter(
+            format!("bias_{layer}_{role}"),
+            vec![1, WIDTH],
+            Domain::Finite,
+        )?;
+        let gate = model.parameter(
+            format!("mix_gate_{layer}_{role}"),
+            vec![1, WIDTH],
+            Domain::Finite,
+        )?;
+        let gate_bias = model.parameter(
+            format!("mix_bias_{layer}_{role}"),
+            vec![1, 1],
+            Domain::Finite,
+        )?;
+        roles.push(RoleNodes {
+            row,
+            col,
+            bias,
+            gate,
+            gate_bias,
+        });
     }
     let p = ProjectionPorts {
-        weight, transposed, roles,
-        ones_column: norm.ones, one_scalar: norm.one,
+        weight,
+        transposed,
+        roles,
+        ones_column: norm.ones,
+        one_scalar: norm.one,
         minus_scalar,
         inv_sqrt,
     };
-    let norm1_gamma = model.parameter(format!("norm1_gamma_{layer}"), vec![1, WIDTH], Domain::Finite)?;
-    let norm1_beta = model.parameter(format!("norm1_beta_{layer}"), vec![1, WIDTH], Domain::Finite)?;
-    let norm2_gamma = model.parameter(format!("norm2_gamma_{layer}"), vec![1, WIDTH], Domain::Finite)?;
-    let norm2_beta = model.parameter(format!("norm2_beta_{layer}"), vec![1, WIDTH], Domain::Finite)?;
-    let decay = model.parameter(format!("decay_logit_{layer}"), vec![1, WIDTH], Domain::Finite)?;
+    let norm1_gamma = model.parameter(
+        format!("norm1_gamma_{layer}"),
+        vec![1, WIDTH],
+        Domain::Finite,
+    )?;
+    let norm1_beta = model.parameter(
+        format!("norm1_beta_{layer}"),
+        vec![1, WIDTH],
+        Domain::Finite,
+    )?;
+    let norm2_gamma = model.parameter(
+        format!("norm2_gamma_{layer}"),
+        vec![1, WIDTH],
+        Domain::Finite,
+    )?;
+    let norm2_beta = model.parameter(
+        format!("norm2_beta_{layer}"),
+        vec![1, WIDTH],
+        Domain::Finite,
+    )?;
+    let decay = model.parameter(
+        format!("decay_logit_{layer}"),
+        vec![1, WIDTH],
+        Domain::Finite,
+    )?;
     let gate_scale = model.parameter(format!("gate_scale_{layer}"), vec![1, 1], Domain::Finite)?;
-    let conv_scale_1 = model.parameter(format!("conv_scale_1_{layer}"), vec![1, 1], Domain::Finite)?;
-    let conv_scale_2 = model.parameter(format!("conv_scale_2_{layer}"), vec![1, 1], Domain::Finite)?;
+    let conv_scale_1 =
+        model.parameter(format!("conv_scale_1_{layer}"), vec![1, 1], Domain::Finite)?;
+    let conv_scale_2 =
+        model.parameter(format!("conv_scale_2_{layer}"), vec![1, 1], Domain::Finite)?;
 
     let a = layer_norm(model.graph_mut(), x, norm1_gamma, norm1_beta, norm)?;
     let a = conv_step(model, a, layer, 1, conv_scale_1)?;
     let r = project(model, a, 0, &p)?;
-    let scale = model.graph_mut().broadcast_to(gate_scale, Shape::new(vec![1, WIDTH])?)?;
+    let scale = model
+        .graph_mut()
+        .broadcast_to(gate_scale, Shape::new(vec![1, WIDTH])?)?;
     let r = model.graph_mut().mul(r, scale)?;
     let r = sigmoid(model.graph_mut(), r, one_vec, minus_vec)?;
     let k = project(model, a, 1, &p)?;
@@ -377,11 +552,27 @@ pub fn architecture_model(vocabulary: usize) -> Result<Model, ModelError> {
     let one_up = model.parameter("one_up", vec![1, 2 * WIDTH], Domain::Finite)?;
     let minus_up = model.parameter("minus_up", vec![1, 2 * WIDTH], Domain::Finite)?;
     let inv_sqrt = model.parameter("inv_sqrt_width", vec![1, 1], Domain::Finite)?;
-    let norm = NormPorts {ones, inv_width, one, epsilon};
+    let norm = NormPorts {
+        ones,
+        inv_width,
+        one,
+        epsilon,
+    };
     let mut x = model.graph_mut().matmul(token, embedding)?;
     for layer in 0..LAYERS {
-        x = block_step(&mut model, x, layer, norm,
-            one_vec, minus_vec, half_vec, one_up, minus_up, inv_sqrt, minus_scalar)?;
+        x = block_step(
+            &mut model,
+            x,
+            layer,
+            norm,
+            one_vec,
+            minus_vec,
+            half_vec,
+            one_up,
+            minus_up,
+            inv_sqrt,
+            minus_scalar,
+        )?;
     }
     let gamma = model.parameter("final_gamma", vec![1, WIDTH], Domain::Finite)?;
     let beta = model.parameter("final_beta", vec![1, WIDTH], Domain::Finite)?;

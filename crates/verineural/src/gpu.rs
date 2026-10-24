@@ -408,7 +408,9 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
     let expected_exp2s = llvm_ir
         .matches("call float asm sideeffect \"ex2.approx.f32")
         .count();
-    let expected_sqrts = llvm_ir.matches("call float asm sideeffect \"sqrt.rn.f32").count();
+    let expected_sqrts = llvm_ir
+        .matches("call float asm sideeffect \"sqrt.rn.f32")
+        .count();
     let mut rounded_subs = 0usize;
     let mut rounded_divs = 0usize;
     let mut approximate_exp2s = 0usize;

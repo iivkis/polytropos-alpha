@@ -660,7 +660,9 @@ impl TranslationPlan {
             // is opt-in approximate and never presented as strict FP32.
             if matches!(
                 kernel.kind,
-                TranslationKind::Sub | TranslationKind::DivRne | TranslationKind::ExpApprox
+                TranslationKind::Sub
+                    | TranslationKind::DivRne
+                    | TranslationKind::ExpApprox
                     | TranslationKind::SqrtRne
             ) {
                 let (instruction, bound_result, expected_asm) = match kernel.kind {

@@ -79,10 +79,19 @@ fn ieee_sqrt_has_generic_checked_gpu_lowering() {
     let sqrt = g.sqrt_ieee(x).unwrap();
     let program = GpuEngine::default().compile(&g, sqrt).unwrap();
     let plan = program.translation_plan().unwrap();
-    assert!(plan.kernels.iter().any(|k| k.kind == TranslationKind::SqrtRne));
+    assert!(
+        plan.kernels
+            .iter()
+            .any(|k| k.kind == TranslationKind::SqrtRne)
+    );
     assert!(program.llvm_ir().contains("sqrt.rn.f32"));
     assert_eq!(TranslationPlan::from_text(&plan.to_text()).unwrap(), plan);
-    assert!(audit_fp32_ptx("call float asm sideeffect \"sqrt.rn.f32",
-                          "sqrt.rn.f32 %f0, %f1;\n").is_ok());
+    assert!(
+        audit_fp32_ptx(
+            "call float asm sideeffect \"sqrt.rn.f32",
+            "sqrt.rn.f32 %f0, %f1;\n"
+        )
+        .is_ok()
+    );
     assert!(audit_fp32_ptx("", "sqrt.approx.f32 %f0, %f1;\n").is_err());
 }

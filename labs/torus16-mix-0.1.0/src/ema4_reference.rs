@@ -1,7 +1,7 @@
 //! Independent scalar streaming reference for EMA4-LM regression tests.
 //! This is a host *oracle*, never an alternate CUDA/IR/backend implementation.
-use crate::{WIDTH, reference_project};
 use super::ema4::{BlockWeights, Ema4Weights, HISTORY, LAYERS};
+use crate::{WIDTH, reference_project};
 use verineural::NeuralError;
 
 #[derive(Clone, Debug)]
@@ -30,11 +30,11 @@ impl Default for Ema4State {
     }
 }
 
-fn sigmoid(x: f32) -> f32 { 1. / (1. + (-x).exp()) }
+fn sigmoid(x: f32) -> f32 {
+    1. / (1. + (-x).exp())
+}
 
-fn norm(
-    x: &[f32; WIDTH], gamma: &[f32; WIDTH], beta: &[f32; WIDTH],
-) -> [f32; WIDTH] {
+fn norm(x: &[f32; WIDTH], gamma: &[f32; WIDTH], beta: &[f32; WIDTH]) -> [f32; WIDTH] {
     let mean = x.iter().sum::<f32>() / WIDTH as f32;
     let variance = x.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / WIDTH as f32;
     let inv_std = 1. / (variance + 1e-5).sqrt();
@@ -60,7 +60,9 @@ fn conv(
 }
 
 fn step_block(
-    x: [f32; WIDTH], p: &BlockWeights, state: &mut BlockState,
+    x: [f32; WIDTH],
+    p: &BlockWeights,
+    state: &mut BlockState,
 ) -> Result<[f32; WIDTH], NeuralError> {
     let a = norm(&x, &p.norm1_gamma, &p.norm1_beta);
     let a = conv(&a, &mut state.history1, &p.depthwise1, p.conv_scale1);
@@ -69,11 +71,11 @@ fn step_block(
     let value = reference_project(&a, &p.operator, 2)?;
     for lane in 0..WIDTH {
         let decay = sigmoid(p.decay_logit[lane]);
-        state.memory[lane] = decay * state.memory[lane] +
-            (1. - decay) * sigmoid(key[lane]) * value[lane];
+        state.memory[lane] =
+            decay * state.memory[lane] + (1. - decay) * sigmoid(key[lane]) * value[lane];
     }
-    let gated: [f32; WIDTH] = std::array::from_fn(|lane|
-        sigmoid(gate[lane] * p.gate_scale) * state.memory[lane]);
+    let gated: [f32; WIDTH] =
+        std::array::from_fn(|lane| sigmoid(gate[lane] * p.gate_scale) * state.memory[lane]);
     let projected = reference_project(&gated, &p.operator, 3)?;
     let x = std::array::from_fn(|lane| x[lane] + 0.5 * projected[lane]);
 
@@ -95,20 +97,32 @@ fn step_block(
     let h1: [f32; WIDTH] = std::array::from_fn(|lane| hidden[WIDTH + lane]);
     let d0 = reference_project(&h0, &p.operator, 0)?;
     let d1 = reference_project(&h1, &p.operator, 1)?;
-    Ok(std::array::from_fn(|lane| x[lane] + 0.5 * (d0[lane] + d1[lane])))
+    Ok(std::array::from_fn(|lane| {
+        x[lane] + 0.5 * (d0[lane] + d1[lane])
+    }))
 }
 
 /// One autoregressive symbol with tied embedding and no sequence cache growth.
 pub fn reference_step(
-    parameters: &Ema4Weights, token: usize, states: &mut Ema4State,
+    parameters: &Ema4Weights,
+    token: usize,
+    states: &mut Ema4State,
 ) -> Result<Vec<f32>, NeuralError> {
-    assert!(token < parameters.vocabulary && parameters.embedding.len() == parameters.vocabulary * WIDTH);
-    let mut x: [f32; WIDTH] = std::array::from_fn(|lane| parameters.embedding[token * WIDTH + lane]);
+    assert!(
+        token < parameters.vocabulary
+            && parameters.embedding.len() == parameters.vocabulary * WIDTH
+    );
+    let mut x: [f32; WIDTH] =
+        std::array::from_fn(|lane| parameters.embedding[token * WIDTH + lane]);
     for layer in 0..LAYERS {
         x = step_block(x, &parameters.blocks[layer], &mut states.0[layer])?;
     }
     let x = norm(&x, &parameters.final_gamma, &parameters.final_beta);
-    Ok((0..parameters.vocabulary).map(|word| {
-        (0..WIDTH).map(|lane| x[lane] * parameters.embedding[word * WIDTH + lane]).sum::<f32>()
-    }).collect())
+    Ok((0..parameters.vocabulary)
+        .map(|word| {
+            (0..WIDTH)
+                .map(|lane| x[lane] * parameters.embedding[word * WIDTH + lane])
+                .sum::<f32>()
+        })
+        .collect())
 }
