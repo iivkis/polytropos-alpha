@@ -20,7 +20,14 @@ fn dictionary() -> Dictionary {
 
 fn parameters() -> Parameters {
     let mut p = Parameters::new(7);
-    p.router.fill(0.0);
+    // Nonzero, action-dependent router weights exercise the MatMul + BiasAdd
+    // logits path even when the selected route is pinned by a bias margin.
+    for row in 0..WIDTH {
+        for action in 0..ACTIONS {
+            let n = (row * 5 + action * 7) % 13 + 1;
+            p.router[row * ACTIONS + action] = n as f32 / 8192.0;
+        }
+    }
     p.head.fill(0.0);
     p.head[0] = 0.5;
     p.head[1] = 0.25;
@@ -47,6 +54,7 @@ fn set_route(p: &mut Parameters, route: Option<usize>) {
         p.router_bias[route] = 2.0;
     } else {
         // Deliberate eight-way tie, requiring ArgMax::First on the device.
+        p.router.fill(0.0);
         p.router_bias.fill(2.0);
     }
 }
@@ -67,6 +75,7 @@ struct Reference {
     state: [f32; WIDTH],
     normalized: f32,
     actions: Vec<usize>,
+    probabilities: Vec<[f32; ACTIONS]>,
 }
 
 fn reference(p: &Parameters, dict: &Dictionary, input: &str) -> Reference {
@@ -74,15 +83,26 @@ fn reference(p: &Parameters, dict: &Dictionary, input: &str) -> Reference {
     let histogram = dict.state(&tokens);
     let mut state = [0.0f32; WIDTH];
     let mut actions = Vec::with_capacity(tokens.len());
+    let mut probabilities = Vec::with_capacity(tokens.len());
 
     for token in tokens {
-        let mut logits = p.router_bias;
+        let mut logits = [0.0f32; ACTIONS];
         for (row, &state_value) in state.iter().enumerate() {
             let feature = histogram[row] + state_value;
             for (action, logit) in logits.iter_mut().enumerate() {
                 *logit += feature * p.router[row * ACTIONS + action];
             }
         }
+        for (action, value) in logits.iter_mut().enumerate() {
+            *value += p.router_bias[action];
+        }
+        let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut weights = logits.map(|value| (value - maximum).clamp(-80.0, 0.0).exp());
+        let total: f32 = weights.iter().sum();
+        for weight in &mut weights {
+            *weight /= total;
+        }
+        probabilities.push(weights);
         // All logits are finite in this fixture; equality selects first.
         let mut action = 0;
         for candidate in 1..ACTIONS {
@@ -113,6 +133,7 @@ fn reference(p: &Parameters, dict: &Dictionary, input: &str) -> Reference {
         state,
         normalized,
         actions,
+        probabilities,
     }
 }
 
@@ -168,6 +189,17 @@ fn deterministic_cuda_graph_matches_independent_cpu_oracle() {
                 cpu.actions,
                 "GPU router decisions for route {route}, input {input}"
             );
+            for (step, (decision, expected)) in
+                actual.decisions.iter().zip(&cpu.probabilities).enumerate()
+            {
+                for (action, (&got, &want)) in decision.probs.iter().zip(expected).enumerate() {
+                    assert_near(
+                        got,
+                        want,
+                        &format!("route {route}, input {input}, step {step}, probability[{action}]"),
+                    );
+                }
+            }
             for (slot, (&got, &expected)) in actual.state.iter().zip(&cpu.state).enumerate() {
                 assert_near(got, expected, &format!("route {route}, input {input}, state[{slot}]"));
             }
