@@ -149,10 +149,11 @@ tasks:
       - cargo run -p verineural --example multi_output_gpu
 
   verify-gpu-capabilities:
-    desc: Check P1/P12 kernel-memory-translation coverage, fusion preconditions and assurance boundaries
+    desc: Check P1/P12 kernel-memory-translation coverage, fusion preconditions and audited Lean memory obligations
     deps: [prepare]
     cmds:
       - cargo test -p verineural --test gpu_capability
+      - cargo test -p verineural --test gpu_capability -- --ignored
       - cargo test -p verineural --test auto_build
 
   gpu-state-replay:

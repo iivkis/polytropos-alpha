@@ -1051,15 +1051,17 @@ impl GpuProgram {
         })
     }
 
-    /// Lean proofs of the natural-number address bounds for the actual shapes.
-    /// The proof does not validate the LLVM/PTX instructions or GPU pointers.
-    pub fn memory_lean_source(&self) -> Result<String, GpuError> {
+    /// Named Lean theorems for natural-number address bounds of the actual
+    /// launched kernel contracts. Generation is not proof; certified builders
+    /// must kernel-check and axiom-audit this program.
+    pub fn memory_lean_program(&self) -> Result<LeanProgram, GpuError> {
         let mut source = format!(
             "{}\n\n{}\n",
             include_str!("../../../lean/VeriNeural/Basic.lean"),
             include_str!("../../../lean/VeriNeural/Memory.lean")
         );
-        source.push_str("\nnamespace VeriNeural\n");
+        source.push_str("\nnamespace VeriNeural.Generated\n");
+        let mut theorems = Vec::new();
         for contract in self.memory_contracts()? {
             source.push_str(&format!(
                 "-- IR kernel {}: {} source tensors, {} output elements.\n",
@@ -1067,62 +1069,105 @@ impl GpuProgram {
                 contract.reads.len(),
                 contract.writes
             ));
+            let output_name = format!("memory_node_{}_output_bound", contract.kernel_node);
             source.push_str(&format!(
-                "example (index : Nat) (active : index < {}) : index < {} :=\n  pointwise_address_bound active\n",
+                "theorem {output_name} (index : Nat) (active : index < {}) : index < {} := by\n  exact VeriNeural.pointwise_address_bound active\n\n",
                 contract.writes, contract.writes
             ));
+            theorems.push(output_name);
             match contract.pattern {
                 GpuMemoryPattern::Pointwise => {}
                 GpuMemoryPattern::BiasAdd { columns } => {
+                    let name = format!("memory_node_{}_bias_bound", contract.kernel_node);
                     source.push_str(&format!(
-                        "example (index : Nat) : index % {columns} < {columns} :=\n  bias_address_bound (by decide)\n"
+                        "theorem {name} (index : Nat) : index % {columns} < {columns} := by\n  exact VeriNeural.bias_address_bound (by decide)\n\n"
                     ));
+                    theorems.push(name);
                 }
                 GpuMemoryPattern::MatMul {
                     rows,
                     inner,
                     columns,
                 } => {
+                    let name = format!("memory_node_{}_matmul_bounds", contract.kernel_node);
                     source.push_str(&format!(
-                        "example (index j : Nat) (active : index < {rows} * {columns}) (reduction : j < {inner}) :\n    (index / {columns}) * {inner} + j < {rows} * {inner} ∧\n    j * {columns} + index % {columns} < {inner} * {columns} :=\n  matmul_address_bounds (by decide) active reduction\n"
+                        "theorem {name} (index j : Nat) (active : index < {rows} * {columns}) (reduction : j < {inner}) :\n    (index / {columns}) * {inner} + j < {rows} * {inner} ∧\n    j * {columns} + index % {columns} < {inner} * {columns} := by\n  exact VeriNeural.matmul_address_bounds (by decide) active reduction\n\n"
                     ));
+                    theorems.push(name);
                 }
                 GpuMemoryPattern::Transpose2D { rows, columns } => {
+                    let name = format!("memory_node_{}_transpose_bound", contract.kernel_node);
                     source.push_str(&format!(
-                        "example (index : Nat) (active : index < {rows} * {columns}) :\n    (index % {rows}) * {columns} + index / {rows} < {rows} * {columns} :=\n  transpose2d_address_bound (by decide) active\n"
+                        "theorem {name} (index : Nat) (active : index < {rows} * {columns}) :\n    (index % {rows}) * {columns} + index / {rows} < {rows} * {columns} := by\n  exact VeriNeural.transpose2d_address_bound (by decide) active\n\n"
                     ));
+                    theorems.push(name);
                 }
                 GpuMemoryPattern::ReverseRows2D { rows, columns } => {
+                    let name = format!("memory_node_{}_reverse_rows_bound", contract.kernel_node);
                     source.push_str(&format!(
-                        "example (index : Nat) (active : index < {rows} * {columns}) :\n    ({rows} - 1 - index / {columns}) * {columns} + index % {columns} < {rows} * {columns} :=\n  reverse_rows2d_address_bound (by decide) (by decide) active\n"
+                        "theorem {name} (index : Nat) (active : index < {rows} * {columns}) :\n    ({rows} - 1 - index / {columns}) * {columns} + index % {columns} < {rows} * {columns} := by\n  exact VeriNeural.reverse_rows2d_address_bound (by decide) (by decide) active\n\n"
                     ));
+                    theorems.push(name);
                 }
                 GpuMemoryPattern::ReverseColumns2D { rows, columns } => {
+                    let name = format!("memory_node_{}_reverse_columns_bound", contract.kernel_node);
                     source.push_str(&format!(
-                        "example (index : Nat) (active : index < {rows} * {columns}) :\n    (index / {columns}) * {columns} + ({columns} - 1 - index % {columns}) < {rows} * {columns} :=\n  reverse_columns2d_address_bound (by decide) active\n"
+                        "theorem {name} (index : Nat) (active : index < {rows} * {columns}) :\n    (index / {columns}) * {columns} + ({columns} - 1 - index % {columns}) < {rows} * {columns} := by\n  exact VeriNeural.reverse_columns2d_address_bound (by decide) active\n\n"
                     ));
+                    theorems.push(name);
                 }
                 GpuMemoryPattern::ConcatAxis0 { left } => {
                     let right = contract.reads[1].1;
+                    let left_name = format!("memory_node_{}_concat_left_bound", contract.kernel_node);
                     source.push_str(&format!(
-                        "example (index : Nat) (active : index < {left}) : index < {left} :=\n  pointwise_address_bound active\n\nexample (index : Nat) (branch : {left} ≤ index) (active : index < {left} + {right}) : index - {left} < {right} :=\n  concat_axis0_right_address_bound branch active\n"
+                        "theorem {left_name} (index : Nat) (active : index < {left}) : index < {left} := by\n  exact VeriNeural.pointwise_address_bound active\n\n"
                     ));
+                    theorems.push(left_name);
+                    let right_name =
+                        format!("memory_node_{}_concat_right_bound", contract.kernel_node);
+                    source.push_str(&format!(
+                        "theorem {right_name} (index : Nat) (branch : {left} ≤ index) (active : index < {left} + {right}) : index - {left} < {right} := by\n  exact VeriNeural.concat_axis0_right_address_bound branch active\n\n"
+                    ));
+                    theorems.push(right_name);
                 }
                 GpuMemoryPattern::ArgMaxLast { width } => {
                     let rows = contract.writes;
+                    let first_name =
+                        format!("memory_node_{}_argmax_first_bound", contract.kernel_node);
                     source.push_str(&format!(
-                        "example (index : Nat) (active : index < {rows}) : index * {width} < {rows} * {width} :=\n  argmax_first_address_bound (by decide) active\n\nexample (index lane : Nat) (active : index < {rows}) (candidate : lane < {width}) : index * {width} + lane < {rows} * {width} :=\n  argmax_candidate_address_bound active candidate\n"
+                        "theorem {first_name} (index : Nat) (active : index < {rows}) : index * {width} < {rows} * {width} := by\n  exact VeriNeural.argmax_first_address_bound (by decide) active\n\n"
                     ));
+                    theorems.push(first_name);
+                    let candidate_name =
+                        format!("memory_node_{}_argmax_candidate_bound", contract.kernel_node);
+                    source.push_str(&format!(
+                        "theorem {candidate_name} (index lane : Nat) (active : index < {rows}) (candidate : lane < {width}) : index * {width} + lane < {rows} * {width} := by\n  exact VeriNeural.argmax_candidate_address_bound active candidate\n\n"
+                    ));
+                    theorems.push(candidate_name);
                 }
                 GpuMemoryPattern::TakeAxis0 { lane, choices } => {
+                    let index_name =
+                        format!("memory_node_{}_take_index_nonempty", contract.kernel_node);
                     source.push_str(&format!(
-                        "example : 0 < 1 := by decide\n\nexample (selected index : Nat) (selectedBound : selected < {choices}) (active : index < {lane}) : selected * {lane} + index < {choices} * {lane} :=\n  take_axis0_address_bound selectedBound active\n"
+                        "theorem {index_name} : 0 < 1 := by decide\n\n"
                     ));
+                    theorems.push(index_name);
+                    let bound_name =
+                        format!("memory_node_{}_take_bound", contract.kernel_node);
+                    source.push_str(&format!(
+                        "theorem {bound_name} (selected index : Nat) (selectedBound : selected < {choices}) (active : index < {lane}) : selected * {lane} + index < {choices} * {lane} := by\n  exact VeriNeural.take_axis0_address_bound selectedBound active\n\n"
+                    ));
+                    theorems.push(bound_name);
                 }
             }
         }
-        source.push_str("end VeriNeural\n");
-        Ok(source)
+        source.push_str("end VeriNeural.Generated\n");
+        Ok(LeanProgram::generated(source, theorems, Vec::new()))
+    }
+
+    /// Backwards-compatible source view over the named memory obligations.
+    pub fn memory_lean_source(&self) -> Result<String, GpuError> {
+        Ok(self.memory_lean_program()?.source().to_owned())
     }
 
     /// The Lean proof of the *ideal integer* fusion rule, not PTX/FP32 equivalence.

@@ -4,8 +4,8 @@
 //! must have recorded structural preconditions.
 
 use verineural::{
-    Domain, GpuAssuranceStatus, GpuEngine, GpuLaunchConfig, GpuOptimizationKind, NeuralGraph,
-    ReluFusion, Shape, TranslationKind,
+    Domain, GpuAssuranceStatus, GpuEngine, GpuLaunchConfig, GpuOptimizationKind,
+    LeanProofEngine, NeuralGraph, ReluFusion, Shape, TranslationKind,
 };
 
 fn fused_program() -> verineural::GpuProgram {
@@ -97,4 +97,40 @@ fn selected_intermediate_output_prevents_illegal_fusion() {
             .iter()
             .any(|kernel| kernel.translation_kind == TranslationKind::Relu)
     );
+}
+
+
+#[test]
+fn memory_capability_has_named_auditable_theorems() {
+    let program = fused_program();
+    let memory = program.memory_lean_program().unwrap();
+    assert!(memory.source().contains("namespace VeriNeural.Generated"));
+    assert!(!memory.source().contains("\nexample "));
+    assert_eq!(memory.theorem_names().len(), 2);
+    assert!(memory
+        .theorem_names()
+        .iter()
+        .any(|name| name.ends_with("_output_bound")));
+    assert!(memory
+        .theorem_names()
+        .iter()
+        .any(|name| name.ends_with("_bias_bound")));
+}
+
+/// Explicit P12 acceptance. Run with: task verify-gpu-capabilities
+#[test]
+#[ignore = "requires pinned Lean 4 from Nix devShell"]
+fn lean_kernel_and_axiom_audit_check_memory_capability() {
+    let program = fused_program();
+    let memory = program.memory_lean_program().unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "verineural-gpu-capability-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let (_, audit) = LeanProofEngine::default()
+        .verify_certified(&memory, &root.join("memory.lean"))
+        .unwrap();
+    assert_eq!(audit.theorem_names.as_slice(), memory.theorem_names());
+    std::fs::remove_dir_all(root).unwrap();
 }

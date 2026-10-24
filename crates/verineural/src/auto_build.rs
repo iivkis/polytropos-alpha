@@ -643,8 +643,21 @@ impl ArchitectureAutoCompiler {
         for (index, target) in plan.gpu.iter().enumerate() {
             match target {
                 PlannedGpu::Supported { output, program } => {
-                    self.gpu
-                        .lower(program, &directory.join(format!("gpu_{index}")))?;
+                    let gpu_dir = directory.join(format!("gpu_{index}"));
+                    self.gpu.lower(program, &gpu_dir)?;
+                    let memory = program.memory_lean_program()?;
+                    let (_, memory_audit) = self
+                        .proof
+                        .verify_certified(&memory, &gpu_dir.join("memory.lean"))?;
+                    if memory_audit.lean_version != audit.lean_version {
+                        return Err(invalid(
+                            "Lean version changed while checking GPU memory obligations",
+                        ));
+                    }
+                    for (theorem, axioms) in memory_audit.axiom_dependencies {
+                        axiom_dependencies
+                            .insert(format!("gpu_{index}.memory.{theorem}"), axioms);
+                    }
                     output_evidence.push(OutputBuildEvidence {
                         node: output.index(),
                         ptx: Some(final_dir.join(format!("gpu_{index}/graph.ptx"))),
@@ -660,6 +673,25 @@ impl ArchitectureAutoCompiler {
                 }
             }
         }
+        let shared_gpu_ptx = if let Some(program) = &plan.shared_gpu {
+            let gpu_dir = directory.join("gpu_shared");
+            self.gpu.lower(program, &gpu_dir)?;
+            let memory = program.memory_lean_program()?;
+            let (_, memory_audit) = self
+                .proof
+                .verify_certified(&memory, &gpu_dir.join("memory.lean"))?;
+            if memory_audit.lean_version != audit.lean_version {
+                return Err(invalid(
+                    "Lean version changed while checking shared GPU memory obligations",
+                ));
+            }
+            for (theorem, axioms) in memory_audit.axiom_dependencies {
+                axiom_dependencies.insert(format!("gpu_shared.memory.{theorem}"), axioms);
+            }
+            Some(final_dir.join("gpu_shared/graph.ptx"))
+        } else {
+            None
+        };
         fs::write(
             lean_dir.join("audit.txt"),
             audit_text(&audit.lean_version, &axiom_dependencies),
@@ -673,12 +705,6 @@ impl ArchitectureAutoCompiler {
             &directory.join("architecture.dot"),
             &directory.join("architecture.png"),
         )?;
-        let shared_gpu_ptx = if let Some(program) = &plan.shared_gpu {
-            self.gpu.lower(program, &directory.join("gpu_shared"))?;
-            Some(final_dir.join("gpu_shared/graph.ptx"))
-        } else {
-            None
-        };
         let mut report = AutoBuildReport {
             directory: final_dir.clone(),
             connectivity: plan.connectivity,
@@ -868,20 +894,26 @@ impl ArchitectureAutoCompiler {
             goal_theorems.push((name.clone(), program.theorem_names().len()));
             goal_hypotheses.push((name.clone(), program.assumptions().to_vec()));
         }
-        if fs::read_to_string(lean_dir.join("audit.txt"))?
-            != audit_text(&lean_version, &axiom_dependencies)
-        {
-            return Err(AutoBuildError::Integrity(
-                "saved Lean axiom dependencies or checker version no longer match".into(),
-            ));
-        }
-
         let mut output_evidence = Vec::new();
         for (index, item) in plan.gpu.iter().enumerate() {
             let gpu_dir = directory.join(format!("gpu_{index}"));
             match item {
                 PlannedGpu::Supported { output, program } => {
                     verify_gpu_translation(program, &gpu_dir, &format!("gpu_{index}"))?;
+                    let memory = program.memory_lean_program()?;
+                    let memory_file = gpu_dir.join("memory.lean");
+                    verify_source(&self.proof, &memory_file, &memory)?;
+                    let memory_audit =
+                        self.proof.audit_file(&memory_file, memory.theorem_names())?;
+                    if memory_audit.lean_version != lean_version {
+                        return Err(AutoBuildError::Integrity(
+                            "Lean checker version changed while replaying GPU memory proofs".into(),
+                        ));
+                    }
+                    for (theorem, axioms) in memory_audit.axiom_dependencies {
+                        axiom_dependencies
+                            .insert(format!("gpu_{index}.memory.{theorem}"), axioms);
+                    }
                     let ptx_file = gpu_dir.join("graph.ptx");
                     output_evidence.push(OutputBuildEvidence {
                         node: output.index(),
@@ -906,6 +938,18 @@ impl ArchitectureAutoCompiler {
         let shared_gpu_ptx = if let Some(program) = &plan.shared_gpu {
             let shared_dir = directory.join("gpu_shared");
             verify_gpu_translation(program, &shared_dir, "gpu_shared")?;
+            let memory = program.memory_lean_program()?;
+            let memory_file = shared_dir.join("memory.lean");
+            verify_source(&self.proof, &memory_file, &memory)?;
+            let memory_audit = self.proof.audit_file(&memory_file, memory.theorem_names())?;
+            if memory_audit.lean_version != lean_version {
+                return Err(AutoBuildError::Integrity(
+                    "Lean checker version changed while replaying shared GPU memory proofs".into(),
+                ));
+            }
+            for (theorem, axioms) in memory_audit.axiom_dependencies {
+                axiom_dependencies.insert(format!("gpu_shared.memory.{theorem}"), axioms);
+            }
             Some(shared_dir.join("graph.ptx"))
         } else {
             if directory.join("gpu_shared").exists() {
@@ -915,6 +959,13 @@ impl ArchitectureAutoCompiler {
             }
             None
         };
+        if fs::read_to_string(lean_dir.join("audit.txt"))?
+            != audit_text(&lean_version, &axiom_dependencies)
+        {
+            return Err(AutoBuildError::Integrity(
+                "saved Lean axiom dependencies or checker version no longer match".into(),
+            ));
+        }
         let report = AutoBuildReport {
             directory: directory.clone(),
             connectivity: plan.connectivity,
