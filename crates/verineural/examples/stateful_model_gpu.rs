@@ -166,6 +166,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         [11.0, 8.0, 5.0, 10.0],
     )?;
 
+    // Exercise the P0 cases that the ordinary additive state transition
+    // cannot detect: unreachable state storage and aliasing public outputs.
+    check_replacement_and_aliased_outputs(&gpu)?;
+
     // A new session would require another prepare_model call. This fixture
     // deliberately holds one ModelExecution for all six GPU replays.
     println!(
@@ -176,6 +180,137 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "Assurance: concrete GPU bit checks; no formal CUDA D2D, IEEE-754, \
          JIT/SASS or recurrent convergence proof."
+    );
+    Ok(())
+}
+
+
+/// Regression: both states are replaced with token, so neither is needed
+/// for the pure computation. "hidden" is not a public output at all;
+/// "visible" is public both directly and through a zero-copy reshape.
+fn check_replacement_and_aliased_outputs(gpu: &GpuEngine) -> Result<(), Box<dyn Error>> {
+    let mut builder = ModelBuilder::new("state-replacement-and-alias", "1");
+    let hidden = builder.state("hidden", [WIDTH], Domain::Any)?;
+    let visible = builder.state("visible", [WIDTH], Domain::Any)?;
+    let token = builder.input("token", [WIDTH], Domain::Finite)?;
+    let gain = builder.parameter("gain", [WIDTH], Domain::Finite)?;
+    let view = builder
+        .graph_mut()
+        .reshape(visible, verineural::Shape::new([2, 2])?)?;
+    let scaled = builder.graph_mut().mul(token, gain)?;
+    builder.next_state("hidden", token)?;
+    builder.next_state("visible", token)?;
+    builder.output("previous", visible)?;
+    builder.output("previous_view", view)?;
+    builder.output("scaled", scaled)?;
+    let model = builder.finish()?;
+
+    let mut execution = gpu.prepare_model(
+        &model,
+        [
+            ("hidden", tensor([100.0, 101.0, 102.0, 103.0])?),
+            ("visible", tensor([8.0, 9.0, 10.0, 11.0])?),
+            ("token", tensor([1.0, 2.0, 3.0, 4.0])?),
+            ("gain", tensor([2.0; WIDTH])?),
+        ],
+        Path::new("target/verineural/stateful-model-gpu/replacement"),
+    )?;
+
+    execution.run()?;
+    expect_bits(
+        "replacement run",
+        "hidden",
+        &execution.state("hidden")?,
+        [100.0, 101.0, 102.0, 103.0],
+    );
+    expect_bits(
+        "replacement run",
+        "previous",
+        &execution.output("previous")?,
+        [8.0, 9.0, 10.0, 11.0],
+    );
+    execution.step()?;
+    // Public output must represent the pre-feedback pure DAG evaluation,
+    // while both inputs to the next step contain the new token.
+    expect_bits(
+        "replacement step 1",
+        "hidden",
+        &execution.state("hidden")?,
+        [1.0, 2.0, 3.0, 4.0],
+    );
+    expect_bits(
+        "replacement step 1",
+        "visible",
+        &execution.state("visible")?,
+        [1.0, 2.0, 3.0, 4.0],
+    );
+    expect_bits(
+        "replacement step 1",
+        "previous",
+        &execution.output("previous")?,
+        [8.0, 9.0, 10.0, 11.0],
+    );
+    let view = execution.output("previous_view")?;
+    assert_eq!(view.shape().dims(), &[2, 2]);
+    assert_eq!(
+        view.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        [8.0f32, 9.0, 10.0, 11.0]
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
+        "zero-copy reshape alias must be a pre-feedback snapshot",
+    );
+    expect_bits(
+        "replacement step 1",
+        "scaled",
+        &execution.output("scaled")?,
+        [2.0, 4.0, 6.0, 8.0],
+    );
+
+    execution.set_input("token", &tensor([5.0, 6.0, 7.0, 8.0])?)?;
+    execution.step()?;
+    expect_bits(
+        "replacement step 2",
+        "previous",
+        &execution.output("previous")?,
+        [1.0, 2.0, 3.0, 4.0],
+    );
+    expect_bits(
+        "replacement step 2",
+        "hidden",
+        &execution.state("hidden")?,
+        [5.0, 6.0, 7.0, 8.0],
+    );
+    expect_bits(
+        "replacement step 2",
+        "visible",
+        &execution.state("visible")?,
+        [5.0, 6.0, 7.0, 8.0],
+    );
+    expect_bits(
+        "replacement step 2",
+        "scaled",
+        &execution.output("scaled")?,
+        [10.0, 12.0, 14.0, 16.0],
+    );
+
+    // run() refreshes the public snapshot but does not move state.
+    execution.run()?;
+    expect_bits(
+        "replacement run after feedback",
+        "previous",
+        &execution.output("previous")?,
+        [5.0, 6.0, 7.0, 8.0],
+    );
+    expect_bits(
+        "replacement run after feedback",
+        "hidden",
+        &execution.state("hidden")?,
+        [5.0, 6.0, 7.0, 8.0],
+    );
+    println!(
+        "P0 GPU regressions: unreachable state destinations are live; \
+         public state/reshape outputs preserve pre-feedback FP32 bits."
     );
     Ok(())
 }

@@ -148,6 +148,8 @@ Lean `approx_contract_relu_positive_branch` / `approx_contract_relu_nonpositive_
 
 **P1 hardware acceptance fixture (код, локальный CUDA-прогон ожидается):** `task gpu-state-replay` вызывает `examples/stateful_model_gpu.rs`, собирая один consumer-defined 3-output transition с двумя публичными readouts и приватной state link. Один GPU session/compiled CUDA Graph, `run` плюс пять `step`, точные FP32 bit fixtures для состояния и выходов, смена input и параметра без recapture, явный reset и отказы на неверные роли, формы, значения. CPU unit tests и ранее подтверждённый `task gpu-multi-output` не заменяют проверку этого D2D replay; статус GPU acceptance отмечать завершённым только после фактического успешного запуска на NVIDIA. Не выдавать это за доказательство CUDA/JIT/SASS/FP32 или произвольной рекуррентной сходимости.
 
+**P1 P0 reliability fixes (код; локальная приёмка ожидается):** GPU prepare расширяет roots всеми State-источниками, не изменяя pure Semantic IR и состав proof/certificate roots. D2D feedback проверяется до первого replay. Публичные выходы, алиасные перезаписываемым state через Input или Reshape, получают GPU-only snapshots до feedback в `run/step`; чтение `output(name)` адресное, без копирования прочих output/next_state на CPU. Добавлен Rust preflight regression для полностью заменяемого unread state и GPU acceptance `task gpu-state-replay` с двумя state (включая полностью недостижимое из обычного DAG), прямым alias и reshape-view. Эти исправления не расширяют GPU операторы и не доказывают FP32/JIT/SASS или атомарность при CUDA-ошибках.
+
 ## Общие ограничения для всех этапов
 
 - **Никаких** CI/CD, GitHub Actions, hooks, контейнеризации и прочей инфраструктуры без явного согласия пользователя.

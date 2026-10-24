@@ -45,6 +45,30 @@ impl From<GpuError> for ModelExecutionError {
     }
 }
 
+// A pure next_state may ignore its old state; the GPU execution slice still
+// must include that source so the writable feedback destination is allocated.
+fn execution_roots_with_states(
+    model: &Model,
+) -> Result<(Vec<NodeId>, Vec<(NodeId, NodeId)>), ModelExecutionError> {
+    let links = model
+        .state_links()
+        .iter()
+        .map(|(name, &next)| {
+            model
+                .source(name)
+                .map(|(state, _)| (state, next))
+                .ok_or_else(|| ModelExecutionError::Invalid(format!("unknown state: {name}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut roots = model.execution_roots();
+    for &(state, _) in &links {
+        if !roots.contains(&state) {
+            roots.push(state);
+        }
+    }
+    Ok((roots, links))
+}
+
 /// Maintains parameter and state buffers between replays. No extra IR is
 /// introduced; every step is the same compiled pure graph followed by
 /// explicit device-to-device state assignment.
@@ -64,7 +88,8 @@ impl GpuEngine {
         output_dir: &Path,
     ) -> Result<ModelExecution<'m>, ModelExecutionError> {
         let values = model.bind(bindings)?;
-        let program = self.compile_outputs(model.graph(), &model.execution_roots())?;
+        let (roots, links) = execution_roots_with_states(model)?;
+        let program = self.compile_outputs(model.graph(), &roots)?;
         // A model may declare inactive named parameters. The GPU program
         // binds only sources reachable from the selected outputs.
         let live = program.source_inputs();
@@ -72,7 +97,11 @@ impl GpuEngine {
             .into_iter()
             .filter(|(id, _)| live.contains(id))
             .collect::<Vec<_>>();
-        let gpu = self.prepare(&program, &active, output_dir)?;
+        let mut gpu = self.prepare(&program, &active, output_dir)?;
+        let public = model.outputs().values().copied().collect::<Vec<_>>();
+        // Check the full D2D plan before the first step and allocate stable
+        // device snapshots for public outputs that alias writable state.
+        gpu.configure_model_feedback(&public, &links)?;
         Ok(ModelExecution { model, gpu })
     }
 }
@@ -128,13 +157,17 @@ impl ModelExecution<'_> {
 
     /// Run the pure model once, without changing temporal state.
     pub fn run(&mut self) -> Result<(), ModelExecutionError> {
-        Ok(self.gpu.replay()?)
+        self.gpu.replay()?;
+        Ok(self.gpu.snapshot_outputs()?)
     }
 
     /// Compute and then feed every declared next_state into its matching
     /// state input on-device. Next step reuses the same CUDA Graph.
     pub fn step(&mut self) -> Result<(), ModelExecutionError> {
         self.gpu.replay()?;
+        // Preserve the last pure step's public values before feedback mutates
+        // any state input (including zero-copy reshape aliases).
+        self.gpu.snapshot_outputs()?;
         let links = self
             .model
             .state_links()
@@ -153,13 +186,7 @@ impl ModelExecution<'_> {
             .model
             .output(name)
             .ok_or_else(|| ModelExecutionError::Invalid(format!("unknown output: {name}")))?;
-        self.gpu
-            .read_outputs()?
-            .into_iter()
-            .find_map(|(node, tensor)| (node == id).then_some(tensor))
-            .ok_or_else(|| {
-                ModelExecutionError::Invalid(format!("unavailable compiled output: {name}"))
-            })
+        Ok(self.gpu.read_selected_output(id)?)
     }
 
     /// Read the current state input, including the feedback of the last step.
@@ -222,6 +249,28 @@ mod tests {
                 .compile_outputs(model.graph(), &model.execution_roots())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn replacement_state_is_a_live_gpu_source_even_without_read_dependencies() {
+        let mut builder = crate::ModelBuilder::new("replacement", "1");
+        let memory = builder.state("memory", [2], Domain::Any).unwrap();
+        let token = builder.input("token", [2], Domain::Finite).unwrap();
+        let out = builder.graph_mut().relu(token).unwrap();
+        builder.output("readout", out).unwrap();
+        builder.next_state("memory", token).unwrap();
+        let model = builder.finish().unwrap();
+
+        assert!(!model.execution_roots().contains(&memory));
+        let (roots, links) = execution_roots_with_states(&model).unwrap();
+        assert!(roots.contains(&memory));
+        assert_eq!(links, vec![(memory, token)]);
+        let program = GpuEngine::default()
+            .compile_outputs(model.graph(), &roots)
+            .unwrap();
+        assert!(program.source_inputs().contains(&memory));
+        assert!(program.outputs().contains(&memory));
+        assert!(program.source_inputs().contains(&token));
     }
 
     #[test]

@@ -650,6 +650,10 @@ pub struct GpuExecution {
     output_shape: Shape,
     output_address: u64,
     output_addresses: Vec<(NodeId, Shape, u64)>,
+    // Only public outputs sharing storage with state inputs need snapshots.
+    // Buffers are allocated once at prepare, before any CUDA Graph replay.
+    preserved_output_addresses: BTreeMap<usize, u64>,
+    preserved_output_valid: bool,
     has_graph: bool,
 }
 
@@ -691,10 +695,84 @@ impl GpuExecution {
         self.session.flush_input_copies()
     }
 
-    /// Copy selected completed outputs to next-step state inputs on-device.
-    /// Validate all links before copying, including alias hazards in multi-state
-    /// feedback, so a rejected mapping leaves the previous state intact.
-    pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
+    /// Establish the static state feedback memory contract before any replay.
+    /// Public outputs that alias state inputs receive persistent device
+    /// snapshots so step() cannot overwrite observable pure-step results.
+    pub(crate) fn configure_model_feedback(
+        &mut self,
+        public_outputs: &[NodeId],
+        links: &[(NodeId, NodeId)],
+    ) -> Result<(), GpuError> {
+        self.feedback_copy_plan(links)?;
+        let destinations = links
+            .iter()
+            .map(|&(state, _)| self.input_addresses[&state.index()])
+            .collect::<BTreeSet<_>>();
+        for &output in public_outputs {
+            let (shape, address) = self
+                .output_addresses
+                .iter()
+                .find(|(node, _, _)| *node == output)
+                .map(|(_, shape, address)| (shape.clone(), *address))
+                .ok_or(GpuError::InvalidInput {
+                    node: output.index(),
+                    reason: "public output is not in the compiled GPU program",
+                })?;
+            if destinations.contains(&address)
+                && !self.preserved_output_addresses.contains_key(&output.index())
+            {
+                let snapshot = self.session.allocate(shape.element_count())?;
+                self.preserved_output_addresses.insert(output.index(), snapshot);
+            }
+        }
+        Ok(())
+    }
+
+    /// Save the pure step's observable values before writing feedback state.
+    /// All copies stay on the owned non-blocking stream; no host round-trip.
+    pub(crate) fn snapshot_outputs(&mut self) -> Result<(), GpuError> {
+        self.preserved_output_valid = false;
+        for (&index, &snapshot) in &self.preserved_output_addresses {
+            let (_, shape, source) = self
+                .output_addresses
+                .iter()
+                .find(|(node, _, _)| node.index() == index)
+                .expect("configured public output has a live buffer");
+            self.session
+                .copy_device_to_device(snapshot, *source, shape.element_count())?;
+        }
+        if !self.preserved_output_addresses.is_empty() {
+            self.session.synchronize()?;
+        }
+        self.preserved_output_valid = true;
+        Ok(())
+    }
+
+    /// Read just one selected output (not every public and private root).
+    pub(crate) fn read_selected_output(&mut self, id: NodeId) -> Result<Tensor<f32>, GpuError> {
+        let (_, shape, live) = self
+            .output_addresses
+            .iter()
+            .find(|(node, _, _)| *node == id)
+            .ok_or(GpuError::InvalidInput {
+                node: id.index(),
+                reason: "requested output is not selected",
+            })?;
+        let address = if self.preserved_output_valid {
+            self.preserved_output_addresses
+                .get(&id.index())
+                .copied()
+                .unwrap_or(*live)
+        } else {
+            *live
+        };
+        let mut values = vec![0.0f32; shape.element_count()];
+        self.session.copy_to_host(&mut values, address)?;
+        Ok(Tensor::new(shape.clone(), values)?)
+    }
+
+    /// Validate feedback shape, dtype, domain, liveness and alias order.
+    fn feedback_copy_plan(&self, links: &[(NodeId, NodeId)]) -> Result<Vec<(u64, u64, usize)>, GpuError> {
         let mut destinations = BTreeSet::new();
         let mut copies = Vec::with_capacity(links.len());
         for &(state, next) in links {
@@ -756,6 +834,13 @@ impl GpuExecution {
                 reason: "overlapping state feedback sources require staging",
             });
         }
+        Ok(copies)
+    }
+
+    /// Copy selected completed outputs to next-step state inputs on-device.
+    /// A prevalidated layout is still checked before each transfer.
+    pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
+        let copies = self.feedback_copy_plan(links)?;
         for (dst, src, elements) in copies {
             if dst != src {
                 self.session.copy_device_to_device(dst, src, elements)?;
@@ -1231,6 +1316,8 @@ impl GpuEngine {
             output_shape: last.shape.clone(),
             output_address: buffers[&program.output.index()],
             output_addresses,
+            preserved_output_addresses: BTreeMap::new(),
+            preserved_output_valid: false,
             has_graph,
         })
     }
