@@ -29,7 +29,10 @@ impl MultiOutputModule for Accumulate {
     ) -> Result<Vec<NodeId>, NeuralError> {
         let sum = graph.add(inputs[0], inputs[1])?;
         let next = graph.relu(sum)?;
-        Ok(vec![next, next])
+        // Multi-output module identities are intentionally distinct. The
+        // recurrent invariant concerns next_state; the auxiliary output keeps
+        // the pre-activation available as an independent consumer-visible port.
+        Ok(vec![next, sum])
     }
 }
 
