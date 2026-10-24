@@ -368,12 +368,12 @@ fn rotating_bank(g: &mut NeuralGraph, core0: NodeId, core1: NodeId) -> Result<No
 /// Router, rotation bank, deterministic first-tie argmax selection, recurrent
 /// transition and terminal readout share ONE Semantic Neural IR. The P0
 /// structural/indexing path is therefore visible to canonical IR and Lean.
-/// GPU lowering of these structural/index operations intentionally remains
-/// fail-closed until a dedicated backend slice is implemented and audited.
+/// GPU lowering supports the deliberately narrow structural/indexing profile
+/// used here; unsupported axes/ranks remain fail-closed.
 pub fn architecture_model() -> Result<Model, ModelError> {
     let mut m = ModelBuilder::new("rotating-matrices", "0.1.0");
     let dictionary = m.input("dictionary_state", [1, WIDTH], Domain::NonNegativeFinite)?;
-    let state = m.input("recurrent_state", [1, WIDTH], Domain::NonNegativeFinite)?;
+    let state = m.state("recurrent_state", [1, WIDTH], Domain::NonNegativeFinite)?;
     let token = m.input("token_bits", [1, WIDTH], Domain::NonNegativeFinite)?;
 
     let router_weights = m.parameter("router_weights", [WIDTH, ACTIONS], Domain::Finite)?;
@@ -403,6 +403,7 @@ pub fn architecture_model() -> Result<Model, ModelError> {
         scalar_readout,
     )?;
 
+    m.next_state("recurrent_state", next_state)?;
     m.output("router_logits", logits)?;
     m.output("next_state", next_state)?;
     m.output("normalized_result", scalar)?;
@@ -1137,6 +1138,19 @@ mod tests {
         assert!(!ir.contains("selected_rotated_weight"));
         assert!(ir.contains("routed_recurrent_transition"));
         assert!(ir.contains("terminal_scalar_readout"));
+        assert_eq!(model.state_links().len(), 1);
+        let outputs = [
+            model.output("router_logits").unwrap(),
+            model.output("next_state").unwrap(),
+            model.output("normalized_result").unwrap(),
+        ];
+        let gpu = GpuEngine::default()
+            .compile_outputs(model.graph(), &outputs)
+            .unwrap();
+        let plan = gpu.translation_plan().unwrap().to_text();
+        assert!(plan.contains("transpose2d"));
+        assert!(plan.contains("argmax_last"));
+        assert!(plan.contains("take_axis0"));
         assert_eq!(model.proof_goals().len(), 0);
     }
 }

@@ -201,6 +201,25 @@ pub enum GpuMemoryPattern {
         inner: usize,
         columns: usize,
     },
+    Transpose2D {
+        rows: usize,
+        columns: usize,
+    },
+    ReverseRows2D {
+        columns: usize,
+    },
+    ReverseColumns2D {
+        columns: usize,
+    },
+    ConcatAxis0 {
+        left: usize,
+    },
+    ArgMaxLast {
+        width: usize,
+    },
+    TakeAxis0 {
+        lane: usize,
+    },
 }
 
 /// A checked, immutable GPU compilation plan. No claims about machine-code proof.
@@ -390,7 +409,7 @@ impl GpuProgram {
                 } else {
                     let producer = self.fused_relus.get(&index).copied().unwrap_or(index);
                     let op_node = &self.graph.nodes()[producer];
-                    let pattern = match op_node.operation {
+                    let pattern = match &op_node.operation {
                         Operation::BiasAdd => GpuMemoryPattern::BiasAdd {
                             columns: node.shape.dims()[1],
                         },
@@ -402,6 +421,64 @@ impl GpuProgram {
                                 columns: node.shape.dims()[1],
                             }
                         }
+                        Operation::Permute { axes } => {
+                            let input = &self.graph.nodes()[op_node.inputs[0].index()];
+                            if input.shape.rank() != 2 || axes.as_slice() != [1, 0] {
+                                return Err(GpuError::UnsupportedOperation {
+                                    node: index,
+                                    operation: op_node.operation.name(),
+                                });
+                            }
+                            GpuMemoryPattern::Transpose2D {
+                                rows: input.shape.dims()[0],
+                                columns: input.shape.dims()[1],
+                            }
+                        }
+                        Operation::ReverseAxis { axis } => {
+                            let input = &self.graph.nodes()[op_node.inputs[0].index()];
+                            if input.shape.rank() != 2 {
+                                return Err(GpuError::UnsupportedOperation {
+                                    node: index,
+                                    operation: op_node.operation.name(),
+                                });
+                            }
+                            match axis {
+                                0 => GpuMemoryPattern::ReverseRows2D {
+                                    columns: input.shape.dims()[1],
+                                },
+                                1 => GpuMemoryPattern::ReverseColumns2D {
+                                    columns: input.shape.dims()[1],
+                                },
+                                _ => {
+                                    return Err(GpuError::UnsupportedOperation {
+                                        node: index,
+                                        operation: op_node.operation.name(),
+                                    });
+                                }
+                            }
+                        }
+                        Operation::Concat { axis: 0 } => {
+                            let left = &self.graph.nodes()[op_node.inputs[0].index()];
+                            GpuMemoryPattern::ConcatAxis0 {
+                                left: left.shape.element_count(),
+                            }
+                        }
+                        Operation::ArgMax { axis, tie_break } => {
+                            let input = &self.graph.nodes()[op_node.inputs[0].index()];
+                            if input.shape.rank() != 2
+                                || *axis != 1
+                                || !matches!(tie_break, crate::ArgMaxTieBreak::First)
+                            {
+                                return Err(GpuError::UnsupportedOperation {
+                                    node: index,
+                                    operation: op_node.operation.name(),
+                                });
+                            }
+                            GpuMemoryPattern::ArgMaxLast {
+                                width: input.shape.dims()[1],
+                            }
+                        }
+                        Operation::Take { axis: 0 } => GpuMemoryPattern::TakeAxis0 { lane: writes },
                         _ => GpuMemoryPattern::Pointwise,
                     };
                     (
@@ -436,6 +513,47 @@ impl GpuProgram {
                             .checked_mul(columns)
                             .ok_or(GpuError::UnsupportedSize { elements: writes })?,
                     ]
+                }
+                GpuMemoryPattern::Transpose2D { rows, columns } => {
+                    if rows.checked_mul(columns) != Some(writes) {
+                        return Err(GpuError::InvalidInput {
+                            node: index,
+                            reason: "transpose2d output extent mismatch",
+                        });
+                    }
+                    vec![writes]
+                }
+                GpuMemoryPattern::ReverseRows2D { columns }
+                | GpuMemoryPattern::ReverseColumns2D { columns } => {
+                    if columns == 0 || writes % columns != 0 {
+                        return Err(GpuError::InvalidInput {
+                            node: index,
+                            reason: "reverse2d output extent mismatch",
+                        });
+                    }
+                    vec![writes]
+                }
+                GpuMemoryPattern::ConcatAxis0 { left } => {
+                    if read_nodes.len() != 2 {
+                        return Err(GpuError::InvalidInput {
+                            node: index,
+                            reason: "concat_axis0 requires two source tensors",
+                        });
+                    }
+                    let right = writes.checked_sub(left).ok_or(GpuError::InvalidInput {
+                        node: index,
+                        reason: "concat_axis0 left extent exceeds output",
+                    })?;
+                    vec![left, right]
+                }
+                GpuMemoryPattern::ArgMaxLast { width } => vec![
+                    writes
+                        .checked_mul(width)
+                        .ok_or(GpuError::UnsupportedSize { elements: writes })?,
+                ],
+                GpuMemoryPattern::TakeAxis0 { .. } => {
+                    let data = &self.graph.nodes()[read_nodes[0]];
+                    vec![data.shape.element_count(), 1]
                 }
             };
             // CUDA templates form idx = block * width + lane with u32
@@ -558,6 +676,60 @@ impl GpuProgram {
                         };
                         TranslationKind::MatMul { inner, columns }
                     }
+                    Operation::Permute { .. } => match contract.pattern {
+                        GpuMemoryPattern::Transpose2D { rows, columns } => {
+                            TranslationKind::Transpose2D { rows, columns }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "Permute lacks transpose2d memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::ReverseAxis { axis: 0 } => match contract.pattern {
+                        GpuMemoryPattern::ReverseRows2D { columns } => {
+                            TranslationKind::ReverseRows2D { columns }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "ReverseAxis(0) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::ReverseAxis { axis: 1 } => match contract.pattern {
+                        GpuMemoryPattern::ReverseColumns2D { columns } => {
+                            TranslationKind::ReverseColumns2D { columns }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "ReverseAxis(1) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::Concat { axis: 0 } => match contract.pattern {
+                        GpuMemoryPattern::ConcatAxis0 { left } => TranslationKind::ConcatAxis0 { left },
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "Concat(0) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::ArgMax { axis: 1, .. } => match contract.pattern {
+                        GpuMemoryPattern::ArgMaxLast { width } => TranslationKind::ArgMaxLast { width },
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "ArgMax(last) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::Take { axis: 0 } => match contract.pattern {
+                        GpuMemoryPattern::TakeAxis0 { lane } => TranslationKind::TakeAxis0 { lane },
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "Take(0) lacks memory contract".into(),
+                            });
+                        }
+                    },
                     Operation::Relu => TranslationKind::Relu,
                     _ => {
                         return Err(GpuError::Fp32PtxRejected {
@@ -614,6 +786,17 @@ impl GpuProgram {
                     source.push_str(&format!(
                         "example (index j : Nat) (active : index < {rows} * {columns}) (reduction : j < {inner}) :\n    (index / {columns}) * {inner} + j < {rows} * {inner} ∧\n    j * {columns} + index % {columns} < {inner} * {columns} :=\n  matmul_address_bounds (by decide) active reduction\n"
                     ));
+                }
+                GpuMemoryPattern::Transpose2D { .. }
+                | GpuMemoryPattern::ReverseRows2D { .. }
+                | GpuMemoryPattern::ReverseColumns2D { .. }
+                | GpuMemoryPattern::ConcatAxis0 { .. }
+                | GpuMemoryPattern::ArgMaxLast { .. }
+                | GpuMemoryPattern::TakeAxis0 { .. } => {
+                    return Err(GpuError::UnsupportedOperation {
+                        node: contract.kernel_node,
+                        operation: self.graph.nodes()[contract.kernel_node].operation.name(),
+                    });
                 }
             }
         }
@@ -1097,6 +1280,11 @@ impl GpuEngine {
                     | Operation::MatMul
                     | Operation::BiasAdd
                     | Operation::Relu
+                    | Operation::Permute { .. }
+                    | Operation::ReverseAxis { .. }
+                    | Operation::Concat { .. }
+                    | Operation::ArgMax { .. }
+                    | Operation::Take { .. }
                     | Operation::Reshape(_)
             ) {
                 return Err(GpuError::UnsupportedOperation {
@@ -1201,12 +1389,78 @@ impl GpuEngine {
                     node.shape.dims()[1],
                 ));
             } else {
-                let columns = if matches!(node.operation, Operation::BiasAdd) {
-                    node.shape.dims()[1]
-                } else {
-                    0
-                };
-                llvm_ir.push_str(&kernel_ir(index, &node.operation, columns, false));
+                match &node.operation {
+                    Operation::Permute { axes } if axes.as_slice() == [1, 0] => {
+                        let input = &graph.nodes()[node.inputs[0].index()];
+                        if input.shape.rank() != 2 {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: node.operation.name(),
+                            });
+                        }
+                        llvm_ir.push_str(&transpose2d_kernel_ir(
+                            index,
+                            input.shape.dims()[0],
+                            input.shape.dims()[1],
+                        ));
+                    }
+                    Operation::ReverseAxis { axis } => {
+                        let input = &graph.nodes()[node.inputs[0].index()];
+                        if input.shape.rank() != 2 || *axis > 1 {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: node.operation.name(),
+                            });
+                        }
+                        llvm_ir.push_str(&reverse2d_kernel_ir(
+                            index,
+                            input.shape.dims()[0],
+                            input.shape.dims()[1],
+                            *axis,
+                        ));
+                    }
+                    Operation::Concat { axis: 0 } => {
+                        let left = &graph.nodes()[node.inputs[0].index()];
+                        llvm_ir.push_str(&concat_axis0_kernel_ir(
+                            index,
+                            left.shape.element_count(),
+                        ));
+                    }
+                    Operation::ArgMax {
+                        axis: 1,
+                        tie_break: crate::ArgMaxTieBreak::First,
+                    } => {
+                        let input = &graph.nodes()[node.inputs[0].index()];
+                        if input.shape.rank() != 2 {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: node.operation.name(),
+                            });
+                        }
+                        llvm_ir.push_str(&argmax_last_kernel_ir(index, input.shape.dims()[1]));
+                    }
+                    Operation::Take { axis: 0 } => {
+                        llvm_ir.push_str(&take_axis0_kernel_ir(index, node.shape.element_count()));
+                    }
+                    Operation::Permute { .. }
+                    | Operation::ReverseAxis { .. }
+                    | Operation::Concat { .. }
+                    | Operation::ArgMax { .. }
+                    | Operation::Take { .. } => {
+                        return Err(GpuError::UnsupportedOperation {
+                            node: index,
+                            operation: node.operation.name(),
+                        });
+                    }
+                    _ => {
+                        let columns = if matches!(node.operation, Operation::BiasAdd) {
+                            node.shape.dims()[1]
+                        } else {
+                            0
+                        };
+                        llvm_ir.push_str(&kernel_ir(index, &node.operation, columns, false));
+                    }
+                }
             }
         }
         let program = GpuProgram {
@@ -1309,7 +1563,12 @@ impl GpuEngine {
                 | Operation::Mul
                 | Operation::MatMul
                 | Operation::BiasAdd
-                | Operation::Relu => {
+                | Operation::Relu
+                | Operation::Permute { .. }
+                | Operation::ReverseAxis { .. }
+                | Operation::Concat { .. }
+                | Operation::ArgMax { .. }
+                | Operation::Take { .. } => {
                     let ptr = session.allocate(node.shape.element_count())?;
                     buffers.insert(index, ptr);
                 }
@@ -1636,6 +1895,193 @@ fn matmul_kernel_ir(index: usize, inner: usize, columns: usize) -> String {
          done:\n\
            ret void\n\
          }}\n\n"
+    )
+}
+
+
+fn transpose2d_kernel_ir(index: usize, rows: usize, columns: usize) -> String {
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %in_row = urem i32 %idx, {rows}
+  %in_col = udiv i32 %idx, {rows}
+  %row_base = mul i32 %in_row, {columns}
+  %source_idx = add i32 %row_base, %in_col
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %x, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
+}
+
+fn reverse2d_kernel_ir(index: usize, rows: usize, columns: usize, axis: usize) -> String {
+    let source = if axis == 0 {
+        format!(
+            "  %row = udiv i32 %idx, {columns}\n\
+             %col = urem i32 %idx, {columns}\n\
+             %rows_minus_one = add i32 0, {}\n\
+             %reversed_row = sub i32 %rows_minus_one, %row\n\
+             %row_base = mul i32 %reversed_row, {columns}\n\
+             %source_idx = add i32 %row_base, %col\n",
+            rows - 1
+        )
+    } else {
+        format!(
+            "  %row = udiv i32 %idx, {columns}\n\
+             %col = urem i32 %idx, {columns}\n\
+             %columns_minus_one = add i32 0, {}\n\
+             %reversed_col = sub i32 %columns_minus_one, %col\n\
+             %row_base = mul i32 %row, {columns}\n\
+             %source_idx = add i32 %row_base, %reversed_col\n",
+            columns - 1
+        )
+    };
+    format!(
+        "define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{\n\
+         entry:\n\
+           %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()\n\
+           %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()\n\
+           %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()\n\
+           %base = mul i32 %block, %width\n\
+           %idx = add i32 %base, %tid\n\
+           %valid = icmp ult i32 %idx, %length\n\
+           br i1 %valid, label %compute, label %done\n\
+         compute:\n\
+         {source}\
+           %ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx\n\
+           %x = load float, ptr addrspace(1) %ap, align 4\n\
+           %op = getelementptr float, ptr addrspace(1) %out, i32 %idx\n\
+           store float %x, ptr addrspace(1) %op, align 4\n\
+           br label %done\n\
+         done:\n\
+           ret void\n\
+         }}\n\n"
+    )
+}
+
+fn concat_axis0_kernel_ir(index: usize, left: usize) -> String {
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %from_left = icmp ult i32 %idx, {left}
+  br i1 %from_left, label %left, label %right
+left:
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %idx
+  %left_value = load float, ptr addrspace(1) %ap, align 4
+  br label %store
+right:
+  %right_idx = sub i32 %idx, {left}
+  %bp = getelementptr float, ptr addrspace(1) %b, i32 %right_idx
+  %right_value = load float, ptr addrspace(1) %bp, align 4
+  br label %store
+store:
+  %value = phi float [ %left_value, %left ], [ %right_value, %right ]
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %value, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
+}
+
+fn argmax_last_kernel_ir(index: usize, width: usize) -> String {
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %threads = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %grid_base = mul i32 %block, %threads
+  %idx = add i32 %grid_base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %row_base = mul i32 %idx, {width}
+  %first_ptr = getelementptr float, ptr addrspace(1) %a, i32 %row_base
+  %first = load float, ptr addrspace(1) %first_ptr, align 4
+  br label %loop
+loop:
+  %lane = phi i32 [ 1, %compute ], [ %next, %body ]
+  %best_lane = phi i32 [ 0, %compute ], [ %chosen_lane, %body ]
+  %best_value = phi float [ %first, %compute ], [ %chosen_value, %body ]
+  %more = icmp ult i32 %lane, {width}
+  br i1 %more, label %body, label %store
+body:
+  %candidate_idx = add i32 %row_base, %lane
+  %candidate_ptr = getelementptr float, ptr addrspace(1) %a, i32 %candidate_idx
+  %candidate = load float, ptr addrspace(1) %candidate_ptr, align 4
+  %candidate_numeric = fcmp ord float %candidate, %candidate
+  %best_nan = fcmp uno float %best_value, %best_value
+  %greater = fcmp ogt float %candidate, %best_value
+  %better_than_best = or i1 %best_nan, %greater
+  %replace = and i1 %candidate_numeric, %better_than_best
+  %chosen_lane = select i1 %replace, i32 %lane, i32 %best_lane
+  %chosen_value = select i1 %replace, float %candidate, float %best_value
+  %next = add i32 %lane, 1
+  br label %loop
+store:
+  %op = getelementptr i32, ptr addrspace(1) %out, i32 %idx
+  store i32 %best_lane, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
+}
+
+fn take_axis0_kernel_ir(index: usize, lane: usize) -> String {
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %bp = getelementptr i32, ptr addrspace(1) %b, i32 0
+  %selected = load i32, ptr addrspace(1) %bp, align 4
+  %selected_base = mul i32 %selected, {lane}
+  %source_idx = add i32 %selected_base, %idx
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %x, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
     )
 }
 

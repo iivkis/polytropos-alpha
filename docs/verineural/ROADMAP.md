@@ -154,6 +154,9 @@ Lean `approx_contract_relu_positive_branch` / `approx_contract_relu_nonpositive_
 
 **P1/P2 review fixes (код, локальная проверка ожидается):** `GpuExecution` реализует единый fail-closed lifecycle для CUDA H2D/D2D/D2H/Graph/synchronize/benchmark: `ExecutionPoisoned` после CUDA-ошибки, `OutputNotReady` до первого replay и после валидного source update; ошибки preflight не poison. Аппаратная приёмка `task gpu-state-replay` также проверяет запрет чтения неготовых результатов. `NeuralGraph::dependency_scope` больше не сканирует каждый модуль для каждого посещённого узла: строит локальный индекс module outputs и сохраняет declared unused inputs и duplicate output/module bindings. Совместно прогнать `task check`, `task test`, `task clippy`, `task gpu-state-replay`, `task gpu-multi-output`, `task p2-consumers`, `task verify-p2-consumers`. CUDA/FP32/SASS не доказаны.
 
+
+**P0 structural/indexing GPU lowering (код; локальная приёмка ожидается):** GPU backend принимает только профиль, реально требуемый rotating-matrices: rank-2 transpose (`Permute [1,0]`), rank-2 `ReverseAxis(0/1)`, contiguous binary `Concat(0)`, rank-2 `ArgMax(axis=1, First)` и scalar `Take(axis=0)`. Для новых kernels добавлены memory contracts, deterministic translation-plan kinds и structural LLVM/PTX validation; неподдерживаемые axes/ranks/tie policies остаются fail-closed. Lean memory-address source для новых templates пока намеренно возвращает `unsupported`, чтобы certification не изображала отсутствующее доказательство. Evidence model rotating-matrices теперь объявляет `recurrent_state` через `ModelBuilder::state` и связывает `next_state`. CPU/GPU hardware acceptance не запускалась в агентской среде; `task check/test/clippy` и CUDA replay остаются за локальной проверкой разработчика. Это не доказательство JIT/SASS/FP32.
+
 ## Общие ограничения для всех этапов
 
 - **Никаких** CI/CD, GitHub Actions, hooks, контейнеризации и прочей инфраструктуры без явного согласия пользователя.

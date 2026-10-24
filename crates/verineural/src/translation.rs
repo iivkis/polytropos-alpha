@@ -15,6 +15,12 @@ pub enum TranslationKind {
     Mul,
     BiasAdd { columns: usize },
     MatMul { inner: usize, columns: usize },
+    Transpose2D { rows: usize, columns: usize },
+    ReverseRows2D { columns: usize },
+    ReverseColumns2D { columns: usize },
+    ConcatAxis0 { left: usize },
+    ArgMaxLast { width: usize },
+    TakeAxis0 { lane: usize },
     Relu,
     AddRelu,
     MulRelu,
@@ -30,6 +36,12 @@ impl TranslationKind {
             Self::Mul => "mul",
             Self::BiasAdd { .. } => "bias_add",
             Self::MatMul { .. } => "matmul",
+            Self::Transpose2D { .. } => "transpose2d",
+            Self::ReverseRows2D { .. } => "reverse_rows2d",
+            Self::ReverseColumns2D { .. } => "reverse_columns2d",
+            Self::ConcatAxis0 { .. } => "concat_axis0",
+            Self::ArgMaxLast { .. } => "argmax_last",
+            Self::TakeAxis0 { .. } => "take_axis0",
             Self::Relu => "relu",
             Self::AddRelu => "add_relu",
             Self::MulRelu => "mul_relu",
@@ -44,6 +56,12 @@ impl TranslationKind {
             Self::Add | Self::BiasAdd { .. } => (1, 0, 0),
             Self::Mul => (0, 1, 0),
             Self::MatMul { .. } => (1, 1, 0),
+            Self::Transpose2D { .. }
+            | Self::ReverseRows2D { .. }
+            | Self::ReverseColumns2D { .. }
+            | Self::ConcatAxis0 { .. }
+            | Self::ArgMaxLast { .. }
+            | Self::TakeAxis0 { .. } => (0, 0, 0),
             Self::Relu => (0, 0, 1),
             Self::AddRelu | Self::BiasAddRelu { .. } => (1, 0, 1),
             Self::MulRelu => (0, 1, 1),
@@ -54,7 +72,11 @@ impl TranslationKind {
 
     fn expected_inputs(self) -> usize {
         match self {
-            Self::Relu => 1,
+            Self::Relu
+            | Self::Transpose2D { .. }
+            | Self::ReverseRows2D { .. }
+            | Self::ReverseColumns2D { .. }
+            | Self::ArgMaxLast { .. } => 1,
             Self::AddBiasRelu { .. } | Self::MulBiasRelu { .. } => 3,
             _ => 2,
         }
@@ -66,7 +88,10 @@ impl TranslationKind {
             | Self::BiasAddRelu { columns }
             | Self::AddBiasRelu { columns }
             | Self::MulBiasRelu { columns }
-            | Self::MatMul { columns, .. } => columns,
+            | Self::MatMul { columns, .. }
+            | Self::Transpose2D { columns, .. }
+            | Self::ReverseRows2D { columns }
+            | Self::ReverseColumns2D { columns } => columns,
             _ => 0,
         }
     }
@@ -74,6 +99,10 @@ impl TranslationKind {
     fn inner(self) -> usize {
         match self {
             Self::MatMul { inner, .. } => inner,
+            Self::Transpose2D { rows, .. } => rows,
+            Self::ConcatAxis0 { left } => left,
+            Self::ArgMaxLast { width } => width,
+            Self::TakeAxis0 { lane } => lane,
             _ => 0,
         }
     }
@@ -84,6 +113,12 @@ impl TranslationKind {
             "mul" => Self::Mul,
             "bias_add" => Self::BiasAdd { columns },
             "matmul" => Self::MatMul { inner, columns },
+            "transpose2d" => Self::Transpose2D { rows: inner, columns },
+            "reverse_rows2d" => Self::ReverseRows2D { columns },
+            "reverse_columns2d" => Self::ReverseColumns2D { columns },
+            "concat_axis0" => Self::ConcatAxis0 { left: inner },
+            "argmax_last" => Self::ArgMaxLast { width: inner },
+            "take_axis0" => Self::TakeAxis0 { lane: inner },
             "relu" => Self::Relu,
             "add_relu" => Self::AddRelu,
             "mul_relu" => Self::MulRelu,
@@ -212,6 +247,49 @@ impl TranslationPlan {
                 {
                     return Err(invalid("fused chain shape mismatch"));
                 }
+            }
+            match kernel.kind {
+                TranslationKind::Transpose2D { rows, columns } => {
+                    if rows == 0
+                        || columns == 0
+                        || rows.saturating_mul(columns) != kernel.writes
+                        || kernel.reads[0].1 != kernel.writes
+                    {
+                        return Err(invalid("transpose2d source shape mismatch"));
+                    }
+                }
+                TranslationKind::ReverseRows2D { columns }
+                | TranslationKind::ReverseColumns2D { columns } => {
+                    if columns == 0
+                        || kernel.writes % columns != 0
+                        || kernel.reads[0].1 != kernel.writes
+                    {
+                        return Err(invalid("reverse2d source shape mismatch"));
+                    }
+                }
+                TranslationKind::ConcatAxis0 { left } => {
+                    if left == 0
+                        || kernel.reads[0].1 != left
+                        || kernel.reads[0].1.saturating_add(kernel.reads[1].1) != kernel.writes
+                    {
+                        return Err(invalid("concat_axis0 source shape mismatch"));
+                    }
+                }
+                TranslationKind::ArgMaxLast { width } => {
+                    if width == 0 || kernel.reads[0].1 != kernel.writes.saturating_mul(width) {
+                        return Err(invalid("argmax_last source shape mismatch"));
+                    }
+                }
+                TranslationKind::TakeAxis0 { lane } => {
+                    if lane != kernel.writes
+                        || kernel.reads[1].1 != 1
+                        || kernel.reads[0].1 < lane
+                        || kernel.reads[0].1 % lane != 0
+                    {
+                        return Err(invalid("take_axis0 source shape mismatch"));
+                    }
+                }
+                _ => {}
             }
             if matches!(
                 kernel.kind,
@@ -398,6 +476,75 @@ impl TranslationPlan {
                 .get(&node)
                 .ok_or_else(|| invalid(format!("PTX kernel {node} missing")))?;
             let (add, mul, relu) = kernel.kind.counts();
+            let structural_requirements: Option<Vec<String>> = match kernel.kind {
+                TranslationKind::Transpose2D { rows, columns } => Some(vec![
+                    format!("urem i32 %idx, {rows}"),
+                    format!("udiv i32 %idx, {rows}"),
+                    format!("mul i32 %in_row, {columns}"),
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
+                    "store float %x, ptr addrspace(1) %op, align 4".into(),
+                ]),
+                TranslationKind::ReverseRows2D { columns } => Some(vec![
+                    format!("udiv i32 %idx, {columns}"),
+                    format!("urem i32 %idx, {columns}"),
+                    "%reversed_row = sub i32 %rows_minus_one, %row".into(),
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
+                    "store float %x, ptr addrspace(1) %op, align 4".into(),
+                ]),
+                TranslationKind::ReverseColumns2D { columns } => Some(vec![
+                    format!("udiv i32 %idx, {columns}"),
+                    format!("urem i32 %idx, {columns}"),
+                    "%reversed_col = sub i32 %columns_minus_one, %col".into(),
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
+                    "store float %x, ptr addrspace(1) %op, align 4".into(),
+                ]),
+                TranslationKind::ConcatAxis0 { left } => Some(vec![
+                    format!("icmp ult i32 %idx, {left}"),
+                    format!("sub i32 %idx, {left}"),
+                    "phi float [ %left_value, %left ], [ %right_value, %right ]".into(),
+                    "store float %value, ptr addrspace(1) %op, align 4".into(),
+                ]),
+                TranslationKind::ArgMaxLast { width } => Some(vec![
+                    format!("mul i32 %idx, {width}"),
+                    format!("icmp ult i32 %lane, {width}"),
+                    "%candidate_numeric = fcmp ord float %candidate, %candidate".into(),
+                    "%best_nan = fcmp uno float %best_value, %best_value".into(),
+                    "%greater = fcmp ogt float %candidate, %best_value".into(),
+                    "store i32 %best_lane, ptr addrspace(1) %op, align 4".into(),
+                ]),
+                TranslationKind::TakeAxis0 { lane } => Some(vec![
+                    "load i32, ptr addrspace(1) %bp, align 4".into(),
+                    format!("mul i32 %selected, {lane}"),
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
+                    "store float %x, ptr addrspace(1) %op, align 4".into(),
+                ]),
+                _ => None,
+            };
+            if let Some(requirements) = structural_requirements {
+                if !ir.contains("icmp ult i32 %idx, %length")
+                    || !ir.contains("br i1 %valid, label %compute, label %done")
+                    || requirements.iter().any(|required| !ir.contains(required))
+                    || ir.contains("call float asm sideeffect \"add.rn.f32")
+                    || ir.contains("call float asm sideeffect \"mul.rn.f32")
+                {
+                    return Err(invalid(format!(
+                        "structural LLVM lowering mismatch at node {node}"
+                    )));
+                }
+                audit_fp32_ptx("", asm)
+                    .map_err(|err| invalid(format!("PTX node {node}: {err}")))?;
+                let reads = kernel
+                    .reads
+                    .iter()
+                    .map(|(source, size)| format!("{source}:{size}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                report.details.push_str(&format!(
+                    "node={node} kind={} reads={reads} writes={} add.rn.f32=0 mul.rn.f32=0 relu=0 status=structural-pass\n",
+                    kernel.kind.name(), kernel.writes
+                ));
+                continue;
+            }
             let actual_add = ir.matches("call float asm sideeffect \"add.rn.f32").count();
             let actual_mul = ir.matches("call float asm sideeffect \"mul.rn.f32").count();
             let actual_relu = ir.matches("fcmp uno float").count();
@@ -524,6 +671,12 @@ impl TranslationPlan {
                     Some("%value = select i1 %keep, float %x, float 0.000000e+00")
                 }
                 TranslationKind::MatMul { .. }
+                | TranslationKind::Transpose2D { .. }
+                | TranslationKind::ReverseRows2D { .. }
+                | TranslationKind::ReverseColumns2D { .. }
+                | TranslationKind::ConcatAxis0 { .. }
+                | TranslationKind::ArgMaxLast { .. }
+                | TranslationKind::TakeAxis0 { .. }
                 | TranslationKind::AddBiasRelu { .. }
                 | TranslationKind::MulBiasRelu { .. } => None,
             };

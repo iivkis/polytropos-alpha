@@ -1,6 +1,7 @@
 //! P0 structural tensor/indexing slice used by routing-style consumers.
 //! Host references are concrete f32/index calculations; Lean models the ideal
-//! integer structure, while GPU lowering intentionally fails closed for now.
+//! integer structure. GPU lowering supports the deliberately narrow routing
+//! profile exercised by rotating-matrices and fails closed outside it.
 use verineural::{
     ArgMaxTieBreak, DType, Domain, GpuEngine, GpuError, LeanProofEngine, NeuralError, NeuralGraph,
     Operation, ProofError, Shape, Tensor,
@@ -95,7 +96,7 @@ fn graph_uses_a_real_index_dtype_and_rejects_float_indices() {
 }
 
 #[test]
-fn rotating_bank_slice_is_canonical_and_has_lean_structure_but_no_fake_gpu_support() {
+fn rotating_bank_slice_is_canonical_has_lean_structure_and_gpu_lowering() {
     let mut graph = NeuralGraph::default();
     let core0 = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::NonNegativeFinite);
     let core1 = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::NonNegativeFinite);
@@ -145,12 +146,17 @@ fn rotating_bank_slice_is_canonical_and_has_lean_structure_but_no_fake_gpu_suppo
     assert!(source.contains("VeriNeural.takeAxis_nonnegative"));
     assert!(!source.contains("sorry"));
 
+    let program = GpuEngine::default().compile(&graph, selected).unwrap();
+    assert!(program.kernel_count().unwrap() >= 5);
+    let plan = program.translation_plan().unwrap().to_text();
+    assert!(plan.contains("transpose2d"));
+    assert!(plan.contains("reverse_columns2d"));
+    assert!(plan.contains("concat_axis0"));
+    assert!(plan.contains("argmax_last"));
+    assert!(plan.contains("take_axis0"));
     assert!(matches!(
-        GpuEngine::default().compile(&graph, selected),
-        Err(GpuError::UnsupportedOperation {
-            operation: "take",
-            ..
-        })
+        program.memory_lean_source(),
+        Err(GpuError::UnsupportedOperation { .. })
     ));
 }
 
