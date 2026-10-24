@@ -3,7 +3,7 @@
 use torus16_mix_lab::WIDTH;
 use torus16_mix_lab::ema4::{Ema4Weights, HISTORY, LAYERS, RESEARCH_VOCAB, architecture_model};
 use torus16_mix_lab::ema4_reference::{Ema4State, reference_step};
-use verineural::{GpuEngine, GpuLaunchConfig, Model, Tensor};
+use verineural::{GpuEngine, GpuLaunchConfig, Model, Tensor, unroll_model};
 
 fn onehot(token: usize, vocabulary: usize) -> Tensor<f32> {
     let mut values = vec![0.; vocabulary];
@@ -64,6 +64,44 @@ fn research_shape_and_named_bindings() {
     );
     assert!(Ema4Weights::deterministic(0).is_err());
     assert!(weights.bindings(RESEARCH_VOCAB).is_err());
+}
+
+#[test]
+fn gpu_training_upload_inventory_excludes_fixed_model_parameters() {
+    let weights = Ema4Weights::deterministic(RESEARCH_VOCAB).unwrap();
+    let trainable = weights.trainable_parameters().unwrap();
+    let model = architecture_model(RESEARCH_VOCAB).unwrap();
+    let window = unroll_model(&model, "logits", 2).unwrap();
+    let named = window.parameters();
+
+    // These source nodes are needed by the forward/backward program but
+    // never belong to the AdamW parameter inventory or upload set.
+    for fixed in ["ones_column", "inv_width", "epsilon_scalar", "one_vec"] {
+        assert!(named.contains_key(fixed), "model source missing: {fixed}");
+        assert!(!trainable.contains_key(fixed), "fixed source became trainable: {fixed}");
+    }
+    assert!(named.len() > trainable.len());
+
+    // Mirror the GPU trainer's exact zip over trainable names and target IDs.
+    let names = trainable.keys().collect::<Vec<_>>();
+    let targets = names
+        .iter()
+        .map(|name| *named.get(*name).expect("trainable name must have an IR source"))
+        .collect::<Vec<_>>();
+    let uploads = names
+        .iter()
+        .zip(&targets)
+        .map(|(name, &id)| (id, &trainable[*name]))
+        .collect::<Vec<_>>();
+    assert_eq!(uploads.len(), trainable.len());
+    assert_eq!(uploads.len(), targets.len());
+    assert_eq!(
+        uploads.iter().map(|(_, tensor)| tensor.values().len()).sum::<usize>(),
+        Ema4Weights::parameter_count(RESEARCH_VOCAB)
+    );
+    for fixed in ["ones_column", "inv_width", "epsilon_scalar", "one_vec"] {
+        assert!(!uploads.iter().any(|(id, _)| *id == named[fixed]));
+    }
 }
 
 #[test]

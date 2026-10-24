@@ -300,8 +300,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         let adam_ms = timing.elapsed().as_secs_f64() * 1000.;
 
         let timing = Instant::now();
-        let mut updates = Vec::with_capacity(named_parameter.len() + window.initial_states().len());
-        for (name, &id) in named_parameter {
+        // Update ONLY AdamW's trainable inventory. window.parameters()
+        // additionally contains fixed numeric sources such as ones_column,
+        // inv_width and epsilon_scalar, which are not AdamW parameters.
+        // 'targets' was validated against 'names' before autodiff.
+        let mut updates = Vec::with_capacity(targets.len() + window.initial_states().len());
+        for (name, &id) in names.iter().zip(&targets) {
             updates.push((id, &params[name]));
         }
         for (name, &id) in window.initial_states() {
