@@ -51,15 +51,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             for role in 0..ROLES {
                 let result = runner.output(&format!("role_{role}"))?;
                 let reference = reference_project(&input, &params, role)?;
-                for lane in 0..WIDTH {
-                    let error = (result.values()[lane] - reference[lane]).abs();
-                    let tolerance = 5e-5 + 2e-5 * reference[lane].abs();
+                for (lane, &reference_lane) in reference.iter().enumerate() {
+                    let error = (result.values()[lane] - reference_lane).abs();
+                    let tolerance = 5e-5 + 2e-5 * reference_lane.abs();
                     if !error.is_finite() || error > tolerance {
                         return Err(format!(
                             "GPU mismatch: role={role} lane={lane} \
                              actual={} expected={} error={error} tolerance={tolerance}",
                             result.values()[lane],
-                            reference[lane]
+                            reference_lane
                         )
                         .into());
                     }

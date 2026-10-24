@@ -82,14 +82,14 @@ fn all_eight_gpu_outputs_match_independent_tensor_reference() {
     for (role, (id, actual)) in results.iter().enumerate() {
         assert_eq!(*id, outputs[role]);
         let expected = reference_project(&x, &p, role).unwrap();
-        for lane in 0..WIDTH {
-            let error = (actual.values()[lane] - expected[lane]).abs();
+        for (lane, &expected_lane) in expected.iter().enumerate() {
+            let error = (actual.values()[lane] - expected_lane).abs();
             assert!(
-                error <= 5e-5 + 2e-5 * expected[lane].abs(),
+                error <= 5e-5 + 2e-5 * expected_lane.abs(),
                 "GPU/Tensor reference differs: role={role} lane={lane} \
                  actual={} expected={} abs_error={error}",
                 actual.values()[lane],
-                expected[lane]
+                expected_lane
             );
         }
     }
@@ -113,8 +113,8 @@ fn persistent_named_execution_reuses_graph_after_new_input_and_parameter() {
     runner.run().unwrap();
     let original = runner.output("role_0").unwrap();
     let expected = reference_project(&x, &p, 0).unwrap();
-    for lane in 0..WIDTH {
-        assert!((original.values()[lane] - expected[lane]).abs() < 5e-5);
+    for (lane, &expected_lane) in expected.iter().enumerate() {
+        assert!((original.values()[lane] - expected_lane).abs() < 5e-5);
     }
 
     x = std::array::from_fn(|i| (i as f32 - 20.0) * 0.02);
@@ -132,9 +132,9 @@ fn persistent_named_execution_reuses_graph_after_new_input_and_parameter() {
     let result = runner.output("role_0").unwrap();
     let expected = reference_project(&x, &p, 0).unwrap();
     assert!((0..WIDTH).any(|i| (result.values()[i] - original.values()[i]).abs() > 1e-5));
-    for lane in 0..WIDTH {
+    for (lane, &expected_lane) in expected.iter().enumerate() {
         assert!(
-            (result.values()[lane] - expected[lane]).abs() < 5e-5,
+            (result.values()[lane] - expected_lane).abs() < 5e-5,
             "role=0 lane={lane}"
         );
     }

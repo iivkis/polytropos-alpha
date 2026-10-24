@@ -332,8 +332,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let read_outputs_ms = timing.elapsed().as_secs_f64() * 1000.;
         let timing = Instant::now();
         let mut total = 0f32;
-        for t in 0..window_len {
-            total += cross_entropy(outputs[t].1.values(), corpus.train[start + t + 1])?.0;
+        for (t, (_, logits)) in outputs.iter().take(window_len).enumerate() {
+            total += cross_entropy(logits.values(), corpus.train[start + t + 1])?.0;
         }
         let ce_ms = timing.elapsed().as_secs_f64() * 1000.;
 
@@ -418,7 +418,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     let eval_dir =
-        PathBuf::from(std::env::temp_dir()).join(format!("vn_ema4_holdout_{}", std::process::id()));
+        std::env::temp_dir().join(format!("vn_ema4_holdout_{}", std::process::id()));
     let validation_start = Instant::now();
     let mut eval = engine.prepare_model(&model, eval_bindings, &eval_dir)?;
     let count = val_limit.min(corpus.validation.len() - 1);
