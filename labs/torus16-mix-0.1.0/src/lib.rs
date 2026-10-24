@@ -171,7 +171,11 @@ pub fn architecture_model() -> Result<Model, ModelError> {
         let mix_gate =
             model.parameter(format!("mix_gate_{role}"), vec![1, WIDTH], Domain::Finite)?;
         let mix_bias = model.parameter(format!("mix_bias_{role}"), vec![1, 1], Domain::Finite)?;
-        let matrix = if role % 2 == 0 { w_transposed } else { w };
+        let matrix = if role.is_multiple_of(2) {
+            w_transposed
+        } else {
+            w
+        };
         let output = model.block(
             "torus16_mix_projection",
             &[
