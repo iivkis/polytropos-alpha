@@ -84,9 +84,7 @@ impl AdamW {
             moments: self
                 .states
                 .iter()
-                .map(|(name, state)| {
-                    (name.clone(), (state.first.clone(), state.second.clone()))
-                })
+                .map(|(name, state)| (name.clone(), (state.first.clone(), state.second.clone())))
                 .collect(),
         }
     }
@@ -114,7 +112,9 @@ impl AdamW {
             || (saved.steps == 0 && !saved.moments.is_empty())
             || (saved.steps > 0 && saved.moments.keys().ne(parameters.keys()))
         {
-            return Err(OptimizerError::Invalid("invalid AdamW checkpoint metadata or keys"));
+            return Err(OptimizerError::Invalid(
+                "invalid AdamW checkpoint metadata or keys",
+            ));
         }
         let mut states = BTreeMap::new();
         for (name, tensor) in parameters {

@@ -7,8 +7,8 @@ use verineural::{
 
 pub mod corpus;
 pub mod ema4;
-pub mod ema4_reference;
 pub mod ema4_checkpoint;
+pub mod ema4_reference;
 
 pub const WIDTH: usize = 48;
 pub const ROLES: usize = 8;
