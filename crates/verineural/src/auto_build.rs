@@ -947,6 +947,12 @@ fn verify_gpu_translation(
             "{label} LLVM differs from current Semantic IR"
         )));
     }
+    let capability = program.capability_plan()?;
+    if fs::read_to_string(directory.join("capability.plan"))? != capability.to_text() {
+        return Err(AutoBuildError::Integrity(format!(
+            "{label} GPU capability plan mismatch"
+        )));
+    }
     let translation = program.translation_plan()?;
     if fs::read_to_string(directory.join("translation.plan"))? != translation.to_text() {
         return Err(AutoBuildError::Integrity(format!(

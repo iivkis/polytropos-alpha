@@ -36,6 +36,7 @@ pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
                 "graph.ptx",
                 "translation.plan",
                 "translation.report",
+                "capability.plan",
             ] {
                 files.push(format!("gpu_{index}/{name}"));
             }
@@ -47,6 +48,7 @@ pub(super) fn artifact_files(plan: &AutoBuildPlan) -> Vec<String> {
             "graph.ptx",
             "translation.plan",
             "translation.report",
+            "capability.plan",
         ] {
             files.push(format!("gpu_shared/{name}"));
         }

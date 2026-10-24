@@ -934,6 +934,8 @@ VeriNeural для **поддерживаемой** семантики:
 
 #### VN-P12 · P1 · Явные возможности backend и семантическая связь с GPU
 
+**Реализованный capability/evidence срез (локальная проверка ожидается):** каждый успешно скомпилированный `GpuProgram` обязан построить `GpuCapabilityPlan`. План fail-closed проверяет соответствие запускаемых kernel roots их `GpuMemoryContract` и `TranslationKernel` по node/reads/writes и объясняет каждый удалённый fusion kernel через `GpuOptimizationCapability`. Для fusion повторно проверяются exclusive reachable use, сохранение selected outputs и допустимая структура IR. `GpuAssuranceBoundary` отдельно фиксирует generated Lean memory obligations, обязательную structural LLVM/PTX validation при lowering, отдельную необходимость numeric proof ideal→FP32, runtime acceptance CUDA и отсутствие установленной JIT/SASS correspondence. `capability.plan` сохраняется в GPU evidence directory, входит в SHA-256 manifest и пересчитывается при offline replay. Developer gate: `task verify-gpu-capabilities`.
+
 - **Изменить:** каждое lowering/optimization правило объявляет supported operations, допустимые типы/формы/профили и требуемые доказательства сохранения семантики. Отдельно документировать ideal→FP32, FP32→GPU IR, LLVM/PTX и JIT/SASS границы. Сохранить обязательные CUDA Graph, non-blocking streams, fail-closed и разрешённый fusion только при проверенных предпосылках. Не обещать theorem о CUDA kernel из доказательства `Int`-эквивалентности.
 - **Приёмка:** точно описанный профиль исполняется с traceable translation/memory evidence; неподдерживаемая операция, профиль или оптимизация не может получить machine/FP32 `proven` из одного только успешного GPU-запуска.
 

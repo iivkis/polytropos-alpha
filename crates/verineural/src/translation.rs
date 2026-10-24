@@ -30,7 +30,7 @@ pub enum TranslationKind {
 }
 
 impl TranslationKind {
-    fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Add => "add",
             Self::Mul => "mul",

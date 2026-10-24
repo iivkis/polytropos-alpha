@@ -62,8 +62,10 @@ pub use certified::{CertifiedBuildConfig, certified_example_main};
 pub use consumer::{BindingError, ComponentBinder, ObligationError};
 pub use error::NeuralError;
 pub use gpu::{
-    Fp32PtxAudit, GpuBenchmark, GpuEngine, GpuError, GpuExecution, GpuLaunchConfig,
-    GpuMemoryContract, GpuMemoryPattern, GpuProgram, ReluFusion, audit_fp32_ptx,
+    Fp32PtxAudit, GpuAssuranceBoundary, GpuAssuranceStatus, GpuBenchmark, GpuCapabilityPlan,
+    GpuEngine, GpuError, GpuExecution, GpuKernelCapability, GpuLaunchConfig, GpuMemoryContract,
+    GpuMemoryPattern, GpuOptimizationCapability, GpuOptimizationKind, GpuProgram, ReluFusion,
+    audit_fp32_ptx,
 };
 pub use ir::{
     ArgMaxTieBreak, ContractClaim, DType, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics,

@@ -226,6 +226,127 @@ pub enum GpuMemoryPattern {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuAssuranceStatus {
+    /// A deterministic Lean obligation is generated, but must still be checked.
+    GeneratedLeanObligation,
+    /// The check is mandatory when LLVM is lowered to PTX.
+    RequiredAtLowering,
+    /// A separate numeric proof/profile is required for this semantic link.
+    SeparateNumericProofRequired,
+    /// This layer is established only by an explicit runtime acceptance test.
+    RuntimeAcceptanceRequired,
+    /// No proof or acceptance claim is currently established.
+    NotEstablished,
+}
+
+impl GpuAssuranceStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GeneratedLeanObligation => "generated-lean-obligation",
+            Self::RequiredAtLowering => "required-at-lowering",
+            Self::SeparateNumericProofRequired => "separate-numeric-proof-required",
+            Self::RuntimeAcceptanceRequired => "runtime-acceptance-required",
+            Self::NotEstablished => "not-established",
+        }
+    }
+}
+
+/// Explicit trust boundary for one GPU capability plan. These are obligations
+/// and verification stages, not claims that every layer has already been proved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuAssuranceBoundary {
+    pub memory_address_arithmetic: GpuAssuranceStatus,
+    pub llvm_ptx_structure: GpuAssuranceStatus,
+    pub ideal_to_fp32: GpuAssuranceStatus,
+    pub cuda_runtime: GpuAssuranceStatus,
+    pub jit_sass_correspondence: GpuAssuranceStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuKernelCapability {
+    pub node: usize,
+    pub operation: &'static str,
+    pub memory_pattern: GpuMemoryPattern,
+    pub translation_kind: TranslationKind,
+    pub reads: Vec<(usize, usize)>,
+    pub writes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuOptimizationKind {
+    ReluProducerFusion,
+    PointwiseBiasReluFusion,
+}
+
+impl GpuOptimizationKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReluProducerFusion => "relu-producer-fusion",
+            Self::PointwiseBiasReluFusion => "pointwise-bias-relu-fusion",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuOptimizationCapability {
+    pub root: usize,
+    pub kind: GpuOptimizationKind,
+    /// Semantic IR nodes whose standalone kernels are removed by the rewrite.
+    pub removed_nodes: Vec<usize>,
+    /// Checked against the reachable graph when the capability plan is built.
+    pub exclusive_reachable_use: bool,
+    /// Selected architecture outputs are never among removed nodes.
+    pub selected_outputs_preserved: bool,
+}
+
+/// Typed explanation of what the GPU compiler can actually lower for this
+/// concrete program. Construction is fail-closed: every launched kernel must
+/// have exactly one matching memory contract and translation rule, and every
+/// removed fusion node must satisfy the recorded structural preconditions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuCapabilityPlan {
+    pub kernels: Vec<GpuKernelCapability>,
+    pub optimizations: Vec<GpuOptimizationCapability>,
+    pub boundary: GpuAssuranceBoundary,
+}
+
+impl GpuCapabilityPlan {
+    pub fn to_text(&self) -> String {
+        let mut text = String::from("verineural-gpu-capability-plan-v1\n");
+        text.push_str(&format!(
+            "memory_address_arithmetic={}\nllvm_ptx_structure={}\nideal_to_fp32={}\ncuda_runtime={}\njit_sass_correspondence={}\n",
+            self.boundary.memory_address_arithmetic.as_str(),
+            self.boundary.llvm_ptx_structure.as_str(),
+            self.boundary.ideal_to_fp32.as_str(),
+            self.boundary.cuda_runtime.as_str(),
+            self.boundary.jit_sass_correspondence.as_str(),
+        ));
+        for kernel in &self.kernels {
+            text.push_str(&format!(
+                "kernel=node:{};op={};memory={:?};translation={};reads={:?};writes={}\n",
+                kernel.node,
+                kernel.operation,
+                kernel.memory_pattern,
+                kernel.translation_kind.name(),
+                kernel.reads,
+                kernel.writes,
+            ));
+        }
+        for optimization in &self.optimizations {
+            text.push_str(&format!(
+                "optimization=root:{};kind={};removed={:?};exclusive_reachable_use={};selected_outputs_preserved={}\n",
+                optimization.root,
+                optimization.kind.as_str(),
+                optimization.removed_nodes,
+                optimization.exclusive_reachable_use,
+                optimization.selected_outputs_preserved,
+            ));
+        }
+        text
+    }
+}
+
 /// A checked, immutable GPU compilation plan. No claims about machine-code proof.
 /// Static inspection of separate, rounded arithmetic in emitted PTX.
 /// This does not establish LLVM translation or machine/SASS correctness.
@@ -772,6 +893,163 @@ impl GpuProgram {
         Ok(TranslationPlan {
             threads_per_block: self.launch.threads_per_block(),
             kernels,
+        })
+    }
+
+    /// Cross-check the concrete lowering profile before it can be called
+    /// supported by higher layers. This validates evidence coverage and fusion
+    /// preconditions only; it does not execute Lean, LLVM, CUDA or the GPU.
+    pub fn capability_plan(&self) -> Result<GpuCapabilityPlan, GpuError> {
+        let contracts = self.memory_contracts()?;
+        let translation = self.translation_plan()?;
+        if contracts.len() != translation.kernels.len() {
+            return Err(GpuError::Fp32PtxRejected {
+                reason: "capability plan kernel/memory coverage mismatch".into(),
+            });
+        }
+
+        let mut kernels = Vec::with_capacity(contracts.len());
+        for (contract, rule) in contracts.iter().zip(&translation.kernels) {
+            if contract.kernel_node != rule.node
+                || contract.reads != rule.reads
+                || contract.writes != rule.writes
+            {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!(
+                        "capability evidence mismatch for kernel node {}",
+                        contract.kernel_node
+                    ),
+                });
+            }
+            kernels.push(GpuKernelCapability {
+                node: contract.kernel_node,
+                operation: self.graph.nodes()[contract.kernel_node].operation.name(),
+                memory_pattern: contract.pattern,
+                translation_kind: rule.kind,
+                reads: contract.reads.clone(),
+                writes: contract.writes,
+            });
+        }
+
+        let skipped = self.skipped_nodes();
+        let launched = kernels.iter().map(|kernel| kernel.node).collect::<BTreeSet<_>>();
+        let expected = self
+            .live_nodes
+            .iter()
+            .copied()
+            .filter(|index| {
+                !skipped.contains(index)
+                    && !matches!(
+                        self.graph.nodes()[*index].operation,
+                        Operation::Input | Operation::Reshape(_)
+                    )
+            })
+            .collect::<BTreeSet<_>>();
+        if launched != expected {
+            return Err(GpuError::Fp32PtxRejected {
+                reason: "capability plan does not cover every launched semantic node".into(),
+            });
+        }
+
+        let mut uses = vec![0usize; self.graph.nodes().len()];
+        for &index in &self.live_nodes {
+            for input in &self.graph.nodes()[index].inputs {
+                uses[input.index()] += 1;
+            }
+        }
+        for output in &self.outputs {
+            uses[output.index()] += 1;
+        }
+        let selected = self
+            .outputs
+            .iter()
+            .map(|id| id.index())
+            .collect::<BTreeSet<_>>();
+        let mut optimizations = Vec::new();
+        let mut covered_removed = BTreeSet::new();
+
+        for (&root, chain) in &self.fused_pointwise_chains {
+            if chain.len() != 2 {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: "fused pointwise chain has invalid length".into(),
+                });
+            }
+            let inner = chain[0];
+            let bias = chain[1];
+            let root_node = &self.graph.nodes()[root];
+            let inner_node = &self.graph.nodes()[inner];
+            let bias_node = &self.graph.nodes()[bias];
+            let exclusive = uses[inner] == 1 && uses[bias] == 1;
+            let preserves = !selected.contains(&inner) && !selected.contains(&bias);
+            let compatible = matches!(root_node.operation, Operation::Relu)
+                && root_node.inputs.len() == 1
+                && root_node.inputs[0].index() == bias
+                && matches!(bias_node.operation, Operation::BiasAdd)
+                && bias_node.inputs[0].index() == inner
+                && matches!(inner_node.operation, Operation::Add | Operation::Mul)
+                && self.fused_relus.get(&root).copied() == Some(bias);
+            if !exclusive || !preserves || !compatible {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid pointwise fusion capability at node {root}"),
+                });
+            }
+            covered_removed.insert(inner);
+            covered_removed.insert(bias);
+            optimizations.push(GpuOptimizationCapability {
+                root,
+                kind: GpuOptimizationKind::PointwiseBiasReluFusion,
+                removed_nodes: chain.clone(),
+                exclusive_reachable_use: true,
+                selected_outputs_preserved: true,
+            });
+        }
+
+        for (&root, &producer) in &self.fused_relus {
+            if self.fused_pointwise_chains.contains_key(&root) {
+                continue;
+            }
+            let root_node = &self.graph.nodes()[root];
+            let producer_node = &self.graph.nodes()[producer];
+            let exclusive = uses[producer] == 1;
+            let preserves = !selected.contains(&producer);
+            let compatible = matches!(root_node.operation, Operation::Relu)
+                && root_node.inputs.len() == 1
+                && root_node.inputs[0].index() == producer
+                && matches!(
+                    producer_node.operation,
+                    Operation::Add | Operation::Mul | Operation::BiasAdd
+                );
+            if !exclusive || !preserves || !compatible {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid relu fusion capability at node {root}"),
+                });
+            }
+            covered_removed.insert(producer);
+            optimizations.push(GpuOptimizationCapability {
+                root,
+                kind: GpuOptimizationKind::ReluProducerFusion,
+                removed_nodes: vec![producer],
+                exclusive_reachable_use: true,
+                selected_outputs_preserved: true,
+            });
+        }
+
+        if covered_removed != skipped {
+            return Err(GpuError::Fp32PtxRejected {
+                reason: "capability plan does not explain every removed fusion kernel".into(),
+            });
+        }
+
+        Ok(GpuCapabilityPlan {
+            kernels,
+            optimizations,
+            boundary: GpuAssuranceBoundary {
+                memory_address_arithmetic: GpuAssuranceStatus::GeneratedLeanObligation,
+                llvm_ptx_structure: GpuAssuranceStatus::RequiredAtLowering,
+                ideal_to_fp32: GpuAssuranceStatus::SeparateNumericProofRequired,
+                cuda_runtime: GpuAssuranceStatus::RuntimeAcceptanceRequired,
+                jit_sass_correspondence: GpuAssuranceStatus::NotEstablished,
+            },
         })
     }
 
@@ -1519,9 +1797,10 @@ impl GpuEngine {
             fused_relus,
             fused_pointwise_chains,
         };
-        // Fail closed on unsupported memory addressing before an LLVM program
-        // or CUDA session can be accepted.
-        program.memory_contracts()?;
+        // Fail closed unless every launched kernel has matching memory and
+        // translation evidence and every applied optimization has valid
+        // structural preconditions.
+        program.capability_plan()?;
         Ok(program)
     }
 
@@ -1569,6 +1848,10 @@ impl GpuEngine {
         };
         fs::write(dir.join("translation.plan"), plan.to_text())?;
         fs::write(dir.join("translation.report"), report.to_text())?;
+        fs::write(
+            dir.join("capability.plan"),
+            program.capability_plan()?.to_text(),
+        )?;
         Ok(ptx)
     }
 
