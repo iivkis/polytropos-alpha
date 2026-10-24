@@ -89,7 +89,7 @@ theorem reverse_coordinate_bound {width lane : Nat}
 theorem reverse_rows2d_address_bound {rows columns index : Nat}
     (positiveRows : 0 < rows)
     (positiveColumns : 0 < columns)
-    (active : index < rows * columns) :
+    (_active : index < rows * columns) :
     (rows - 1 - index / columns) * columns + index % columns <
       rows * columns := by
   have column : index % columns < columns :=
