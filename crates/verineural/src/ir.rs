@@ -893,7 +893,46 @@ pub struct NeuralGraph {
     module_order: Vec<ModuleInstanceKey>,
 }
 
+/// Drop-based append transaction: nested builders can fail or panic without
+/// leaving partial nodes/module invocations. All graph mutations are append-only.
+struct GraphAppendGuard<'a> {
+    graph: &'a mut NeuralGraph,
+    nodes: usize,
+    modules: usize,
+    multi_modules: usize,
+    module_order: usize,
+    committed: bool,
+}
+
+impl Drop for GraphAppendGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.graph.nodes.truncate(self.nodes);
+            self.graph.modules.truncate(self.modules);
+            self.graph.multi_modules.truncate(self.multi_modules);
+            self.graph.module_order.truncate(self.module_order);
+        }
+    }
+}
+
 impl NeuralGraph {
+    fn transaction<T>(
+        &mut self,
+        build: impl FnOnce(&mut NeuralGraph) -> Result<T, NeuralError>,
+    ) -> Result<T, NeuralError> {
+        let mut guard = GraphAppendGuard {
+            nodes: self.nodes.len(),
+            modules: self.modules.len(),
+            multi_modules: self.multi_modules.len(),
+            module_order: self.module_order.len(),
+            graph: self,
+            committed: false,
+        };
+        let result = build(&mut *guard.graph);
+        guard.committed = result.is_ok();
+        result
+    }
+
     pub fn new(policy: FP32Policy) -> Self {
         Self {
             identity: NEXT_GRAPH_ID.fetch_add(1, Ordering::Relaxed),
@@ -1277,8 +1316,8 @@ impl NeuralGraph {
         self.apply_module_with(name, semantic_version, contract, inputs, build)
     }
 
-    /// Validate the module interface, build in a clone, then commit atomically.
-    /// Failed modules never leave partially appended nodes behind.
+    /// Validate the interface, then append transactionally. Failed bodies (or
+    /// caught panics) roll back all added nodes and nested module metadata.
     pub fn apply_module<M: NeuralModule>(
         &mut self,
         module: &M,
@@ -1336,52 +1375,52 @@ impl NeuralGraph {
         let body_start = self.nodes.len();
         let module_start = self.modules.len();
         let multi_start = self.multi_modules.len();
-        let mut candidate = self.clone();
-        let output = build(&mut candidate, inputs)?;
-        candidate.validate_body(
-            body_start,
-            module_start,
-            multi_start,
-            inputs,
-            &[output],
-            name,
-        )?;
-        let actual = candidate.node(output)?;
-        if actual.shape != contract.ensures.shape {
-            return Err(NeuralError::ShapeMismatch {
-                expected: contract.ensures.shape.clone(),
-                actual: actual.shape.clone(),
+        self.transaction(|candidate| {
+            let output = build(candidate, inputs)?;
+            candidate.validate_body(
+                body_start,
+                module_start,
+                multi_start,
+                inputs,
+                &[output],
+                name,
+            )?;
+            let actual = candidate.node(output)?;
+            if actual.shape != contract.ensures.shape {
+                return Err(NeuralError::ShapeMismatch {
+                    expected: contract.ensures.shape.clone(),
+                    actual: actual.shape.clone(),
+                });
+            }
+            if actual.dtype != contract.ensures.dtype {
+                return Err(NeuralError::DTypeMismatch {
+                    operation: "module_output",
+                    expected: contract.ensures.dtype,
+                    actual: actual.dtype,
+                });
+            }
+            if !actual.domain.satisfies(contract.ensures.domain) {
+                return Err(NeuralError::DomainNotEstablished {
+                    required: contract.ensures.domain,
+                    actual: actual.domain,
+                });
+            }
+            let body_end = candidate.nodes.len();
+            let module_index = candidate.modules.len();
+            candidate.modules.push(ModuleInvocation {
+                name,
+                inputs: inputs.to_vec(),
+                body_start,
+                body_end,
+                output,
+                contract: contract.clone(),
+                semantic_version,
             });
-        }
-        if actual.dtype != contract.ensures.dtype {
-            return Err(NeuralError::DTypeMismatch {
-                operation: "module_output",
-                expected: contract.ensures.dtype,
-                actual: actual.dtype,
-            });
-        }
-        if !actual.domain.satisfies(contract.ensures.domain) {
-            return Err(NeuralError::DomainNotEstablished {
-                required: contract.ensures.domain,
-                actual: actual.domain,
-            });
-        }
-        let body_end = candidate.nodes.len();
-        let module_index = candidate.modules.len();
-        candidate.modules.push(ModuleInvocation {
-            name,
-            inputs: inputs.to_vec(),
-            body_start,
-            body_end,
-            output,
-            contract: contract.clone(),
-            semantic_version,
-        });
-        candidate
-            .module_order
-            .push(ModuleInstanceKey::Single(module_index));
-        *self = candidate;
-        Ok(output)
+            candidate
+                .module_order
+                .push(ModuleInstanceKey::Single(module_index));
+            Ok(output)
+        })
     }
 
     /// Structural composition without a caller-written duplicate MathContract.
@@ -1411,37 +1450,37 @@ impl NeuralGraph {
         let body_start = self.nodes.len();
         let module_start = self.modules.len();
         let multi_start = self.multi_modules.len();
-        let mut candidate = self.clone();
-        let output = build(&mut candidate, inputs)?;
-        candidate.validate_body(
-            body_start,
-            module_start,
-            multi_start,
-            inputs,
-            &[output],
-            name,
-        )?;
-        let result = candidate.node(output)?;
-        let contract = MathContract::new(
-            requires,
-            PortContract::typed(result.shape.clone(), result.dtype, result.domain),
-        );
-        let module_index = candidate.modules.len();
-        let body_end = candidate.nodes.len();
-        candidate.modules.push(ModuleInvocation {
-            name,
-            inputs: inputs.to_vec(),
-            body_start,
-            body_end,
-            output,
-            contract,
-            semantic_version,
-        });
-        candidate
-            .module_order
-            .push(ModuleInstanceKey::Single(module_index));
-        *self = candidate;
-        Ok(output)
+        self.transaction(|candidate| {
+            let output = build(candidate, inputs)?;
+            candidate.validate_body(
+                body_start,
+                module_start,
+                multi_start,
+                inputs,
+                &[output],
+                name,
+            )?;
+            let result = candidate.node(output)?;
+            let contract = MathContract::new(
+                requires,
+                PortContract::typed(result.shape.clone(), result.dtype, result.domain),
+            );
+            let module_index = candidate.modules.len();
+            let body_end = candidate.nodes.len();
+            candidate.modules.push(ModuleInvocation {
+                name,
+                inputs: inputs.to_vec(),
+                body_start,
+                body_end,
+                output,
+                contract,
+                semantic_version,
+            });
+            candidate
+                .module_order
+                .push(ModuleInstanceKey::Single(module_index));
+            Ok(output)
+        })
     }
 
     /// Infer an atomic named multi-output block from its semantic IR.
@@ -1493,60 +1532,60 @@ impl NeuralGraph {
         let body_start = self.nodes.len();
         let module_start = self.modules.len();
         let multi_start = self.multi_modules.len();
-        let mut candidate = self.clone();
-        let outputs = build(&mut candidate, &input_ids)?;
-        if outputs.len() != output_names.len() {
-            return Err(NeuralError::ContractViolation {
-                module: name,
-                detail: "incorrect inferred multi-output result count",
+        self.transaction(|candidate| {
+            let outputs = build(candidate, &input_ids)?;
+            if outputs.len() != output_names.len() {
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "incorrect inferred multi-output result count",
+                });
+            }
+            candidate.validate_body(
+                body_start,
+                module_start,
+                multi_start,
+                &input_ids,
+                &outputs,
+                name,
+            )?;
+            if outputs
+                .iter()
+                .map(|id| id.index())
+                .collect::<BTreeSet<_>>()
+                .len()
+                != outputs.len()
+            {
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "duplicate inferred multi-output identity",
+                });
+            }
+            let ensures = outputs
+                .iter()
+                .zip(output_names)
+                .map(|(&id, &label)| {
+                    let value = candidate.node(id)?;
+                    Ok(NamedPortContract::new(
+                        label,
+                        PortContract::typed(value.shape.clone(), value.dtype, value.domain),
+                    ))
+                })
+                .collect::<Result<Vec<_>, NeuralError>>()?;
+            let module_index = candidate.multi_modules.len();
+            candidate.multi_modules.push(MultiModuleInvocation {
+                name,
+                semantic_version,
+                inputs: input_ids,
+                body_start,
+                body_end: candidate.nodes.len(),
+                outputs: outputs.clone(),
+                contract: MultiOutputContract::new(requires, ensures),
             });
-        }
-        candidate.validate_body(
-            body_start,
-            module_start,
-            multi_start,
-            &input_ids,
-            &outputs,
-            name,
-        )?;
-        if outputs
-            .iter()
-            .map(|id| id.index())
-            .collect::<BTreeSet<_>>()
-            .len()
-            != outputs.len()
-        {
-            return Err(NeuralError::ContractViolation {
-                module: name,
-                detail: "duplicate inferred multi-output identity",
-            });
-        }
-        let ensures = outputs
-            .iter()
-            .zip(output_names)
-            .map(|(&id, &label)| {
-                let value = candidate.node(id)?;
-                Ok(NamedPortContract::new(
-                    label,
-                    PortContract::typed(value.shape.clone(), value.dtype, value.domain),
-                ))
-            })
-            .collect::<Result<Vec<_>, NeuralError>>()?;
-        let module_index = candidate.multi_modules.len();
-        candidate.multi_modules.push(MultiModuleInvocation {
-            name,
-            semantic_version,
-            inputs: input_ids,
-            body_start,
-            body_end: candidate.nodes.len(),
-            outputs: outputs.clone(),
-            contract: MultiOutputContract::new(requires, ensures),
-        });
-        candidate
-            .module_order
-            .push(ModuleInstanceKey::Multi(module_index));
-        *self = candidate;
-        Ok(outputs)
+            candidate
+                .module_order
+                .push(ModuleInstanceKey::Multi(module_index));
+            Ok(outputs)
+        })
     }
 
     /// Unroll a statically bounded state transition, without introducing a
@@ -1600,22 +1639,22 @@ impl NeuralGraph {
         for &input in inputs {
             self.node(input)?;
         }
-        let mut candidate = self.clone();
-        let mut states = vec![initial_state];
-        let mut outputs = Vec::with_capacity(inputs.len());
-        let mut module_indices = Vec::with_capacity(inputs.len());
-        for &input in inputs {
-            let state = *states.last().expect("initialized with initial_state");
-            let result = candidate.apply_multi_module(transition, &[state, input])?;
-            module_indices.push(candidate.multi_modules.len() - 1);
-            states.push(result[0]);
-            outputs.push(result[1]);
-        }
-        *self = candidate;
-        Ok(FixedScan {
-            states,
-            outputs,
-            module_indices,
+        self.transaction(|candidate| {
+            let mut states = vec![initial_state];
+            let mut outputs = Vec::with_capacity(inputs.len());
+            let mut module_indices = Vec::with_capacity(inputs.len());
+            for &input in inputs {
+                let state = *states.last().expect("initialized with initial_state");
+                let result = candidate.apply_multi_module(transition, &[state, input])?;
+                module_indices.push(candidate.multi_modules.len() - 1);
+                states.push(result[0]);
+                outputs.push(result[1]);
+            }
+            Ok(FixedScan {
+                states,
+                outputs,
+                module_indices,
+        })
         })
     }
 
@@ -1709,76 +1748,134 @@ impl NeuralGraph {
         let body_start = self.nodes.len();
         let module_start = self.modules.len();
         let multi_start = self.multi_modules.len();
-        let mut candidate = self.clone();
-        let outputs = build(&mut candidate, inputs)?;
-        if outputs.len() != contract.outputs.len() {
-            return Err(NeuralError::ContractViolation {
-                module: name,
-                detail: "incorrect multi-output result count",
+        self.transaction(|candidate| {
+            let outputs = build(candidate, inputs)?;
+            if outputs.len() != contract.outputs.len() {
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "incorrect multi-output result count",
+                });
+            }
+            candidate.validate_body(
+                body_start,
+                module_start,
+                multi_start,
+                inputs,
+                &outputs,
+                name,
+            )?;
+            if outputs
+                .iter()
+                .map(|id| id.index())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != outputs.len()
+            {
+                return Err(NeuralError::ContractViolation {
+                    module: name,
+                    detail: "duplicate output identity",
+                });
+            }
+            for (&id, port) in outputs.iter().zip(&contract.outputs) {
+                let node = candidate.node(id)?;
+                if node.shape != port.port.shape {
+                    return Err(NeuralError::ShapeMismatch {
+                        expected: port.port.shape.clone(),
+                        actual: node.shape.clone(),
+                    });
+                }
+                if node.dtype != port.port.dtype {
+                    return Err(NeuralError::DTypeMismatch {
+                        operation: "multi_module_output",
+                        expected: port.port.dtype,
+                        actual: node.dtype,
+                    });
+                }
+                if !node.domain.satisfies(port.port.domain) {
+                    return Err(NeuralError::DomainNotEstablished {
+                        required: port.port.domain,
+                        actual: node.domain,
+                    });
+                }
+            }
+            let module_index = candidate.multi_modules.len();
+            candidate.multi_modules.push(MultiModuleInvocation {
+                name,
+                semantic_version,
+                inputs: inputs.to_vec(),
+                body_start,
+                body_end: candidate.nodes.len(),
+                outputs: outputs.clone(),
+                contract: contract.clone(),
             });
-        }
-        candidate.validate_body(
-            body_start,
-            module_start,
-            multi_start,
-            inputs,
-            &outputs,
-            name,
-        )?;
-        if outputs
-            .iter()
-            .map(|id| id.index())
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != outputs.len()
-        {
-            return Err(NeuralError::ContractViolation {
-                module: name,
-                detail: "duplicate output identity",
-            });
-        }
-        for (&id, port) in outputs.iter().zip(&contract.outputs) {
-            let node = candidate.node(id)?;
-            if node.shape != port.port.shape {
-                return Err(NeuralError::ShapeMismatch {
-                    expected: port.port.shape.clone(),
-                    actual: node.shape.clone(),
-                });
-            }
-            if node.dtype != port.port.dtype {
-                return Err(NeuralError::DTypeMismatch {
-                    operation: "multi_module_output",
-                    expected: port.port.dtype,
-                    actual: node.dtype,
-                });
-            }
-            if !node.domain.satisfies(port.port.domain) {
-                return Err(NeuralError::DomainNotEstablished {
-                    required: port.port.domain,
-                    actual: node.domain,
-                });
-            }
-        }
-        let module_index = candidate.multi_modules.len();
-        candidate.multi_modules.push(MultiModuleInvocation {
-            name,
-            semantic_version,
-            inputs: inputs.to_vec(),
-            body_start,
-            body_end: candidate.nodes.len(),
-            outputs: outputs.clone(),
-            contract: contract.clone(),
-        });
-        candidate
-            .module_order
-            .push(ModuleInstanceKey::Multi(module_index));
-        *self = candidate;
-        Ok(outputs)
+            candidate
+                .module_order
+                .push(ModuleInstanceKey::Multi(module_index));
+            Ok(outputs)
+        })
     }
 }
 
 impl Default for NeuralGraph {
     fn default() -> Self {
         Self::new(FP32Policy::strict())
+    }
+}
+
+
+#[cfg(test)]
+mod graph_append_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn failed_parent_rolls_back_successful_nested_multi_module() {
+        let mut graph = NeuralGraph::default();
+        let source = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        let original_nodes = graph.nodes().len();
+        let original_modules = graph.modules().len();
+        let original_multi = graph.multi_modules().len();
+        let original_order = graph.module_instances().count();
+        let failure = graph.compose_inferred("parent", "1", &[source], |candidate, inputs| {
+            let results = candidate.compose_multi_inferred(
+                "child",
+                "1",
+                &[("value", inputs[0])],
+                &["a", "b"],
+                |nested, ports| {
+                    let first = nested.relu(ports[0])?;
+                    let second = nested.add(first, ports[0])?;
+                    Ok(vec![first, second])
+                },
+            )?;
+            let _ = candidate.mul(results[0], results[1])?;
+            Err(NeuralError::InvalidNode)
+        });
+        assert!(matches!(failure, Err(NeuralError::InvalidNode)));
+        assert_eq!(graph.nodes().len(), original_nodes);
+        assert_eq!(graph.modules().len(), original_modules);
+        assert_eq!(graph.multi_modules().len(), original_multi);
+        assert_eq!(graph.module_instances().count(), original_order);
+        // Failed transactions may reuse their former numeric positions.
+        let next = graph.relu(source).unwrap();
+        assert_eq!(next.index(), original_nodes);
+    }
+
+    #[test]
+    fn caught_panic_rolls_back_all_appended_graph_data() {
+        let mut graph = NeuralGraph::default();
+        let source = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        let old_len = graph.nodes().len();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = graph.compose_inferred("panic", "1", &[source], |candidate, inputs| {
+                let _ = candidate.relu(inputs[0])?;
+                panic!("intentional append transaction rollback test");
+            });
+        }));
+        assert!(panic.is_err());
+        assert_eq!(graph.nodes().len(), old_len);
+        assert!(graph.modules().is_empty());
+        assert!(graph.multi_modules().is_empty());
+        assert_eq!(graph.module_instances().count(), 0);
+        assert!(graph.relu(source).is_ok());
     }
 }
