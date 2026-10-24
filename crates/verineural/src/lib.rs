@@ -78,7 +78,7 @@ pub use modules::{Dense, ResidualAdd, ResidualFfn};
 pub use numeric::{
     ExactFp32Plan, NumericError, RneConditionEvidence, RneErrorContract, RneFp32Plan,
     RneFp32Trace, RneModuleErrorContract, RneRangePlan, RneSelectEvidence, RneSelectPlan,
-    RneThresholdEvidence, RneThresholdSide,
+    RneStateRolloutPlan, RneStateStepContract, RneThresholdEvidence, RneThresholdSide,
 };
 pub use primitive::{PointwiseExpr, PointwiseSpec, PrimitiveExpr, PrimitiveSpec};
 pub use proof::{

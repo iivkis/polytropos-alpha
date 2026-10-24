@@ -186,6 +186,13 @@ tasks:
       - cargo test -p verineural --test numeric_branch
       - cargo test -p verineural --test numeric_branch -- --ignored
 
+  verify-numeric-state:
+    desc: Check P1 fixed-horizon recurrent RNE contract carry and invariant state q scale
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test numeric_state
+      - cargo test -p verineural --test numeric_state -- --ignored
+
   lab-stage9:
     desc: Build Stage 9 independent coupled-field research lab, Lean, CUDA Graph and DOT/PNG evidence
     deps: [prepare]

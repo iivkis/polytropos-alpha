@@ -1706,6 +1706,141 @@ pub struct RneSelectPlan {
     no_plan: RneRangePlan,
 }
 
+/// One fixed recurrent step in the numerical contract rollout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RneStateStepContract {
+    step: usize,
+    input_state: RneErrorContract,
+    output_state: RneErrorContract,
+}
+
+impl RneStateStepContract {
+    pub fn step(&self) -> usize {
+        self.step
+    }
+
+    pub fn input_state(&self) -> RneErrorContract {
+        self.input_state
+    }
+
+    pub fn output_state(&self) -> RneErrorContract {
+        self.output_state
+    }
+}
+
+/// Fixed-horizon recurrent numerical composition for one explicit state input.
+/// Fresh non-state sources are exact dyadic inputs at every step. The feedback
+/// state carries the previous step's epsilon and bound. This deliberately
+/// requires an invariant q scale; transitions that change the state lattice
+/// fail closed instead of silently rescaling temporal state.
+#[derive(Clone, Debug)]
+pub struct RneStateRolloutPlan {
+    state: NodeId,
+    next_state: NodeId,
+    initial_state: RneErrorContract,
+    steps: Vec<RneStateStepContract>,
+    plans: Vec<RneRangePlan>,
+}
+
+impl RneStateRolloutPlan {
+    pub fn compile_fixed(
+        graph: &NeuralGraph,
+        state: NodeId,
+        next_state: NodeId,
+        source_fraction_bits: u32,
+        source_bound_ticks: i64,
+        horizon: usize,
+    ) -> Result<Self, NumericError> {
+        let state_node = graph.node(state)?;
+        let next_node = graph.node(next_state)?;
+        if !matches!(state_node.operation, Operation::Input) {
+            return Err(NumericError::InvalidInput {
+                node: state.index(),
+                reason: "RNE recurrent state must be an Input node",
+            });
+        }
+        if state_node.shape != next_node.shape || state_node.dtype != next_node.dtype {
+            return Err(NumericError::InvalidInput {
+                node: next_state.index(),
+                reason: "RNE recurrent next_state must preserve state shape and dtype",
+            });
+        }
+
+        let initial_state =
+            RneRangePlan::compile(graph, state, source_fraction_bits, source_bound_ticks)?
+                .output_contract();
+        let mut input_state = initial_state;
+        let mut steps = Vec::with_capacity(horizon);
+        let mut plans = Vec::with_capacity(horizon);
+
+        for step in 0..horizon {
+            let plan = RneRangePlan::compile_with_source_contracts(
+                graph,
+                next_state,
+                source_fraction_bits,
+                source_bound_ticks,
+                &[(state, input_state)],
+            )?;
+            let output_state = plan.output_contract();
+            if output_state.fraction_bits != source_fraction_bits {
+                return Err(NumericError::InvalidInput {
+                    node: next_state.index(),
+                    reason: "RNE recurrent feedback changes the state q scale",
+                });
+            }
+            steps.push(RneStateStepContract {
+                step,
+                input_state,
+                output_state,
+            });
+            input_state = output_state;
+            plans.push(plan);
+        }
+
+        Ok(Self {
+            state,
+            next_state,
+            initial_state,
+            steps,
+            plans,
+        })
+    }
+
+    pub fn state(&self) -> NodeId {
+        self.state
+    }
+
+    pub fn next_state(&self) -> NodeId {
+        self.next_state
+    }
+
+    pub fn initial_contract(&self) -> RneErrorContract {
+        self.initial_state
+    }
+
+    pub fn steps(&self) -> &[RneStateStepContract] {
+        &self.steps
+    }
+
+    pub fn final_contract(&self) -> RneErrorContract {
+        self.steps
+            .last()
+            .map(RneStateStepContract::output_state)
+            .unwrap_or(self.initial_state)
+    }
+
+    pub fn step_plan(&self, step: usize) -> Option<&RneRangePlan> {
+        self.plans.get(step)
+    }
+
+    /// Each source is a standalone Lean program for one conditional step.
+    /// The Rust rollout guarantees adjacent numeric contracts match exactly;
+    /// arbitrary-horizon induction is intentionally not claimed here.
+    pub fn lean_sources(&self) -> Result<Vec<String>, NumericError> {
+        self.plans.iter().map(RneRangePlan::lean_source).collect()
+    }
+}
+
 impl RneSelectPlan {
     pub fn compile(
         graph: &NeuralGraph,
@@ -1985,6 +2120,27 @@ impl RneRangePlan {
         source_fraction_bits: u32,
         source_bound_ticks: i64,
     ) -> Result<Self, NumericError> {
+        Self::compile_with_source_contracts(
+            graph,
+            output,
+            source_fraction_bits,
+            source_bound_ticks,
+            &[],
+        )
+    }
+
+    /// Compile the same range plan while replacing selected reachable Input
+    /// nodes with already-established ApproxContracts. This is the primitive
+    /// needed for recurrent error composition: a previous next_state contract
+    /// becomes the current state source contract, while all other sources keep
+    /// the exact default bound for this step.
+    pub fn compile_with_source_contracts(
+        graph: &NeuralGraph,
+        output: NodeId,
+        source_fraction_bits: u32,
+        source_bound_ticks: i64,
+        source_contracts: &[(NodeId, RneErrorContract)],
+    ) -> Result<Self, NumericError> {
         if source_bound_ticks < 0 {
             return Err(NumericError::InvalidInput {
                 node: output.index(),
@@ -1992,6 +2148,45 @@ impl RneRangePlan {
             });
         }
         let base = RneFp32Plan::compile(graph, output, source_fraction_bits)?;
+        let mut overrides = BTreeMap::<usize, RneErrorContract>::new();
+        for &(source, contract) in source_contracts {
+            let node = graph.node(source)?;
+            if !matches!(node.operation, Operation::Input) || !base.inputs.contains(&source) {
+                return Err(NumericError::InvalidInput {
+                    node: source.index(),
+                    reason: "RNE source override must name a reachable Input",
+                });
+            }
+            if contract.fraction_bits != source_fraction_bits {
+                return Err(NumericError::InvalidInput {
+                    node: source.index(),
+                    reason: "RNE source override must use the plan source q scale",
+                });
+            }
+            let expected_actual = contract
+                .ideal_bound_ticks
+                .checked_add(contract.epsilon_ticks)
+                .ok_or(NumericError::InvalidInput {
+                    node: source.index(),
+                    reason: "RNE source override bound overflow",
+                })?;
+            if contract.ideal_bound_ticks < 0
+                || contract.epsilon_ticks < 0
+                || contract.actual_bound_ticks != expected_actual
+            {
+                return Err(NumericError::InvalidInput {
+                    node: source.index(),
+                    reason: "RNE source override is not a well-formed ApproxContract bound",
+                });
+            }
+            if overrides.insert(source.index(), contract).is_some() {
+                return Err(NumericError::InvalidInput {
+                    node: source.index(),
+                    reason: "duplicate RNE source override",
+                });
+            }
+        }
+
         let mut contracts = BTreeMap::<usize, RneErrorContract>::new();
         let mut rules = BTreeMap::<usize, RneRangeRule>::new();
 
@@ -2009,7 +2204,7 @@ impl RneRangePlan {
             let trace = match node.operation {
                 Operation::Input => {
                     rules.insert(index, RneRangeRule::Input);
-                    source_contract()?
+                    overrides.get(&index).copied().map(Ok).unwrap_or_else(source_contract)?
                 }
                 Operation::Add | Operation::BiasAdd => {
                     let left = contracts[&node.inputs[0].index()];
