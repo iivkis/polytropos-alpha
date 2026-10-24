@@ -1,0 +1,7 @@
+verineural-gpu-capability-plan-v1
+memory_address_arithmetic=generated-lean-obligation
+llvm_ptx_structure=required-at-lowering
+ideal_to_fp32=separate-numeric-proof-required
+cuda_runtime=runtime-acceptance-required
+jit_sass_correspondence=not-established
+kernel=node:1;op=argmax;memory=ArgMaxLast { width: 4 };translation=argmax_last;reads=[(0, 8)];writes=2
