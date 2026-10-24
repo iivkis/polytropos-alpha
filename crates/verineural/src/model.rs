@@ -349,6 +349,10 @@ impl Model {
         self.sources.get(name).copied()
     }
 
+    pub(crate) fn sources(&self) -> &BTreeMap<String, (NodeId, SourceRole)> {
+        &self.sources
+    }
+
     pub fn outputs(&self) -> &BTreeMap<String, NodeId> {
         &self.outputs
     }

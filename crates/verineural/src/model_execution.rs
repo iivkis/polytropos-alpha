@@ -1,5 +1,6 @@
 //! Named GPU execution over the one Semantic Neural IR and the existing
 //! CUDA Graph runtime. State feedback is an explicit on-device transfer.
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
@@ -75,8 +76,10 @@ fn execution_roots_with_states(
 /// Maintains parameter and state buffers between replays. No extra IR is
 /// introduced; every step is the same compiled pure graph followed by
 /// explicit device-to-device state assignment.
-pub struct ModelExecution<'m> {
-    model: &'m Model,
+pub struct ModelExecution {
+    sources: BTreeMap<String, (NodeId, SourceRole)>,
+    outputs: BTreeMap<String, NodeId>,
+    state_links: BTreeMap<String, NodeId>,
     gpu: GpuExecution,
 }
 
@@ -84,12 +87,12 @@ impl GpuEngine {
     /// Requires a complete named initial binding, then compiles all public
     /// outputs and next-state roots into a shared CUDA Graph.
     /// Any unsupported GPU operation fails closed before the CUDA session.
-    pub fn prepare_model<'m, K: Into<String>>(
+    pub fn prepare_model<K: Into<String>>(
         &self,
-        model: &'m Model,
+        model: &Model,
         bindings: impl IntoIterator<Item = (K, Tensor<f32>)>,
         output_dir: &Path,
-    ) -> Result<ModelExecution<'m>, ModelExecutionError> {
+    ) -> Result<ModelExecution, ModelExecutionError> {
         let values = model.bind(bindings)?;
         let (roots, links) = execution_roots_with_states(model)?;
         let program = self.compile_outputs(model.graph(), &roots)?;
@@ -105,17 +108,22 @@ impl GpuEngine {
         // Check the full D2D plan before the first step and allocate stable
         // device snapshots for public outputs that alias writable state.
         gpu.configure_model_feedback(&public, &links)?;
-        Ok(ModelExecution { model, gpu })
+        Ok(ModelExecution {
+            sources: model.sources().clone(),
+            outputs: model.outputs().clone(),
+            state_links: model.state_links().clone(),
+            gpu,
+        })
     }
 }
 
-impl ModelExecution<'_> {
+impl ModelExecution {
     fn named_source(
         &self,
         name: &str,
         expected: SourceRole,
     ) -> Result<NodeId, ModelExecutionError> {
-        match self.model.source(name) {
+        match self.sources.get(name).copied() {
             Some((node, role)) if role == expected => Ok(node),
             Some((_, actual)) => Err(ModelExecutionError::Invalid(format!(
                 "{name} is {}, expected {}",
@@ -172,8 +180,7 @@ impl ModelExecution<'_> {
         // any state input (including zero-copy reshape aliases).
         self.gpu.snapshot_outputs()?;
         let links = self
-            .model
-            .state_links()
+            .state_links
             .iter()
             .map(|(name, next)| {
                 self.named_source(name, SourceRole::State)
@@ -186,8 +193,9 @@ impl ModelExecution<'_> {
     /// Read a public named output after run()/step().
     pub fn output(&mut self, name: &str) -> Result<Tensor<f32>, ModelExecutionError> {
         let id = self
-            .model
-            .output(name)
+            .outputs
+            .get(name)
+            .copied()
             .ok_or_else(|| ModelExecutionError::Invalid(format!("unknown output: {name}")))?;
         Ok(self.gpu.read_selected_output(id)?)
     }

@@ -1,7 +1,7 @@
 //! Two 64x64 rotating cores, a trainable eight-action router, and a sequential
 //! recurrent state. The computational graphs are defined using the public
 //! VeriNeural API; host code owns tokenizer/dataset, discrete action sampling,
-//! parameter updates, and the boundary between successive graph replays.
+//! parameter updates, and stochastic route sampling. Deterministic state feedback stays on GPU.
 //!
 //! The evidence model and deterministic runtime share one Semantic IR containing
 //! the rotation bank and first-tie selection. Stochastic training remains an
@@ -13,8 +13,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use verineural::{
-    ArgMaxTieBreak, Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError, NeuralError,
-    NeuralGraph, NodeId, Shape, Tensor,
+    ArgMaxTieBreak, Domain, GpuEngine, GpuExecution, Model, ModelBuilder, ModelError,
+    ModelExecution, NeuralError, NeuralGraph, NodeId, Shape, Tensor,
 };
 
 pub const WIDTH: usize = 64;
@@ -492,7 +492,7 @@ impl Parameters {
 /// not a hidden CPU implementation of the same neural forward pass.
 pub struct Runner {
     pub models: Architectures,
-    deterministic: GpuExecution,
+    deterministic: ModelExecution,
     core: GpuExecution,
     router: GpuExecution,
     head: GpuExecution,
@@ -502,18 +502,12 @@ impl Runner {
         let workspace = ArtifactWorkspace::new()?;
         let models = Architectures::new()?;
         let gpu = GpuEngine::default();
-        let deterministic_outputs = [
-            models.architecture.output("router_logits").unwrap(),
-            models.architecture.output("next_state").unwrap(),
-            models.architecture.output("normalized_result").unwrap(),
-        ];
-        let deterministic_program =
-            gpu.compile_outputs(models.architecture.graph(), &deterministic_outputs)?;
-        // Deterministic inference is the same graph that is certified: router
-        // ArgMax, rotation bank, Take, transition and readout stay on-device.
-        let deterministic = gpu.prepare(
-            &deterministic_program,
-            &models.architecture.bind([
+        // P1 named state execution owns the runtime metadata copied from the
+        // model, so Runner can own both without self-referential lifetimes.
+        // The CUDA Graph is captured once; state feedback is D2D after step().
+        let deterministic = gpu.prepare_model(
+            &models.architecture,
+            [
                 (
                     "dictionary_state",
                     Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
@@ -542,7 +536,7 @@ impl Runner {
                     Tensor::from_slice([WIDTH, 1], &p.head)?,
                 ),
                 ("head_bias", Tensor::from_slice([1], &[p.head_bias])?),
-            ])?,
+            ],
             &workspace.path().join("deterministic"),
         )?;
         let core_program = gpu.compile(
@@ -694,77 +688,70 @@ impl Runner {
         let dict = dictionary.state(&tokens);
         let mut state = [0f32; WIDTH];
         let mut decisions = Vec::with_capacity(tokens.len());
-        let logits_id = self.models.architecture.output("router_logits").unwrap();
-        let next_id = self.models.architecture.output("next_state").unwrap();
-        let scalar_id = self
-            .models
-            .architecture
-            .output("normalized_result")
-            .unwrap();
-        let mut normalized = 0.0f32;
+
+        // Parameters and sequence-wide dictionary features are uploaded once
+        // per forward call. Per token only token_bits changes; state feedback
+        // stays on-device through ModelExecution::step().
+        self.deterministic.set_input(
+            "dictionary_state",
+            &Tensor::from_slice([1, WIDTH], &dict)?,
+        )?;
+        self.deterministic.set_state(
+            "recurrent_state",
+            &Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
+        )?;
+        self.deterministic.set_parameter(
+            "router_weights",
+            &Tensor::from_slice([WIDTH, ACTIONS], &p.router)?,
+        )?;
+        self.deterministic.set_parameter(
+            "router_bias",
+            &Tensor::from_slice([ACTIONS], &p.router_bias)?,
+        )?;
+        self.deterministic.set_parameter(
+            "core0",
+            &Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?,
+        )?;
+        self.deterministic.set_parameter(
+            "core1",
+            &Tensor::from_slice([WIDTH, WIDTH], &p.cores[1])?,
+        )?;
+        self.deterministic.set_parameter(
+            "core_bias",
+            &Tensor::from_slice([WIDTH], &p.core_bias)?,
+        )?;
+        self.deterministic.set_parameter(
+            "head_weights",
+            &Tensor::from_slice([WIDTH, 1], &p.head)?,
+        )?;
+        self.deterministic.set_parameter(
+            "head_bias",
+            &Tensor::from_slice([1], &[p.head_bias])?,
+        )?;
 
         for &token in &tokens {
             let features = std::array::from_fn(|i| dict[i] + state[i]);
-            let values = self.models.architecture.bind([
-                ("dictionary_state", Tensor::from_slice([1, WIDTH], &dict)?),
-                (
-                    "recurrent_state",
-                    Tensor::from_slice([1, WIDTH], &state)?,
-                ),
-                (
-                    "token_bits",
-                    Tensor::from_slice([1, WIDTH], &Dictionary::bits(token))?,
-                ),
-                (
-                    "router_weights",
-                    Tensor::from_slice([WIDTH, ACTIONS], &p.router)?,
-                ),
-                (
-                    "router_bias",
-                    Tensor::from_slice([ACTIONS], &p.router_bias)?,
-                ),
-                ("core0", Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?),
-                ("core1", Tensor::from_slice([WIDTH, WIDTH], &p.cores[1])?),
-                ("core_bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
-                (
-                    "head_weights",
-                    Tensor::from_slice([WIDTH, 1], &p.head)?,
-                ),
-                ("head_bias", Tensor::from_slice([1], &[p.head_bias])?),
-            ])?;
-            self.deterministic.update_inputs(&values)?;
-            self.deterministic.replay()?;
-            let outputs = self.deterministic.read_outputs()?;
+            self.deterministic.set_input(
+                "token_bits",
+                &Tensor::from_slice([1, WIDTH], &Dictionary::bits(token))?,
+            )?;
+            self.deterministic.step()?;
 
-            let mut logits = None;
-            let mut next = None;
-            let mut scalar = None;
-            for (id, tensor) in outputs {
-                if id == logits_id {
-                    logits = Some(
-                        tensor
-                            .values()
-                            .try_into()
-                            .map_err(|_| LabError("router shape".into()))?,
-                    );
-                } else if id == next_id {
-                    next = Some(
-                        tensor
-                            .values()
-                            .try_into()
-                            .map_err(|_| LabError("core shape".into()))?,
-                    );
-                } else if id == scalar_id {
-                    scalar = tensor.values().first().copied();
-                }
-            }
-            let logits: [f32; ACTIONS] =
-                logits.ok_or_else(|| LabError("missing router output".into()))?;
-            state = next.ok_or_else(|| LabError("missing next_state output".into()))?;
-            normalized = scalar.ok_or_else(|| LabError("missing scalar output".into()))?;
-            if state.iter().any(|v| !v.is_finite()) || !normalized.is_finite() {
+            let logits: [f32; ACTIONS] = self
+                .deterministic
+                .output("router_logits")?
+                .values()
+                .try_into()
+                .map_err(|_| LabError("router shape".into()))?;
+            state = self
+                .deterministic
+                .output("next_state")?
+                .values()
+                .try_into()
+                .map_err(|_| LabError("core shape".into()))?;
+            if state.iter().any(|v| !v.is_finite()) {
                 return Err(Box::new(LabError(
-                    "nonfinite deterministic architecture output".into(),
+                    "nonfinite deterministic recurrent state".into(),
                 )));
             }
             decisions.push(Decision {
@@ -772,6 +759,13 @@ impl Runner {
                 probs: probabilities(&logits),
                 features,
             });
+        }
+
+        let normalized = self.deterministic.output("normalized_result")?.values()[0];
+        if !normalized.is_finite() {
+            return Err(Box::new(LabError(
+                "nonfinite deterministic architecture output".into(),
+            )));
         }
         Ok(Trace {
             normalized,

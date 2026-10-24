@@ -30,7 +30,7 @@ fn expect_bits(phase: &str, name: &str, actual: &Tensor<f32>, expected: [f32; WI
 }
 
 fn check(
-    execution: &mut ModelExecution<'_>,
+    execution: &mut ModelExecution,
     phase: &str,
     state: [f32; WIDTH],
     increment: [f32; WIDTH],

@@ -124,18 +124,20 @@ git push origin dev
 * Ядра выполняются через `GpuEngine::prepare` + `GpuExecution::update_inputs` /
   `replay` / `read_output`, то есть VeriNeural CUDA Graph. Нет собственного
   CUDA kernel и второго CPU forward.
-* Deterministic runtime использует один shared CUDA Graph из
-  `architecture_model()`; stochastic training дополнительно сохраняет
-  специализированные reusable executions для внешней sampling policy.
+* Deterministic runtime использует один owned `ModelExecution` и shared CUDA
+  Graph из `architecture_model()`; parameters/dictionary обновляются один раз
+  на forward, token по шагам, state feedback выполняется D2D. Stochastic
+  training дополнительно сохраняет specialized executions для host sampling policy.
 * `architecture.lean` kernel-check'ит определения, формы и локальную семантику
   объединённого поддерживаемого графа. Глобальная теорема корректности
   маршрутизации и произвольного recurrent loop пока не заявлена.
 * Evidence path и deterministic execution больше не скрывают route/rotation на host:
   `argmax(First) → take` и `permute/reverse_axis/concat` исполняются в общем
   CUDA Graph. Training runtime всё ещё использует stochastic host sampling как
-  внешнюю policy и отдельный fixed-route replay для SPSA. Последовательное
-  состояние пока переходит между deterministic replays через host binding;
-  P1 переводит этот путь на `ModelExecution::step`. CUDA/IEEE-754/SASS не заверены.
+  внешнюю policy и отдельный fixed-route replay для SPSA. В deterministic path
+  последовательное состояние уже переходит через `ModelExecution::step` D2D;
+  host-копия `next_state` нужна только для диагностического `Trace`, не для
+  следующего replay. CUDA/IEEE-754/SASS не заверены.
 * Обучение действительно меняет router weights (REINFORCE с baseline),
   scalar head (онлайн SGD) и обе базовые матрицы (SPSA с фиксированным
   маршрутом). Это исследовательский стохастический метод, **не обещание
@@ -148,7 +150,8 @@ git push origin dev
 
 Structural/indexing GPU lowering и translation/memory evidence для `permute`,
 `reverse_axis`, `argmax`, `take` и `concat` закрыты на узком профиле
-лаборатории. Открыты P1: stateful `ModelExecution` без host rebinding,
-численная композиция routing/branching и верификация рекуррентного цикла.
+лаборатории. Stateful deterministic `ModelExecution` без host rebinding уже
+подключён. Открыты P1: перенос stochastic/fixed-route runtime на тот же named
+execution слой, численная композиция routing/branching и инвариант рекуррентного цикла.
 Отдельно стоит добавить ablation:
 фиксированный маршрут против обучаемого, один core против двух, без вращений.
