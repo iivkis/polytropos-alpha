@@ -260,46 +260,44 @@ impl TranslationPlan {
                 }
             }
             match kernel.kind {
-                TranslationKind::Transpose2D { rows, columns } => {
+                TranslationKind::Transpose2D { rows, columns }
                     if rows == 0
                         || columns == 0
                         || rows.saturating_mul(columns) != kernel.writes
-                        || kernel.reads[0].1 != kernel.writes
-                    {
-                        return Err(invalid("transpose2d source shape mismatch"));
-                    }
+                        || kernel.reads[0].1 != kernel.writes =>
+                {
+                    return Err(invalid("transpose2d source shape mismatch"));
                 }
                 TranslationKind::ReverseRows2D { rows, columns }
-                | TranslationKind::ReverseColumns2D { rows, columns } => {
+                | TranslationKind::ReverseColumns2D { rows, columns }
                     if rows == 0
                         || columns == 0
                         || rows.saturating_mul(columns) != kernel.writes
-                        || kernel.reads[0].1 != kernel.writes
-                    {
-                        return Err(invalid("reverse2d source shape mismatch"));
-                    }
+                        || kernel.reads[0].1 != kernel.writes =>
+                {
+                    return Err(invalid("reverse2d source shape mismatch"));
                 }
-                TranslationKind::ConcatAxis0 { left } => {
+                TranslationKind::ConcatAxis0 { left }
                     if left == 0
                         || kernel.reads[0].1 != left
-                        || kernel.reads[0].1.saturating_add(kernel.reads[1].1) != kernel.writes
-                    {
-                        return Err(invalid("concat_axis0 source shape mismatch"));
-                    }
+                        || kernel.reads[0].1.saturating_add(kernel.reads[1].1)
+                            != kernel.writes =>
+                {
+                    return Err(invalid("concat_axis0 source shape mismatch"));
                 }
-                TranslationKind::ArgMaxLast { width } => {
-                    if width == 0 || kernel.reads[0].1 != kernel.writes.saturating_mul(width) {
-                        return Err(invalid("argmax_last source shape mismatch"));
-                    }
+                TranslationKind::ArgMaxLast { width }
+                    if width == 0
+                        || kernel.reads[0].1 != kernel.writes.saturating_mul(width) =>
+                {
+                    return Err(invalid("argmax_last source shape mismatch"));
                 }
-                TranslationKind::TakeAxis0 { lane } => {
+                TranslationKind::TakeAxis0 { lane }
                     if lane != kernel.writes
                         || kernel.reads[1].1 != 1
                         || kernel.reads[0].1 < lane
-                        || kernel.reads[0].1 % lane != 0
-                    {
-                        return Err(invalid("take_axis0 source shape mismatch"));
-                    }
+                        || kernel.reads[0].1 % lane != 0 =>
+                {
+                    return Err(invalid("take_axis0 source shape mismatch"));
                 }
                 _ => {}
             }

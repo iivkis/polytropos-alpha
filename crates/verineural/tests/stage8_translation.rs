@@ -20,7 +20,13 @@ fn synthetic_ptx(plan: &TranslationPlan) -> String {
             TranslationKind::Mul | TranslationKind::MulRelu => (0, 1),
             TranslationKind::MatMul { .. } | TranslationKind::MulBiasRelu { .. } => (1, 1),
             TranslationKind::AddBiasRelu { .. } => (2, 0),
-            TranslationKind::Relu => (0, 0),
+            TranslationKind::Relu
+            | TranslationKind::Transpose2D { .. }
+            | TranslationKind::ReverseRows2D { .. }
+            | TranslationKind::ReverseColumns2D { .. }
+            | TranslationKind::ConcatAxis0 { .. }
+            | TranslationKind::ArgMaxLast { .. }
+            | TranslationKind::TakeAxis0 { .. } => (0, 0),
         };
         for _ in 0..muls {
             ptx.push_str(" mul.rn.f32 %f1, %f2, %f3;\n");

@@ -1099,8 +1099,7 @@ impl LeanProofEngine {
             || !representative
                 .contract
                 .claims
-                .iter()
-                .any(|claim| *claim == ContractClaim::Nonnegative)
+                .contains(&ContractClaim::Nonnegative)
         {
             return Err(ProofError::UnsupportedGuarantee {
                 node: representative.output.index(),
@@ -1122,8 +1121,7 @@ impl LeanProofEngine {
                 || !module
                     .contract
                     .claims
-                    .iter()
-                    .any(|claim| *claim == ContractClaim::Nonnegative)
+                    .contains(&ContractClaim::Nonnegative)
                 || normalize_module_nonnegative_definition(graph, index)?
                     != representative_definition
             {
