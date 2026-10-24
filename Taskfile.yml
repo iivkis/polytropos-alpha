@@ -452,6 +452,18 @@ tasks:
     cmds:
       - cargo test -p torus16-mix-lab --test gpu_forward -- --ignored --nocapture
 
+  pointwise-three-op-fusion:
+    desc: Structural contracts for three-op strict FP32 pointwise CUDA fusion
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test mul_add_mul_fusion
+
+  verify-gpu-three-op-fusion:
+    desc: NVIDIA bitwise equivalence for twelve Mul-Add-Mul operand layouts
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test mul_add_mul_fusion -- --ignored --nocapture
+
   pointwise-mul-add-fusion:
     desc: Validate checked opt-in Mul+Add CUDA fusion and its reverse-mode boundaries
     deps: [prepare]

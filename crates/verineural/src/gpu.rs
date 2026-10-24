@@ -316,6 +316,7 @@ pub enum GpuOptimizationKind {
     ReluProducerFusion,
     PointwiseBiasReluFusion,
     MulAddFusion,
+    MulAddMulFusion,
 }
 
 impl GpuOptimizationKind {
@@ -324,6 +325,7 @@ impl GpuOptimizationKind {
             Self::ReluProducerFusion => "relu-producer-fusion",
             Self::PointwiseBiasReluFusion => "pointwise-bias-relu-fusion",
             Self::MulAddFusion => "mul-add-fusion",
+            Self::MulAddMulFusion => "mul-add-mul-fusion",
         }
     }
 }
@@ -542,6 +544,9 @@ pub struct GpuProgram {
     fused_pointwise_chains: BTreeMap<usize, Vec<usize>>,
     // Add root -> (exclusive Mul producer, root operand position: 0 or 1).
     fused_mul_adds: BTreeMap<usize, (usize, usize)>,
+    // final Mul root -> (first Mul, intermediate Add, Add position,
+    // outer Mul position, reused external source index 0..=2).
+    fused_mul_add_muls: BTreeMap<usize, (usize, usize, usize, usize, usize)>,
 }
 
 impl GpuProgram {
@@ -585,6 +590,10 @@ impl GpuProgram {
         &self.fused_mul_adds
     }
 
+    pub fn fused_mul_add_muls(&self) -> &BTreeMap<usize, (usize, usize, usize, usize, usize)> {
+        &self.fused_mul_add_muls
+    }
+
     pub fn removed_kernel_count(&self) -> usize {
         self.skipped_nodes().len()
     }
@@ -595,6 +604,10 @@ impl GpuProgram {
             skipped.extend(chain.iter().copied());
         }
         skipped.extend(self.fused_mul_adds.values().map(|&(mul, _)| mul));
+        for &(mul, add, _, _, _) in self.fused_mul_add_muls.values() {
+            skipped.insert(mul);
+            skipped.insert(add);
+        }
         skipped
     }
 
@@ -614,7 +627,15 @@ impl GpuProgram {
             }
             let writes = node.shape.element_count();
             let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) =
-                if let Some(&(mul, slot)) = self.fused_mul_adds.get(&index) {
+                if let Some(&(mul, add, slot, _, _)) = self.fused_mul_add_muls.get(&index) {
+                    let inner = &self.graph.nodes()[mul];
+                    let middle = &self.graph.nodes()[add];
+                    (
+                        vec![inner.inputs[0].index(), inner.inputs[1].index(),
+                             middle.inputs[1-slot].index()],
+                        GpuMemoryPattern::Pointwise,
+                    )
+                } else if let Some(&(mul, slot)) = self.fused_mul_adds.get(&index) {
                     let producer = &self.graph.nodes()[mul];
                     (
                         vec![
@@ -923,7 +944,13 @@ impl GpuProgram {
         let mut kernels = Vec::new();
         for contract in self.memory_contracts()? {
             let node = &self.graph.nodes()[contract.kernel_node];
-            let kind = if let Some(&(_, slot)) = self.fused_mul_adds.get(&contract.kernel_node) {
+            let kind = if let Some(&(_, _, add_slot, outer_slot, reuse)) = self.fused_mul_add_muls.get(&contract.kernel_node) {
+                TranslationKind::MulAddMul {
+                    add_mul_on_right: add_slot == 1,
+                    mul_add_on_right: outer_slot == 1,
+                    reused_source: reuse as u8,
+                }
+            } else if let Some(&(_, slot)) = self.fused_mul_adds.get(&contract.kernel_node) {
                 TranslationKind::MulAdd {
                     multiply_on_right: slot == 1,
                 }
@@ -1236,6 +1263,49 @@ impl GpuProgram {
                 root,
                 kind: GpuOptimizationKind::ReluProducerFusion,
                 removed_nodes: vec![producer],
+                exclusive_reachable_use: true,
+                selected_outputs_preserved: true,
+            });
+        }
+
+        for (&root, &(mul, add, add_slot, outer_slot, reuse)) in &self.fused_mul_add_muls {
+            let root_node = &self.graph.nodes()[root];
+            let middle = &self.graph.nodes()[add];
+            let inner = &self.graph.nodes()[mul];
+            let valid_slots = add_slot < 2 && outer_slot < 2 && reuse < 3;
+            let external = if valid_slots {
+                [inner.inputs[0], inner.inputs[1], middle.inputs[1 - add_slot]]
+            } else {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid mul-add-mul slots at node {root}"),
+                });
+            };
+            let compatible = matches!(root_node.operation, Operation::Mul)
+                && matches!(middle.operation, Operation::Add)
+                && matches!(inner.operation, Operation::Mul)
+                && root_node.inputs[outer_slot].index() == add
+                && middle.inputs[add_slot].index() == mul
+                && root_node.inputs[1 - outer_slot] == external[reuse]
+                && root_node.shape == middle.shape
+                && middle.shape == inner.shape
+                && external.iter().all(|id| self.graph.nodes()[id.index()].shape == root_node.shape)
+                && uses[mul] == 1 && uses[add] == 1
+                && !selected.contains(&mul) && !selected.contains(&add)
+                && !covered_removed.contains(&mul) && !covered_removed.contains(&add)
+                && !self.fused_relus.contains_key(&root)
+                && !self.fused_pointwise_chains.contains_key(&root)
+                && !self.fused_mul_adds.contains_key(&root);
+            if !compatible {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid mul-add-mul fusion capability at node {root}"),
+                });
+            }
+            covered_removed.insert(mul);
+            covered_removed.insert(add);
+            optimizations.push(GpuOptimizationCapability {
+                root,
+                kind: GpuOptimizationKind::MulAddMulFusion,
+                removed_nodes: vec![mul, add],
                 exclusive_reachable_use: true,
                 selected_outputs_preserved: true,
             });
@@ -2030,6 +2100,7 @@ impl GpuEngine {
         let mut fused_relus = BTreeMap::new();
         let mut fused_pointwise_chains = BTreeMap::new();
         let mut fused_mul_adds = BTreeMap::new();
+        let mut fused_mul_add_muls = BTreeMap::new();
         if self.launch.relu_fusion == ReluFusion::Experimental {
             for &index in &live_nodes {
                 let node = &graph.nodes()[index];
@@ -2065,6 +2136,47 @@ impl GpuEngine {
             skipped.extend(chain.iter().copied());
         }
         if self.launch.pointwise_fusion() {
+            // Longer chains take priority, but never cross observed values,
+            // shared nodes or existing ReLU fusion boundaries.
+            for &index in live_nodes.iter().rev() {
+                let root = &graph.nodes()[index];
+                if !matches!(root.operation, Operation::Mul) || skipped.contains(&index) {
+                    continue;
+                }
+                'outer: for outer_slot in 0..2 {
+                    let middle = graph.node(root.inputs[outer_slot])?;
+                    if !matches!(middle.operation, Operation::Add)
+                        || uses[middle.id.index()] != 1
+                        || skipped.contains(&middle.id.index())
+                        || middle.shape != root.shape
+                    {
+                        continue;
+                    }
+                    for add_slot in 0..2 {
+                        let inner = graph.node(middle.inputs[add_slot])?;
+                        if !matches!(inner.operation, Operation::Mul)
+                            || uses[inner.id.index()] != 1
+                            || skipped.contains(&inner.id.index())
+                            || inner.shape != root.shape
+                        {
+                            continue;
+                        }
+                        let externals = [
+                            inner.inputs[0], inner.inputs[1], middle.inputs[1 - add_slot],
+                        ];
+                        if externals.iter().any(|&id| graph.nodes()[id.index()].shape != root.shape) {
+                            continue;
+                        }
+                        if let Some(reuse) = externals.iter().position(|&id| id == root.inputs[1 - outer_slot]) {
+                            fused_mul_add_muls.insert(index, (inner.id.index(),
+                                middle.id.index(), add_slot, outer_slot, reuse));
+                            skipped.insert(inner.id.index());
+                            skipped.insert(middle.id.index());
+                            break 'outer;
+                        }
+                    }
+                }
+            }
             for &index in &live_nodes {
                 let node = &graph.nodes()[index];
                 if !matches!(node.operation, Operation::Add) || skipped.contains(&index) {
@@ -2105,7 +2217,9 @@ impl GpuEngine {
             {
                 continue;
             }
-            if let Some(&(mul, slot)) = fused_mul_adds.get(&index) {
+            if let Some(&(_, _, add_slot, outer_slot, reuse)) = fused_mul_add_muls.get(&index) {
+                llvm_ir.push_str(&mul_add_mul_kernel_ir(index, add_slot == 1, outer_slot == 1, reuse));
+            } else if let Some(&(mul, slot)) = fused_mul_adds.get(&index) {
                 debug_assert!(matches!(graph.nodes()[mul].operation, Operation::Mul));
                 llvm_ir.push_str(&mul_add_kernel_ir(index, slot == 1));
             } else if let Some(chain) = fused_pointwise_chains.get(&index) {
@@ -2226,6 +2340,7 @@ impl GpuEngine {
             fused_relus,
             fused_pointwise_chains,
             fused_mul_adds,
+            fused_mul_add_muls,
         };
         // Fail closed unless every launched kernel has matching memory and
         // translation evidence and every applied optimization has valid
@@ -2586,6 +2701,49 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
 /// into FMA. %a/%b are the Mul operands; %bias is the other Add operand.
 /// The original Add operand order is preserved, including signed zero/NaN
 /// cases where commutation must not be assumed.
+/// 3-op, 3-source fusion: Mul(a,b) -> Add(product,c) -> Mul(sum,one-of-a/b/c).
+/// Strictly preserve BOTH binary operand orders and two explicit mul.rn
+/// instructions; no reassociation or implicit FMA.
+fn mul_add_mul_kernel_ir(index: usize, add_right: bool, outer_right: bool, reuse: usize) -> String {
+    let add_operands = if add_right { "(float %z, float %product)" }
+                       else { "(float %product, float %z)" };
+    let factor = ["%x", "%y", "%z"][reuse];
+    let outer_operands = if outer_right {
+        format!("(float {factor}, float %middle)")
+    } else {
+        format!("(float %middle, float {factor})")
+    };
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %bias, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %idx
+  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx
+  %biasp = getelementptr float, ptr addrspace(1) %bias, i32 %idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %y = load float, ptr addrspace(1) %bp, align 4
+  %z = load float, ptr addrspace(1) %biasp, align 4
+  %product = call float asm sideeffect "mul.rn.f32 $0, $1, $2;", "=f,f,f"(float %x, float %y)
+  %middle = call float asm sideeffect "add.rn.f32 $0, $1, $2;", "=f,f,f"{add_operands}
+  %value = call float asm sideeffect "mul.rn.f32 $0, $1, $2;", "=f,f,f"{outer_operands}
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %value, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
+}
+
 fn mul_add_kernel_ir(index: usize, multiply_on_right: bool) -> String {
     let operands = if multiply_on_right {
         "(float %z, float %product)"

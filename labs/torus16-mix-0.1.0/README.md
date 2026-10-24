@@ -310,3 +310,45 @@ Check `task pointwise-mul-add-fusion` and
 Unfused and fused outputs are bitwise compared on two operand-order
 variants by the ignored hardware test. Full EMA4 training parity
 across several epochs and strict FP32 proof remain separate goals.
+
+## Three-op GPU fusion and reproducible performance scopes
+
+The experimental `with_pointwise_fusion()` additionally looks for
+exclusive `Mul(a,b) → Add(product,c) → Mul(sum,k)`, where `k` is
+one of the **same three external tensors** `a/b/c`. These chains use
+one CUDA Graph kernel rather than three, preserving the original
+operand ordering via three separate rounded instructions
+`mul.rn.f32 → add.rn.f32 → mul.rn.f32`. A fourth external input,
+observable intermediate, shared intermediate, nonmatching shape or
+overlap with an existing ReLU fusion prevents this rewrite.
+The same semantic IR remains canonical. The translation plan and
+independent PTX/LLVM structural audit validate operation order,
+input addresses, three-port launch ABI, and rounded instruction counts.
+These are experimental structural checks, **not** a Lean proof of
+IEEE/SASS bitwise equivalence.
+
+Tasks:
+`task pointwise-three-op-fusion` (CPU structure and negative tests)
+and `task verify-gpu-three-op-fusion` (12 operand-layout NVIDIA cases).
+`task train-lab-torus16-ema4-bptt` prints both two-op and three-op
+fusion counts, total launched kernels and savings versus the disabled
+fusion profile. Setup and each end-to-end training window are timed
+separately; throughput includes CPU CE, AdamW, CUDA replay and host
+transfers, but excludes compile/setup and validation. This matters:
+CUDA kernels removed does not imply proportional training speedup.
+
+Optional Fish commands to compare **GPU-only** unfused and fused event
+durations (three warmups, ten measured graph replays each):
+
+```fish
+set -gx TORUS16_BENCH_COMPARE 1
+task train-lab-torus16-ema4-bptt
+set -e TORUS16_BENCH_COMPARE
+```
+
+The two graph allocations and benchmarks are performed sequentially,
+not simultaneously in device memory. CUDA event timing excludes
+host CE/AdamW, host/device copies, compilation and graph setup.
+The comparison mode increases setup cost and does not compare whole
+training wall-clock performance between different optimized profiles.
+Hardware measurements must be gathered on the user's NVIDIA system.

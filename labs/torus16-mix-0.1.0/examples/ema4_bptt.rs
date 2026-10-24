@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::PathBuf;
+use std::time::Instant;
 use torus16_mix_lab::corpus::CharCorpus;
 use torus16_mix_lab::ema4::{Ema4Weights, architecture_model};
 use verineural::{AdamW, GpuEngine, GpuLaunchConfig, Tensor, differentiate, unroll_model};
@@ -74,6 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("not enough chronological train characters for requested windows".into());
     }
+    let compile_clock = Instant::now();
     let vocab = corpus.alphabet.len();
     let weights = Ema4Weights::deterministic(vocab)?;
     let model = architecture_model(vocab)?;
@@ -131,11 +133,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
     }
     println!(
-        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} reduction_percent={:.2}",
+        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} reduction_percent={:.2}",
         old_kernels,
         new_kernels,
         old_kernels - new_kernels,
         program.fused_mul_adds().len(),
+        program.fused_mul_add_muls().len(),
         100. * (old_kernels - new_kernels) as f64 / old_kernels as f64
     );
 
@@ -162,7 +165,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         .filter(|(id, _)| program.source_inputs().contains(id))
         .collect::<Vec<_>>();
     let artifact = std::env::temp_dir().join(format!("vn_ema4_bptt_{}", std::process::id()));
+    let baseline_replay_ms = if std::env::var_os("TORUS16_BENCH_COMPARE").is_some() {
+        // Compile/allocate/benchmark/drop the baseline first, so the full
+        // training model never requires two complete CUDA executions in VRAM.
+        let baseline_engine = GpuEngine::new(
+            "llc",
+            std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+        )
+        .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+        let baseline = baseline_engine.compile_outputs(reverse.graph(), &selected)?;
+        let baseline_sources = supplied
+            .iter()
+            .filter(|(id, _)| baseline.source_inputs().contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let baseline_dir = artifact.join("baseline");
+        let execution = baseline_engine.prepare(&baseline, &baseline_sources, &baseline_dir)?;
+        Some(execution.benchmark(3, 10)?.average().as_secs_f64() * 1000.)
+    } else {
+        None
+    };
     let mut gpu = engine.prepare(&program, &supplied, &artifact)?;
+    println!("setup_compile_and_cuda_prepare_ms={:.3}",compile_clock.elapsed().as_secs_f64()*1000.);
+
+    if let Some(baseline_ms) = baseline_replay_ms {
+        let fused_ms = gpu.benchmark(3, 10)?.average().as_secs_f64() * 1000.;
+        println!("cuda_graph_replay_baseline_ms={baseline_ms:.5} cuda_graph_replay_fused_ms={fused_ms:.5} cuda_graph_replay_speedup={:.3} scope=GPU_only",
+            baseline_ms / fused_ms);
+    }
     // Device CUDA-event timing of the fused graph alone. Compilation,
     // HtoD copies, host CE, AdamW and holdout scoring are excluded.
     if std::env::var_os("TORUS16_BENCH_FUSED").is_some() {
@@ -185,7 +215,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         reverse.graph().nodes().len(),
         program.kernel_count()?
     );
+    let train_start = Instant::now();
     for iteration in 0..train_windows {
+        let step_start = Instant::now();
         let start = iteration * window_len;
         for t in 0..window_len {
             let input = onehot(corpus.train[start + t], vocab)?;
@@ -231,13 +263,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             gpu.update_input(id, &next_states[name])?;
         }
         println!(
-            "train_window={} ce_nats={:.6} train_bpc={:.6} optimizer_step={}",
+            "train_window={} ce_nats={:.6} train_bpc={:.6} optimizer_step={} end_to_end_step_ms={:.3}",
             iteration,
             total / window_len as f32,
             total / (window_len as f32 * std::f32::consts::LN_2),
-            optimizer.steps()
+            optimizer.steps(),
+            step_start.elapsed().as_secs_f64()*1000.
         );
     }
+    let train_elapsed = train_start.elapsed().as_secs_f64();
+    println!("training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} scope=GPU_replay_plus_host_CE_AdamW_transfers",
+        train_elapsed, train_windows*window_len, (train_windows*window_len) as f64/train_elapsed);
     // Real holdout: chronological final 10% only. One recurrent inference
     // step per symbol, with state reset to zero at the validation boundary.
     let mut eval_bindings = weights.bindings(0)?;
@@ -248,6 +284,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let eval_dir =
         PathBuf::from(std::env::temp_dir()).join(format!("vn_ema4_holdout_{}", std::process::id()));
+    let validation_start = Instant::now();
     let mut eval = engine.prepare_model(&model, eval_bindings, &eval_dir)?;
     let count = val_limit.min(corpus.validation.len() - 1);
     let mut val_ce = 0f64;
@@ -260,7 +297,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let bpc = val_ce / (count as f64 * std::f64::consts::LN_2);
     println!(
-        "holdout_reset_streaming_bpc={bpc:.6} scored_characters={count} validation_split=last_10pct"
+        "holdout_reset_streaming_bpc={bpc:.6} scored_characters={count} validation_split=last_10pct eval_prepare_plus_stream_seconds={:.5}",
+        validation_start.elapsed().as_secs_f64()
     );
     println!(
         "NOTE: deterministic untrained initial values; host AdamW/CE, GPU forward/VJP; no checkpoint parity or formal FP32 gradient proof."

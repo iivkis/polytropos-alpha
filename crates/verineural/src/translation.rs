@@ -24,6 +24,11 @@ pub enum TranslationKind {
     MulAdd {
         multiply_on_right: bool,
     },
+    MulAddMul {
+        add_mul_on_right: bool,
+        mul_add_on_right: bool,
+        reused_source: u8,
+    },
     /// IEEE binary32 subtraction with explicit round-to-nearest-even.
     Sub,
     /// IEEE binary32 division, round-to-nearest-even.
@@ -84,6 +89,7 @@ impl TranslationKind {
             Self::Add => "add",
             Self::Mul => "mul",
             Self::MulAdd { .. } => "mul_add",
+            Self::MulAddMul { .. } => "mul_add_mul",
             Self::Sub => "sub_rn",
             Self::DivRne => "div_rn",
             Self::ExpApprox => "exp_approx",
@@ -112,6 +118,7 @@ impl TranslationKind {
             Self::Add | Self::BiasAdd { .. } => (1, 0, 0),
             Self::Mul => (0, 1, 0),
             Self::MulAdd { .. } => (1, 1, 0),
+            Self::MulAddMul { .. } => (1, 2, 0),
             Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
             Self::MatMul { .. } => (1, 1, 0),
@@ -142,7 +149,8 @@ impl TranslationKind {
             | Self::SliceLastRow { .. }
             | Self::BroadcastScalar
             | Self::ArgMaxLast { .. } => 1,
-            Self::AddBiasRelu { .. } | Self::MulBiasRelu { .. } | Self::MulAdd { .. } => 3,
+            Self::AddBiasRelu { .. } | Self::MulBiasRelu { .. }
+            | Self::MulAdd { .. } | Self::MulAddMul { .. } => 3,
             _ => 2,
         }
     }
@@ -173,6 +181,9 @@ impl TranslationKind {
             Self::ArgMaxLast { width } => width,
             Self::TakeAxis0 { lane } => lane,
             Self::MulAdd { multiply_on_right } => usize::from(multiply_on_right),
+            Self::MulAddMul { add_mul_on_right, mul_add_on_right, reused_source } =>
+                usize::from(add_mul_on_right) + 2 * usize::from(mul_add_on_right)
+                    + 4 * usize::from(reused_source),
             _ => 0,
         }
     }
@@ -183,6 +194,11 @@ impl TranslationKind {
             "mul" => Self::Mul,
             "mul_add" => Self::MulAdd {
                 multiply_on_right: inner == 1,
+            },
+            "mul_add_mul" if inner < 12 => Self::MulAddMul {
+                add_mul_on_right: inner & 1 != 0,
+                mul_add_on_right: inner & 2 != 0,
+                reused_source: (inner >> 2) as u8,
             },
             "sub_rn" => Self::Sub,
             "div_rn" => Self::DivRne,
@@ -325,9 +341,14 @@ impl TranslationPlan {
                     return Err(invalid("MatMul source shape differs from reduction shape"));
                 }
             }
-            if let TranslationKind::MulAdd { .. } = kernel.kind {
+            if matches!(kernel.kind, TranslationKind::MulAdd { .. } | TranslationKind::MulAddMul { .. }) {
                 if kernel.reads.iter().any(|&(_, size)| size != kernel.writes) {
                     return Err(invalid("mul-add source shape mismatch"));
+                }
+                if let TranslationKind::MulAddMul { reused_source, .. } = kernel.kind {
+                    if reused_source > 2 {
+                        return Err(invalid("MulAddMul source selector must be 0..=2"));
+                    }
                 }
             }
             if let TranslationKind::BiasAdd { columns } | TranslationKind::BiasAddRelu { columns } =
@@ -672,6 +693,63 @@ impl TranslationPlan {
                 ));
                 continue;
             }
+            if let TranslationKind::MulAddMul { add_mul_on_right, mul_add_on_right, reused_source } = kernel.kind {
+                if reused_source > 2 {
+                    return Err(invalid("invalid MulAddMul source selector"));
+                }
+                let additive = if add_mul_on_right { "(float %z, float %product)" }
+                               else { "(float %product, float %z)" };
+                let factor = ["%x", "%y", "%z"][usize::from(reused_source)];
+                let final_args = if mul_add_on_right {
+                    format!("(float {factor}, float %middle)")
+                } else {
+                    format!("(float %middle, float {factor})")
+                };
+                let required = [
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx",
+                    "%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx",
+                    "%biasp = getelementptr float, ptr addrspace(1) %bias, i32 %idx",
+                    "%x = load float, ptr addrspace(1) %ap, align 4",
+                    "%y = load float, ptr addrspace(1) %bp, align 4",
+                    "%z = load float, ptr addrspace(1) %biasp, align 4",
+                    "%product = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)",
+                    "icmp ult i32 %idx, %length",
+                    "br i1 %valid, label %compute, label %done",
+                    "store float %value, ptr addrspace(1) %op, align 4",
+                ];
+                let add = format!(
+                    "%middle = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"{additive}"
+                );
+                let last = format!(
+                    "%value = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"{final_args}"
+                );
+                if required.iter().any(|&x| !ir.contains(x))
+                    || !matches!((ir.find(required[6]), ir.find(&add), ir.find(&last)),
+                       (Some(a), Some(b), Some(c)) if a < b && b < c)
+                    || ir.matches("call float asm sideeffect").count() != 3
+                    || ir.matches("fcmp ").count() != 0
+                {
+                    return Err(invalid(format!("MulAddMul LLVM template mismatch at node {node}")));
+                }
+                audit_fp32_ptx(ir, asm).map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                let sequence = asm.lines()
+                    .map(|line| line.split("//").next().unwrap_or(""))
+                    .filter_map(|line| {
+                        if line.contains("mul.rn.f32") { Some("mul") }
+                        else if line.contains("add.rn.f32") { Some("add") }
+                        else { None }
+                    }).collect::<Vec<_>>();
+                if sequence != ["mul", "add", "mul"] {
+                    return Err(invalid(format!("MulAddMul PTX instruction order changed at node {node}")));
+                }
+                report.rounded_adds += 1;
+                report.rounded_muls += 2;
+                report.details.push_str(&format!(
+                    "node={node} kind=mul_add_mul reads={:?} writes={} hardware=trusted\n",
+                    kernel.reads, kernel.writes
+                ));
+                continue;
+            }
             if let TranslationKind::MulAdd { multiply_on_right } = kernel.kind {
                 let operands = if multiply_on_right {
                     "(float %z, float %product)"
@@ -944,7 +1022,8 @@ impl TranslationPlan {
                 | TranslationKind::MulBiasRelu { .. }
                 // Validated above with its own three-source binding and
                 // early continue. Keep exhaustive matching fail-closed.
-                | TranslationKind::MulAdd { .. } => None,
+                | TranslationKind::MulAdd { .. }
+                | TranslationKind::MulAddMul { .. } => None,
             };
             if required_binding.is_some_and(|binding| !ir.contains(binding)) {
                 return Err(invalid(format!(

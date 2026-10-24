@@ -394,3 +394,29 @@ non-fused **kernel counts before execution** and prints the reduction
 full training gradient parity or Lean/IEEE/JIT equivalence is claimed
 until separately checked. More general backward fusion and
 end-to-end train throughput/memory benchmarking remain open.
+
+### Experimental three-operation fusion with bounded three-source GPU ABI
+
+The existing opt-in `GpuLaunchConfig::with_pointwise_fusion()` additionally
+selects a `Mul→Add→Mul` chain when both inner nodes have a sole reachable
+consumer, no selected output or earlier fusion references them, every
+operation/source has the same element shape, and the final Mul reuses
+one of the three external sources. A fourth distinct source is explicitly
+not supported in this bounded profile. Internal operation order and
+both binary operand positions are encoded in versioned
+`TranslationKind::MulAddMul`; LLVM template emits exactly
+`mul.rn.f32`, `add.rn.f32`, `mul.rn.f32`, without FMA.
+Memory contracts/capabilities explain two removed kernels and all
+three source addresses. Structural LLVM/PTX audit checks exact operand
+wiring, ordered instructions and byte-indexed pointer patterns.
+No Lean proof, strict IEEE JIT/SASS guarantee or end-to-end speedup
+claim arises from this pass.
+
+Added CPU and ignored NVIDIA bitwise acceptance tests for all twelve
+operand layouts, plus explicit fan-out, selected-output and fourth
+distinct input negatives. EMA4 BPTT training logs real kernel counts,
+CUDA-only replay comparison (optional TORUS16_BENCH_COMPARE), total
+training wall time, tokens/s and per-window time. Device GPU benchmark
+does not measure AdamW or transfers; full train step timing includes
+those but excludes compilation. This new code has not undergone local
+Cargo/NVIDIA acceptance and exact kernel counts remain unmeasured.
