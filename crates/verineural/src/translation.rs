@@ -280,14 +280,12 @@ impl TranslationPlan {
                 TranslationKind::ConcatAxis0 { left }
                     if left == 0
                         || kernel.reads[0].1 != left
-                        || kernel.reads[0].1.saturating_add(kernel.reads[1].1)
-                            != kernel.writes =>
+                        || kernel.reads[0].1.saturating_add(kernel.reads[1].1) != kernel.writes =>
                 {
                     return Err(invalid("concat_axis0 source shape mismatch"));
                 }
                 TranslationKind::ArgMaxLast { width }
-                    if width == 0
-                        || kernel.reads[0].1 != kernel.writes.saturating_mul(width) =>
+                    if width == 0 || kernel.reads[0].1 != kernel.writes.saturating_mul(width) =>
                 {
                     return Err(invalid("argmax_last source shape mismatch"));
                 }

@@ -1118,10 +1118,7 @@ impl LeanProofEngine {
                 || module.semantic_version != representative.semantic_version
                 || module.contract != representative.contract
                 || output.dtype != DType::F32
-                || !module
-                    .contract
-                    .claims
-                    .contains(&ContractClaim::Nonnegative)
+                || !module.contract.claims.contains(&ContractClaim::Nonnegative)
                 || normalize_module_nonnegative_definition(graph, index)?
                     != representative_definition
             {
