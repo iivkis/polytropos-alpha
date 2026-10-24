@@ -60,6 +60,42 @@ impl NeuralModule for PositiveJoin {
     }
 }
 
+// The final consumer accepts domain-unknown outputs of the earlier
+// modules. Its global ideal-Int theorem still needs both nonnegative
+// premises, which must come from the producer applications.
+struct GlobalJoin {
+    contract: MathContract,
+}
+
+impl GlobalJoin {
+    fn new() -> Self {
+        Self {
+            contract: MathContract::new(
+                vec![PortContract::any(shape()), PortContract::any(shape())],
+                PortContract::any(shape()),
+            ),
+        }
+    }
+}
+
+impl NeuralModule for GlobalJoin {
+    fn name(&self) -> &'static str {
+        "consumer_global_join"
+    }
+
+    fn semantic_version(&self) -> &'static str {
+        "1"
+    }
+
+    fn contract(&self) -> &MathContract {
+        &self.contract
+    }
+
+    fn build(&self, graph: &mut NeuralGraph, inputs: &[NodeId]) -> Result<NodeId, NeuralError> {
+        graph.add(inputs[0], inputs[1])
+    }
+}
+
 fn repeated_graph() -> NeuralGraph {
     let mut graph = NeuralGraph::default();
     let x = graph.input(shape(), Domain::NonNegativeFinite);
@@ -161,7 +197,7 @@ fn global_composition_reuses_definition_theorem_and_checks_each_invocation() {
     let module = PositiveJoin::new(Body::Add);
     let left = graph.apply_module(&module, &[x, y]).unwrap();
     let right = graph.apply_module(&module, &[x, z]).unwrap();
-    let output = graph.apply_module(&module, &[left, right]).unwrap();
+    let output = graph.apply_module(&GlobalJoin::new(), &[left, right]).unwrap();
 
     let program = LeanProofEngine::default()
         .generate_global_nonnegative(&graph, output, &[x, y, z])
@@ -175,7 +211,7 @@ fn global_composition_reuses_definition_theorem_and_checks_each_invocation() {
         1
     );
     assert!(!source.contains("theorem architecture_module_definition_1_nonnegative "));
-    assert!(!source.contains("theorem architecture_module_definition_2_nonnegative "));
+    assert!(source.contains("theorem architecture_module_definition_2_nonnegative "));
     assert!(source.contains("theorem architecture_module_instance_0 "));
     assert!(source.contains("theorem architecture_module_instance_1 "));
     assert!(source.contains("theorem architecture_module_instance_2 "));
@@ -197,7 +233,7 @@ fn global_composition_rejects_same_identity_with_different_body() {
         .apply_module(&PositiveJoin::new(Body::Mul), &[x, z])
         .unwrap();
     let output = graph
-        .apply_module(&PositiveJoin::new(Body::Add), &[left, right])
+        .apply_module(&GlobalJoin::new(), &[left, right])
         .unwrap();
 
     assert!(matches!(
