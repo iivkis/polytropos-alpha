@@ -572,8 +572,7 @@ theorem approx_contract_positive_mask_select_positive
         then yesActual else noActual) = yesActual := by
     rw [if_pos hactual]
     exact if_pos hzeroOne
-  rw [hidealSelect, hactualSelect]
-  exact hyes
+  exact hidealSelect.symm ▸ (hactualSelect.symm ▸ hyes)
 
 theorem approx_contract_positive_mask_select_nonpositive
     {conditionBound conditionEpsilon conditionIdeal conditionActual
@@ -603,7 +602,6 @@ theorem approx_contract_positive_mask_select_nonpositive
         then yesActual else noActual) = noActual := by
     rw [if_neg hactualNot]
     exact if_neg hzeroZero
-  rw [hidealSelect, hactualSelect]
-  exact hno
+  exact hidealSelect.symm ▸ (hactualSelect.symm ▸ hno)
 
 end VeriNeural
