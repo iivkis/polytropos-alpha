@@ -13,7 +13,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::translation::{TranslationKernel, TranslationKind, TranslationPlan};
-use crate::{NeuralError, NeuralGraph, NodeId, Operation, Shape, Tensor};
+use crate::{NeuralError, NeuralGraph, NodeId, NodeStorage, Operation, Shape, Tensor};
 
 use super::cuda::CudaSession;
 
@@ -513,7 +513,7 @@ impl GpuProgram {
                 continue;
             }
             let node = &self.graph.nodes()[index];
-            if matches!(node.operation, Operation::Input | Operation::Reshape(_)) {
+            if matches!(node.operation, Operation::Input) || self.graph.storage(node.id)?.is_alias() {
                 continue;
             }
             let writes = node.shape.element_count();
@@ -933,18 +933,16 @@ impl GpuProgram {
 
         let skipped = self.skipped_nodes();
         let launched = kernels.iter().map(|kernel| kernel.node).collect::<BTreeSet<_>>();
-        let expected = self
-            .live_nodes
-            .iter()
-            .copied()
-            .filter(|index| {
-                !skipped.contains(index)
-                    && !matches!(
-                        self.graph.nodes()[*index].operation,
-                        Operation::Input | Operation::Reshape(_)
-                    )
-            })
-            .collect::<BTreeSet<_>>();
+        let mut expected = BTreeSet::new();
+        for &index in &self.live_nodes {
+            let node = &self.graph.nodes()[index];
+            if !skipped.contains(&index)
+                && !matches!(node.operation, Operation::Input)
+                && !self.graph.storage(node.id)?.is_alias()
+            {
+                expected.insert(index);
+            }
+        }
         if launched != expected {
             return Err(GpuError::Fp32PtxRejected {
                 reason: "capability plan does not cover every launched semantic node".into(),
@@ -1683,7 +1681,8 @@ impl GpuEngine {
         );
         for &index in &live_nodes {
             let node = &graph.nodes()[index];
-            if matches!(node.operation, Operation::Input | Operation::Reshape(_))
+            if matches!(node.operation, Operation::Input)
+                || graph.storage(node.id)?.is_alias()
                 || skipped.contains(&index)
             {
                 continue;
@@ -1875,19 +1874,20 @@ impl GpuEngine {
                 continue;
             }
             let node = &program.graph.nodes()[index];
-            match node.operation {
-                Operation::Input => {
+            let storage = program.graph.storage(node.id)?;
+            match (&node.operation, storage) {
+                (Operation::Input, _) => {
                     let value = given[&index];
                     let ptr = session.allocate(value.values().len())?;
                     session.copy_to_device(ptr, value.values())?;
                     input_addresses.insert(index, ptr);
                     buffers.insert(index, ptr);
                 }
-                Operation::Reshape(_) => {
-                    let ptr = buffers[&node.inputs[0].index()];
+                (_, NodeStorage::Alias { source, .. }) => {
+                    let ptr = buffers[&source.index()];
                     buffers.insert(index, ptr);
                 }
-                Operation::Add
+                (Operation::Add
                 | Operation::Mul
                 | Operation::MatMul
                 | Operation::BiasAdd
@@ -1896,7 +1896,7 @@ impl GpuEngine {
                 | Operation::ReverseAxis { .. }
                 | Operation::Concat { .. }
                 | Operation::ArgMax { .. }
-                | Operation::Take { .. } => {
+                | Operation::Take { .. }, NodeStorage::OwnedContiguous { .. }) => {
                     let ptr = session.allocate(node.shape.element_count())?;
                     buffers.insert(index, ptr);
                 }
@@ -1930,27 +1930,11 @@ impl GpuEngine {
             }
         }
 
-        let kernel_count = program
-            .live_nodes
-            .iter()
-            .filter(|&&index| {
-                !skipped.contains(&index)
-                    && !matches!(
-                        program.graph.nodes()[index].operation,
-                        Operation::Input | Operation::Reshape(_)
-                    )
-            })
-            .count();
+        let kernel_count = contracts.len();
         let has_graph = kernel_count > 0;
         if has_graph {
-            for &index in &program.live_nodes {
-                if skipped.contains(&index) {
-                    continue;
-                }
-                let op = &program.graph.nodes()[index].operation;
-                if !matches!(op, Operation::Input | Operation::Reshape(_)) {
-                    session.prepare_kernel(&format!("vn_node_{index}"))?;
-                }
+            for contract in &contracts {
+                session.prepare_kernel(&format!("vn_node_{}", contract.kernel_node))?;
             }
             session.begin_graph()?;
             for contract in &contracts {

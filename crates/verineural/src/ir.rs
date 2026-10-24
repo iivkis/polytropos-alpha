@@ -702,6 +702,51 @@ impl NodeId {
     }
 }
 
+/// Execution storage contract derived from Semantic IR. The first supported
+/// profile is deliberately strict: every value owns contiguous row-major
+/// storage except Reshape, which is a zero-copy contiguous alias.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeStorage {
+    OwnedContiguous {
+        strides: Vec<usize>,
+    },
+    Alias {
+        source: NodeId,
+        strides: Vec<usize>,
+    },
+}
+
+impl NodeStorage {
+    pub fn strides(&self) -> &[usize] {
+        match self {
+            Self::OwnedContiguous { strides } | Self::Alias { strides, .. } => strides,
+        }
+    }
+
+    pub const fn alias_source(&self) -> Option<NodeId> {
+        match self {
+            Self::OwnedContiguous { .. } => None,
+            Self::Alias { source, .. } => Some(*source),
+        }
+    }
+
+    pub const fn is_alias(&self) -> bool {
+        matches!(self, Self::Alias { .. })
+    }
+
+    /// Stable text without graph identity; safe for canonical IR/DOT evidence.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::OwnedContiguous { strides } => {
+                format!("owned_contiguous:strides={strides:?}")
+            }
+            Self::Alias { source, strides } => {
+                format!("alias_node_{}:strides={strides:?}", source.index())
+            }
+        }
+    }
+}
+
 /// Immutable public view of a validated symbolic operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
@@ -1043,6 +1088,33 @@ impl NeuralGraph {
             return Err(NeuralError::InvalidNode);
         }
         self.nodes.get(id.index).ok_or(NeuralError::InvalidNode)
+    }
+
+    /// Explicit contiguous storage/alias contract for this IR value.
+    pub fn storage(&self, id: NodeId) -> Result<NodeStorage, NeuralError> {
+        let node = self.node(id)?;
+        let strides = node.shape.row_major_strides();
+        Ok(match node.operation {
+            Operation::Reshape(_) => NodeStorage::Alias {
+                source: node.inputs[0],
+                strides,
+            },
+            _ => NodeStorage::OwnedContiguous { strides },
+        })
+    }
+
+    /// Resolve a zero-copy alias chain to the value that owns its allocation.
+    pub fn storage_root(&self, mut id: NodeId) -> Result<NodeId, NeuralError> {
+        loop {
+            match self.storage(id)? {
+                NodeStorage::OwnedContiguous { .. } => return Ok(id),
+                NodeStorage::Alias { source, .. } => id = source,
+            }
+        }
+    }
+
+    pub fn aliases(&self, left: NodeId, right: NodeId) -> Result<bool, NeuralError> {
+        Ok(self.storage_root(left)? == self.storage_root(right)?)
     }
 
     /// Declare a symbolic input and its caller-supplied domain assumption.

@@ -28,6 +28,19 @@ impl Shape {
         // Checked on construction and immutable afterwards.
         self.0.iter().product()
     }
+
+    /// Canonical contiguous row-major strides in elements.
+    pub fn row_major_strides(&self) -> Vec<usize> {
+        let mut strides = vec![0; self.0.len()];
+        let mut stride = 1usize;
+        for axis in (0..self.0.len()).rev() {
+            strides[axis] = stride;
+            stride = stride
+                .checked_mul(self.0[axis])
+                .expect("Shape::new already validated element count");
+        }
+        strides
+    }
 }
 
 /// Shape information for a tensor. Custom implementations are revalidated.

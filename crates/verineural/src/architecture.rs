@@ -548,7 +548,11 @@ pub fn snapshot_architecture(
                 || {
                     if fused.contains(&index) {
                         "fused-into-consumer"
-                    } else if matches!(node.operation, Operation::Reshape(_)) {
+                    } else if graph
+                        .storage(node.id)
+                        .expect("snapshot node belongs to graph")
+                        .is_alias()
+                    {
                         "zero-copy-alias"
                     } else {
                         "not-lowered"
@@ -639,6 +643,13 @@ pub fn snapshot_architecture(
                 ("vn_shape", dims),
                 ("vn_dtype", node.dtype.name().into()),
                 ("vn_layout", "row-major".into()),
+                (
+                    "vn_storage",
+                    graph
+                        .storage(node.id)
+                        .expect("snapshot node belongs to graph")
+                        .describe(),
+                ),
                 ("vn_domain", format!("{:?}", node.domain)),
                 ("vn_semantics", format!("{:?}", node.semantics)),
                 ("vn_requires", format!("{:?}", node.contract.requires)),
@@ -1059,6 +1070,14 @@ pub(crate) fn auto_architecture_dot(
                 ("vn_shape", format!("{:?}", node.shape.dims())),
                 ("vn_dtype", node.dtype.name().into()),
                 ("vn_layout", "row-major".into()),
+                (
+                    "vn_storage",
+                    context
+                        .graph
+                        .storage(node.id)
+                        .expect("auto DOT node belongs to graph")
+                        .describe(),
+                ),
                 ("vn_domain", format!("{:?}", node.domain)),
                 ("vn_contract", format!("{:?}", node.contract)),
                 ("vn_semantics", format!("{:?}", node.semantics)),

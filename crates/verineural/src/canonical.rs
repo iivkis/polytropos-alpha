@@ -11,7 +11,7 @@ use crate::{
     Predicate, ReductionOrder, RoundingMode, Shape, SubnormalMode, ValueRef,
 };
 
-const FORMAT_VERSION: &str = "verineural-semantic-ir-v3";
+const FORMAT_VERSION: &str = "verineural-semantic-ir-v4";
 
 fn escaped(value: &str) -> String {
     let mut out = String::new();
@@ -169,11 +169,15 @@ pub(crate) fn graph_ir(graph: &NeuralGraph) -> String {
     for (index, node) in graph.nodes().iter().enumerate() {
         writeln!(
             text,
-            "node={index};op={};inputs={};shape={};dtype={};domain={};requires={};ensures={};claims={};ideal={};gpu={}",
+            "node={index};op={};inputs={};shape={};dtype={};domain={};storage={};requires={};ensures={};claims={};ideal={};gpu={}",
             operation(&node.operation),
             nodes(node.inputs.iter().map(|id| id.index())),
             shape(&node.shape),
             node.dtype.name(),
+            graph
+                .storage(node.id)
+                .expect("canonical node belongs to graph")
+                .describe(),
             node.domain.name(),
             ports(node.contract.requires.iter().map(port)),
             port(&node.contract.ensures),

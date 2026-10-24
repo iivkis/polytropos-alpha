@@ -129,6 +129,13 @@ tasks:
     cmds:
       - cargo run -p verineural --example symbolic_shapes
 
+  verify-storage-semantics:
+    desc: Check P1/P10 contiguous strides, reshape aliases and canonical storage identity
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test storage_semantics
+      - cargo test -p verineural --test tensor_indexing
+
   gpu-multi-output:
     desc: Check one Lean model and capture/replay a shared four-output NVIDIA CUDA Graph
     cmds:

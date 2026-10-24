@@ -125,7 +125,7 @@ fn rotating_bank_slice_is_canonical_has_lean_structure_and_gpu_lowering() {
     );
 
     let canonical = graph.canonical_ir();
-    assert!(canonical.starts_with("verineural-semantic-ir-v3\n"));
+    assert!(canonical.starts_with("verineural-semantic-ir-v4\n"));
     assert!(canonical.contains("permute_axes:1,0"));
     assert!(canonical.contains("reverse_axis:1"));
     assert!(canonical.contains("concat_axis:0"));
