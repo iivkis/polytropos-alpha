@@ -16,6 +16,11 @@
 //! ModuleInvocation elementwise, including direct nested-module theorem reuse.
 //! Architecture-level range theorems compose the reachable top-level module DAG,
 //! including fork/fan-in boundaries, under the same formal RNE target relation.
+//! Multi-output reusable proof definitions use one normalized right-nested
+//! product for all output tensors and a single shared conjunction theorem,
+//! with per-port, per-instance applications and independently checked premises.
+//! This ideal-Int profile currently covers explicit Nonnegative claims only.
+//!
 //! An explicit global ideal-Int nonnegativity request groups compatible
 //! top-level module invocations by normalized definition, proves each shared
 //! definition once, checks concrete invocation premises separately, and builds

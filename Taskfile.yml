@@ -110,7 +110,7 @@ tasks:
       - cargo test -p verineural --test inductive_invariant -- --ignored
 
   verify-reusable-module-proof:
-    desc: Check one reusable module-definition theorem and separate concrete instance obligations
+    desc: Check single/multi-output reusable definitions, per-instance obligations and global composition in Lean
     deps: [prepare]
     cmds:
       - cargo test -p verineural --test reusable_module_definition

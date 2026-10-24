@@ -1282,6 +1282,227 @@ impl LeanProofEngine {
         Ok(program)
     }
 
+    /// Reuse one ideal-Int theorem for a named multi-output module definition.
+    /// A single right-nested tensor product represents every output; the
+    /// theorem proves all output Nonnegative claims together. Each concrete
+    /// invocation receives a separate checked application for every port.
+    ///
+    /// Supported profile: at least two F32 outputs, all claiming Nonnegative.
+    /// All required input sign conditions must be declared in the contract.
+    pub fn generate_reusable_multi_module_nonnegative(
+        &self,
+        graph: &NeuralGraph,
+        module_indices: &[usize],
+        name: &str,
+    ) -> Result<LeanProgram, ProofError> {
+        if name.is_empty()
+            || !name.as_bytes()[0].is_ascii_alphabetic()
+            || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return Err(ProofError::InvalidGoalName);
+        }
+        if module_indices.is_empty()
+            || module_indices.iter().copied().collect::<BTreeSet<_>>().len()
+                != module_indices.len()
+        {
+            return Err(ProofError::InvalidOutputs);
+        }
+        let representative_index = module_indices[0];
+        let representative = graph
+            .multi_modules()
+            .get(representative_index)
+            .ok_or(ProofError::InvalidOutputs)?;
+        let definition = normalize_multi_nonnegative_definition(graph, representative_index)?;
+        for &index in &module_indices[1..] {
+            let instance = graph
+                .multi_modules()
+                .get(index)
+                .ok_or(ProofError::InvalidOutputs)?;
+            if instance.name != representative.name
+                || instance.semantic_version != representative.semantic_version
+                || instance.contract != representative.contract
+                || normalize_multi_nonnegative_definition(graph, index)? != definition
+            {
+                return Err(ProofError::ModuleDefinitionMismatch {
+                    representative: representative_index,
+                    other: index,
+                });
+            }
+        }
+        let outputs = module_indices
+            .iter()
+            .flat_map(|&index| graph.multi_modules()[index].outputs.iter().copied())
+            .collect::<Vec<_>>();
+        let mut program = self.generate_outputs(graph, &outputs)?;
+        let end = "end VeriNeural.Generated\n";
+        if !program.source.ends_with(end) {
+            return Err(ProofError::LeanRejected {
+                details: "generated Lean source has no namespace terminator".into(),
+            });
+        }
+        program.source.truncate(program.source.len() - end.len());
+
+        let definition_name = format!("module_definition_{name}");
+        let theorem_name = format!("{definition_name}_nonnegative");
+        let expr_tokens = definition
+            .outputs
+            .iter()
+            .flat_map(|out| out.expression.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+            .collect::<BTreeSet<_>>();
+        let proof_tokens = definition
+            .outputs
+            .iter()
+            .flat_map(|out| out.proof_term.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+            .collect::<BTreeSet<_>>();
+        let mut def_params = Vec::new();
+        let mut theorem_params = Vec::new();
+        for (port, &input) in representative.inputs.iter().enumerate() {
+            let node = graph.node(input)?;
+            let ty = lean_value_type(node.dtype, node.shape.element_count());
+            let binder = if expr_tokens.contains(format!("p_{port}").as_str()) {
+                format!("p_{port}")
+            } else {
+                format!("_p_{port}")
+            };
+            def_params.push(format!("({binder} : {ty})"));
+            theorem_params.push(format!("(p_{port} : {ty})"));
+        }
+        let required = definition
+            .required_ports
+            .iter()
+            .map(|&port| {
+                let binder = format!("h_port_{port}");
+                let binder = if proof_tokens.contains(binder.as_str()) {
+                    binder
+                } else {
+                    format!("_h_port_{port}")
+                };
+                format!("({binder} : VeriNeural.Nonnegative p_{port})")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let port_args = (0..representative.inputs.len())
+            .map(|port| format!("p_{port}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let type_expr = representative
+            .outputs
+            .iter()
+            .map(|&id| {
+                let node = graph.node(id)?;
+                Ok(lean_value_type(node.dtype, node.shape.element_count()))
+            })
+            .collect::<Result<Vec<_>, ProofError>>()?
+            .into_iter()
+            .rev()
+            .reduce(|tail, head| format!("({head} × {tail})"))
+            .ok_or(ProofError::InvalidOutputs)?;
+        let value_expr = definition
+            .outputs
+            .iter()
+            .map(|out| out.expression.clone())
+            .rev()
+            .reduce(|tail, head| format!("({head}, {tail})"))
+            .ok_or(ProofError::InvalidOutputs)?;
+        let projection = |port: usize| {
+            let mut fields = vec!["2"; port];
+            if port + 1 != definition.outputs.len() {
+                fields.push("1");
+            }
+            fields.join(".")
+        };
+        let properties = (0..definition.outputs.len())
+            .map(|port| format!(
+                "VeriNeural.Nonnegative (({definition_name} {port_args}).{})",
+                projection(port)
+            ))
+            .collect::<Vec<_>>()
+            .join(" ∧ ");
+        let property_proof = definition
+            .outputs
+            .iter()
+            .map(|out| out.proof_term.clone())
+            .rev()
+            .reduce(|tail, head| format!("And.intro ({head}) ({tail})"))
+            .ok_or(ProofError::InvalidOutputs)?;
+        program.source.push_str(&format!(
+            "-- One normalized multi-output definition and all-port property.\n\
+             def {definition_name} {} : {type_expr} :=\n  {value_expr}\n\n\
+             theorem {theorem_name} {} {required} :\n  {properties} := by\n\
+               exact {property_proof}\n\n",
+            def_params.join(" "),
+            theorem_params.join(" "),
+        ));
+        program.theorems.push(theorem_name.clone());
+
+        let mut used = BTreeSet::new();
+        for &output in &outputs {
+            used.extend(collect_used_nodes(graph, output)?);
+        }
+        let sources = used
+            .iter()
+            .filter(|&&i| matches!(graph.nodes()[i].operation, Operation::Input))
+            .copied()
+            .collect::<Vec<_>>();
+        let params = sources
+            .iter()
+            .map(|&i| format!(
+                "(x_{i} : {})",
+                lean_value_type(graph.nodes()[i].dtype, graph.nodes()[i].shape.element_count())
+            ))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let args = sources.iter().map(|&i| format!("x_{i}")).collect::<Vec<_>>().join(" ");
+        let source_hypotheses = program.assumptions()
+            .iter()
+            .map(|a| a.input_node)
+            .collect::<BTreeSet<_>>();
+        for &instance_index in module_indices {
+            let instance = &graph.multi_modules()[instance_index];
+            let input_values = instance.inputs.iter()
+                .map(|id| format!("(node_{} {args})", id.index()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let premises = definition.required_ports.iter()
+                .map(|&port| prove_ideal_nonnegative(
+                    graph, instance.inputs[port], &args,
+                    &source_hypotheses, &mut BTreeMap::new(),
+                ))
+                .collect::<Result<Vec<_>, _>>()?;
+            let hypothesis_params = program.assumptions().iter()
+                .map(|a| {
+                    let needed = format!("h_{}", a.input_node);
+                    let used = premises.iter().any(|term| term
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .any(|token| token == needed));
+                    let binder = if used { needed } else { format!("_h_{}", a.input_node) };
+                    format!("({binder} : VeriNeural.Nonnegative x_{})", a.input_node)
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let premise_args = if premises.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", premises.join(" "))
+            };
+            for (port, &output) in instance.outputs.iter().enumerate() {
+                let property_name = format!("{definition_name}_instance_{instance_index}_port_{port}");
+                let path = projection(port);
+                program.source.push_str(&format!(
+                    "theorem {property_name} {params} {hypothesis_params} :\n\
+                     VeriNeural.Nonnegative (node_{} {args}) := by\n\
+                     change VeriNeural.Nonnegative (({definition_name} {input_values}).{path})\n\
+                     exact ({theorem_name} {input_values}{premise_args}).{path}\n\n",
+                    output.index(),
+                ));
+                program.theorems.push(property_name);
+            }
+        }
+
+        program.source.push_str(end);
+        Ok(program)
+    }
+
     /// Prove one explicit architecture-level ideal-Int property:
     /// the selected output is elementwise nonnegative under the listed source
     /// hypotheses. This theorem composes top-level module proofs over their
@@ -2260,7 +2481,8 @@ fn normalize_module_nonnegative_definition_impl(
     let mut expression_cache = BTreeMap::new();
     let expression = normalized_module_expression(
         graph,
-        module_index,
+        module.body_start,
+        module.body_end,
         module.output.index(),
         &boundary,
         &mut expression_cache,
@@ -2269,7 +2491,8 @@ fn normalize_module_nonnegative_definition_impl(
     let mut proof_cache = BTreeMap::new();
     let proof_term = normalized_module_nonnegative_proof(
         graph,
-        module_index,
+        module.body_start,
+        module.body_end,
         module.output.index(),
         &boundary,
         &mut required_ports,
@@ -2304,9 +2527,86 @@ fn normalize_module_nonnegative_definition_impl(
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NormalizedMultiNonnegativeDefinition {
+    outputs: Vec<NormalizedModuleNonnegativeDefinition>,
+    required_ports: Vec<usize>,
+}
+
+fn normalize_multi_nonnegative_definition(
+    graph: &NeuralGraph,
+    index: usize,
+) -> Result<NormalizedMultiNonnegativeDefinition, ProofError> {
+    let module = graph
+        .multi_modules()
+        .get(index)
+        .ok_or(ProofError::InvalidOutputs)?;
+    if module.outputs.len() < 2 {
+        return Err(ProofError::InvalidOutputs);
+    }
+    let boundary = module
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(port, input)| (input.index(), port))
+        .collect::<BTreeMap<_, _>>();
+    let mut required = BTreeSet::new();
+    let mut outputs = Vec::new();
+    for (port, &output) in module.outputs.iter().enumerate() {
+        if graph.node(output)?.dtype != DType::F32
+            || !module.contract.outputs[port]
+                .claims
+                .contains(&ContractClaim::Nonnegative)
+        {
+            return Err(ProofError::UnsupportedGuarantee {
+                node: output.index(),
+            });
+        }
+        let expression = normalized_module_expression(
+            graph, module.body_start, module.body_end, output.index(),
+            &boundary, &mut BTreeMap::new(),
+        )?;
+        let mut needed = BTreeSet::new();
+        let proof_term = normalized_module_nonnegative_proof(
+            graph, module.body_start, module.body_end, output.index(),
+            &boundary, &mut needed, &mut BTreeMap::new(),
+        )?;
+        for &port in &needed {
+            let contract = &module.contract.inputs[port].port;
+            if contract.dtype != DType::F32 || contract.domain != Domain::NonNegativeFinite {
+                return Err(ProofError::UnsupportedGuarantee {
+                    node: output.index(),
+                });
+            }
+        }
+        required.extend(needed.iter().copied());
+        outputs.push(NormalizedModuleNonnegativeDefinition {
+            expression,
+            proof_term,
+            required_ports: needed.into_iter().collect(),
+        });
+    }
+    // Even unused declared requires remain obligations of each instance.
+    for (port, input) in module.contract.inputs.iter().enumerate() {
+        if input.port.domain == Domain::NonNegativeFinite {
+            if input.port.dtype != DType::F32 {
+                return Err(ProofError::UnsupportedGuarantee {
+                    node: module.outputs[0].index(),
+                });
+            }
+            required.insert(port);
+        }
+    }
+    Ok(NormalizedMultiNonnegativeDefinition {
+        outputs,
+        required_ports: required.into_iter().collect(),
+    })
+}
+
 fn normalized_module_expression(
     graph: &NeuralGraph,
-    module_index: usize,
+    body_start: usize,
+    body_end: usize,
     index: usize,
     boundary: &BTreeMap<usize, usize>,
     cache: &mut BTreeMap<usize, String>,
@@ -2317,13 +2617,12 @@ fn normalized_module_expression(
     if let Some(&port) = boundary.get(&index) {
         return Ok(format!("p_{port}"));
     }
-    let module = &graph.modules()[module_index];
-    if index < module.body_start || index >= module.body_end {
+    if index < body_start || index >= body_end {
         return Err(ProofError::UnsupportedGuarantee { node: index });
     }
     let node = &graph.nodes()[index];
     let expr = |input: NodeId, cache: &mut BTreeMap<usize, String>| {
-        normalized_module_expression(graph, module_index, input.index(), boundary, cache)
+        normalized_module_expression(graph, body_start, body_end, input.index(), boundary, cache)
     };
     let result = match &node.operation {
         Operation::Add => format!(
@@ -2442,7 +2741,7 @@ fn normalized_module_expression(
             spec.expression().lean(&|port| {
                 normalized_module_expression(
                     graph,
-                    module_index,
+                    body_start, body_end,
                     node.inputs[port].index(),
                     boundary,
                     &mut BTreeMap::new(),
@@ -2466,7 +2765,8 @@ fn normalized_module_expression(
 
 fn normalized_module_nonnegative_proof(
     graph: &NeuralGraph,
-    module_index: usize,
+    body_start: usize,
+    body_end: usize,
     index: usize,
     boundary: &BTreeMap<usize, usize>,
     required_ports: &mut BTreeSet<usize>,
@@ -2479,15 +2779,14 @@ fn normalized_module_nonnegative_proof(
         required_ports.insert(port);
         return Ok(format!("h_port_{port}"));
     }
-    let module = &graph.modules()[module_index];
-    if index < module.body_start || index >= module.body_end {
+    if index < body_start || index >= body_end {
         return Err(ProofError::UnsupportedGuarantee { node: index });
     }
     let node = &graph.nodes()[index];
     let term = |input: NodeId| {
         normalized_module_expression(
             graph,
-            module_index,
+            body_start, body_end,
             input.index(),
             boundary,
             &mut BTreeMap::new(),
@@ -2498,7 +2797,7 @@ fn normalized_module_nonnegative_proof(
                  cache: &mut BTreeMap<usize, String>| {
         normalized_module_nonnegative_proof(
             graph,
-            module_index,
+            body_start, body_end,
             input.index(),
             boundary,
             required_ports,
@@ -2630,7 +2929,7 @@ fn normalized_module_nonnegative_proof(
             .nonnegative_lean(&|port| {
                 normalized_module_expression(
                     graph,
-                    module_index,
+                    body_start, body_end,
                     node.inputs[port].index(),
                     boundary,
                     &mut BTreeMap::new(),
