@@ -43,6 +43,7 @@ pub struct GpuLaunchConfig {
     threads_per_block: u32,
     relu_fusion: ReluFusion,
     approximate_exp: bool,
+    pointwise_fusion: bool,
 }
 
 impl GpuLaunchConfig {
@@ -55,6 +56,7 @@ impl GpuLaunchConfig {
             threads_per_block,
             relu_fusion,
             approximate_exp: false,
+            pointwise_fusion: false,
         })
     }
 
@@ -76,6 +78,17 @@ impl GpuLaunchConfig {
     pub const fn approximate_exp(self) -> bool {
         self.approximate_exp
     }
+
+    /// Experimental strict-order Mul -> Add fusion. Never contracts to FMA.
+    /// Selected producers, shared operands and unsupported shapes remain unfused.
+    pub const fn with_pointwise_fusion(mut self) -> Self {
+        self.pointwise_fusion = true;
+        self
+    }
+
+    pub const fn pointwise_fusion(self) -> bool {
+        self.pointwise_fusion
+    }
 }
 
 impl Default for GpuLaunchConfig {
@@ -84,6 +97,7 @@ impl Default for GpuLaunchConfig {
             threads_per_block: 256,
             relu_fusion: ReluFusion::Disabled,
             approximate_exp: false,
+            pointwise_fusion: false,
         }
     }
 }
@@ -301,6 +315,7 @@ pub struct GpuKernelCapability {
 pub enum GpuOptimizationKind {
     ReluProducerFusion,
     PointwiseBiasReluFusion,
+    MulAddFusion,
 }
 
 impl GpuOptimizationKind {
@@ -308,6 +323,7 @@ impl GpuOptimizationKind {
         match self {
             Self::ReluProducerFusion => "relu-producer-fusion",
             Self::PointwiseBiasReluFusion => "pointwise-bias-relu-fusion",
+            Self::MulAddFusion => "mul-add-fusion",
         }
     }
 }
@@ -524,6 +540,8 @@ pub struct GpuProgram {
     fused_relus: BTreeMap<usize, usize>,
     // Relu root -> [exclusive Add/Mul producer, exclusive BiasAdd producer].
     fused_pointwise_chains: BTreeMap<usize, Vec<usize>>,
+    // Add root -> (exclusive Mul producer, root operand position: 0 or 1).
+    fused_mul_adds: BTreeMap<usize, (usize, usize)>,
 }
 
 impl GpuProgram {
@@ -563,6 +581,10 @@ impl GpuProgram {
         &self.fused_pointwise_chains
     }
 
+    pub fn fused_mul_adds(&self) -> &BTreeMap<usize, (usize, usize)> {
+        &self.fused_mul_adds
+    }
+
     pub fn removed_kernel_count(&self) -> usize {
         self.skipped_nodes().len()
     }
@@ -572,6 +594,7 @@ impl GpuProgram {
         for chain in self.fused_pointwise_chains.values() {
             skipped.extend(chain.iter().copied());
         }
+        skipped.extend(self.fused_mul_adds.values().map(|&(mul, _)| mul));
         skipped
     }
 
@@ -591,7 +614,14 @@ impl GpuProgram {
             }
             let writes = node.shape.element_count();
             let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) =
-                if let Some(chain) = self.fused_pointwise_chains.get(&index) {
+                if let Some(&(mul, slot)) = self.fused_mul_adds.get(&index) {
+                    let producer = &self.graph.nodes()[mul];
+                    (
+                        vec![producer.inputs[0].index(), producer.inputs[1].index(),
+                             node.inputs[1 - slot].index()],
+                        GpuMemoryPattern::Pointwise,
+                    )
+                } else if let Some(chain) = self.fused_pointwise_chains.get(&index) {
                     let inner = &self.graph.nodes()[chain[0]];
                     let bias = &self.graph.nodes()[chain[1]];
                     (
@@ -890,7 +920,9 @@ impl GpuProgram {
         let mut kernels = Vec::new();
         for contract in self.memory_contracts()? {
             let node = &self.graph.nodes()[contract.kernel_node];
-            let kind = if let Some(chain) = self.fused_pointwise_chains.get(&contract.kernel_node) {
+            let kind = if let Some(&(_, slot)) = self.fused_mul_adds.get(&contract.kernel_node) {
+                TranslationKind::MulAdd { multiply_on_right: slot == 1 }
+            } else if let Some(chain) = self.fused_pointwise_chains.get(&contract.kernel_node) {
                 let inner = &self.graph.nodes()[chain[0]].operation;
                 let columns = match contract.pattern {
                     GpuMemoryPattern::BiasAdd { columns } => columns,
@@ -1199,6 +1231,38 @@ impl GpuProgram {
                 root,
                 kind: GpuOptimizationKind::ReluProducerFusion,
                 removed_nodes: vec![producer],
+                exclusive_reachable_use: true,
+                selected_outputs_preserved: true,
+            });
+        }
+
+        for (&root, &(mul, slot)) in &self.fused_mul_adds {
+            let root_node = &self.graph.nodes()[root];
+            let producer = &self.graph.nodes()[mul];
+            let exclusive = uses[mul] == 1;
+            let preserves = !selected.contains(&mul);
+            let compatible = slot < 2
+                && matches!(root_node.operation, Operation::Add)
+                && matches!(producer.operation, Operation::Mul)
+                && root_node.inputs[slot].index() == mul
+                && root_node.shape == producer.shape
+                && producer.inputs.iter().all(|&id| {
+                    self.graph.nodes()[id.index()].shape == root_node.shape
+                })
+                && self.graph.nodes()[root_node.inputs[1-slot].index()].shape == root_node.shape
+                && !covered_removed.contains(&mul)
+                && !self.fused_relus.contains_key(&root)
+                && !self.fused_pointwise_chains.contains_key(&root);
+            if !exclusive || !preserves || !compatible {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid mul-add fusion capability at node {root}"),
+                });
+            }
+            covered_removed.insert(mul);
+            optimizations.push(GpuOptimizationCapability {
+                root,
+                kind: GpuOptimizationKind::MulAddFusion,
+                removed_nodes: vec![mul],
                 exclusive_reachable_use: true,
                 selected_outputs_preserved: true,
             });
@@ -1959,6 +2023,7 @@ impl GpuEngine {
         }
         let mut fused_relus = BTreeMap::new();
         let mut fused_pointwise_chains = BTreeMap::new();
+        let mut fused_mul_adds = BTreeMap::new();
         if self.launch.relu_fusion == ReluFusion::Experimental {
             for &index in &live_nodes {
                 let node = &graph.nodes()[index];
@@ -1993,6 +2058,31 @@ impl GpuEngine {
         for chain in fused_pointwise_chains.values() {
             skipped.extend(chain.iter().copied());
         }
+        if self.launch.pointwise_fusion() {
+            for &index in &live_nodes {
+                let node = &graph.nodes()[index];
+                if !matches!(node.operation, Operation::Add) || skipped.contains(&index) {
+                    continue;
+                }
+                for slot in 0..2 {
+                    let producer = graph.node(node.inputs[slot])?;
+                    if !matches!(producer.operation, Operation::Mul)
+                        || uses[producer.id.index()] != 1
+                        || skipped.contains(&producer.id.index())
+                        || producer.shape != node.shape
+                        || graph.node(node.inputs[1-slot])?.shape != node.shape
+                        || producer.inputs.iter().any(|&id| {
+                            graph.nodes()[id.index()].shape != node.shape
+                        })
+                    {
+                        continue;
+                    }
+                    fused_mul_adds.insert(index, (producer.id.index(), slot));
+                    skipped.insert(producer.id.index());
+                    break;
+                }
+            }
+        }
         let mut llvm_ir = String::from(
             "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n\
              target triple = \"nvptx64-nvidia-cuda\"\n\n\
@@ -2008,7 +2098,10 @@ impl GpuEngine {
             {
                 continue;
             }
-            if let Some(chain) = fused_pointwise_chains.get(&index) {
+            if let Some(&(mul, slot)) = fused_mul_adds.get(&index) {
+                debug_assert!(matches!(graph.nodes()[mul].operation, Operation::Mul));
+                llvm_ir.push_str(&mul_add_kernel_ir(index, slot == 1));
+            } else if let Some(chain) = fused_pointwise_chains.get(&index) {
                 let inner = &graph.nodes()[chain[0]];
                 let bias_add = &graph.nodes()[chain[1]];
                 llvm_ir.push_str(&pointwise_chain_kernel_ir(
@@ -2125,6 +2218,7 @@ impl GpuEngine {
             launch: self.launch,
             fused_relus,
             fused_pointwise_chains,
+            fused_mul_adds,
         };
         // Fail closed unless every launched kernel has matching memory and
         // translation evidence and every applied optimization has valid
@@ -2478,6 +2572,47 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
     };
     let result = if fuse_relu { "%fused_result" } else { "%value" };
     pointwise_kernel_ir(index, &format!("{computation}{tail}"), result)
+}
+
+/// Opt-in strict-order fusion of a pointwise Mul followed by Add.
+/// Two explicit PTX RN instructions prevent LLVM from contracting the pair
+/// into FMA. %a/%b are the Mul operands; %bias is the other Add operand.
+/// The original Add operand order is preserved, including signed zero/NaN
+/// cases where commutation must not be assumed.
+fn mul_add_kernel_ir(index: usize, multiply_on_right: bool) -> String {
+    let operands = if multiply_on_right {
+        "(float %z, float %product)"
+    } else {
+        "(float %product, float %z)"
+    };
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %bias, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %idx
+  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx
+  %biasp = getelementptr float, ptr addrspace(1) %bias, i32 %idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %y = load float, ptr addrspace(1) %bp, align 4
+  %z = load float, ptr addrspace(1) %biasp, align 4
+  %product = call float asm sideeffect "mul.rn.f32 $0, $1, $2;", "=f,f,f"(float %x, float %y)
+  %value = call float asm sideeffect "add.rn.f32 $0, $1, $2;", "=f,f,f"{operands}
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %value, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
 }
 
 fn pointwise_chain_kernel_ir(index: usize, inner_op: &Operation, columns: usize) -> String {

@@ -368,3 +368,29 @@ measuring end-to-end optimizer throughput, implementing in-GPU
 AdamW/CE, ensuring parity of the research checkpoint/architecture,
 exact handoff 51,648 validation positions protocol, checkpoint I/O,
 long multi-seed learning and evaluating whether holdout BPC improves.
+
+
+### Experimental Mul→Add NVIDIA GPU fusion for universal reverse-mode graphs (code, acceptance pending)
+
+`GpuLaunchConfig::with_pointwise_fusion()` adds an opt-in typed,
+exclusive-use `Mul → Add` compiler rewrite. Kernel combination is
+valid only when Mul has exactly one reachable use, is not itself a
+selected output, all three inputs/outputs have equal shape, and no
+existing ReLU-chain fusion consumes either node. The unmodified
+Semantic IR remains authoritative. A newly generated CUDA Graph launches
+one kernel (separate `mul.rn.f32` then `add.rn.f32` without FMA) rather
+than two. The exact original position of Mul in Add is encoded in the
+translation plan. GPU memory contracts include all three actual source
+addresses, explicit `GpuOptimizationCapability::MulAddFusion` records
+the removed producer, and structural LLVM/PTX audit checks the template,
+rounding and instruction counts. Unsupported cases remain unfused.
+
+Acceptance: `task pointwise-mul-add-fusion`,
+`task verify-gpu-mul-add-fusion`; selected-output/fan-out negative
+tests plus bitwise NVIDIA parity for both Add operand positions.
+The EMA4 full-parameter BPTT lab opts in, compares the fused and
+non-fused **kernel counts before execution** and prints the reduction
+(and optionally CUDA-event replay time). No measured hardware gain,
+full training gradient parity or Lean/IEEE/JIT equivalence is claimed
+until separately checked. More general backward fusion and
+end-to-end train throughput/memory benchmarking remain open.

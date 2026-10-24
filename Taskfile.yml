@@ -452,6 +452,18 @@ tasks:
     cmds:
       - cargo test -p torus16-mix-lab --test gpu_forward -- --ignored --nocapture
 
+  pointwise-mul-add-fusion:
+    desc: Validate checked opt-in Mul+Add CUDA fusion and its reverse-mode boundaries
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test mul_add_fusion
+
+  verify-gpu-mul-add-fusion:
+    desc: NVIDIA bitwise fused vs unfused Mul-then-Add parity
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test mul_add_fusion -- --ignored --nocapture
+
   temporal-bptt-stage:
     desc: Test generic recurrent IR unroll, through-time dependency and full EMA4 parameter inventory
     deps: [prepare]
@@ -466,7 +478,7 @@ tasks:
       - cargo test -p verineural --test temporal -- --ignored --nocapture
 
   train-lab-torus16-ema4-bptt:
-    desc: Experimental full-parameter GPU BPTT with explicit TORUS16_CORPUS path and holdout BPC
+    desc: Fused GPU BPTT with checked-in corpus and before-after CUDA kernel counts
     deps: [prepare]
     cmds:
       - cargo run -p torus16-mix-lab --example ema4_bptt

@@ -19,6 +19,9 @@ pub(crate) const LOG2_E_F32_LLVM: &str = "0x3FF7154760000000";
 pub enum TranslationKind {
     Add,
     Mul,
+    /// Experimental two-instruction Mul -> Add, never contracted to FMA.
+    /// Retains the original Add operand order.
+    MulAdd { multiply_on_right: bool },
     /// IEEE binary32 subtraction with explicit round-to-nearest-even.
     Sub,
     /// IEEE binary32 division, round-to-nearest-even.
@@ -78,6 +81,7 @@ impl TranslationKind {
         match self {
             Self::Add => "add",
             Self::Mul => "mul",
+            Self::MulAdd { .. } => "mul_add",
             Self::Sub => "sub_rn",
             Self::DivRne => "div_rn",
             Self::ExpApprox => "exp_approx",
@@ -105,6 +109,7 @@ impl TranslationKind {
         match self {
             Self::Add | Self::BiasAdd { .. } => (1, 0, 0),
             Self::Mul => (0, 1, 0),
+            Self::MulAdd { .. } => (1, 1, 0),
             Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
             Self::MatMul { .. } => (1, 1, 0),
@@ -135,7 +140,7 @@ impl TranslationKind {
             | Self::SliceLastRow { .. }
             | Self::BroadcastScalar
             | Self::ArgMaxLast { .. } => 1,
-            Self::AddBiasRelu { .. } | Self::MulBiasRelu { .. } => 3,
+            Self::AddBiasRelu { .. } | Self::MulBiasRelu { .. } | Self::MulAdd { .. } => 3,
             _ => 2,
         }
     }
@@ -165,6 +170,7 @@ impl TranslationKind {
             Self::SliceLastRow { start, .. } => start,
             Self::ArgMaxLast { width } => width,
             Self::TakeAxis0 { lane } => lane,
+            Self::MulAdd { multiply_on_right } => usize::from(multiply_on_right),
             _ => 0,
         }
     }
@@ -173,6 +179,7 @@ impl TranslationKind {
         let kind = match name {
             "add" => Self::Add,
             "mul" => Self::Mul,
+            "mul_add" => Self::MulAdd { multiply_on_right: inner == 1 },
             "sub_rn" => Self::Sub,
             "div_rn" => Self::DivRne,
             "exp_approx" => Self::ExpApprox,
@@ -312,6 +319,11 @@ impl TranslationPlan {
                     || kernel.reads[1].1 != inner.saturating_mul(columns)
                 {
                     return Err(invalid("MatMul source shape differs from reduction shape"));
+                }
+            }
+            if let TranslationKind::MulAdd { .. } = kernel.kind {
+                if kernel.reads.iter().any(|&(_,size)| size != kernel.writes) {
+                    return Err(invalid("mul-add source shape mismatch"));
                 }
             }
             if let TranslationKind::BiasAdd { columns } | TranslationKind::BiasAddRelu { columns } =
@@ -653,6 +665,44 @@ impl TranslationPlan {
                 report.details.push_str(&format!(
                     "node={node} kind={} reads={reads} writes={} add.rn.f32=0 mul.rn.f32=0 relu=0 status=structural-pass\n",
                     kernel.kind.name(), kernel.writes
+                ));
+                continue;
+            }
+            if let TranslationKind::MulAdd { multiply_on_right } = kernel.kind {
+                let operands = if multiply_on_right {
+                    "(float %z, float %product)"
+                } else {
+                    "(float %product, float %z)"
+                };
+                let required = [
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx",
+                    "%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx",
+                    "%biasp = getelementptr float, ptr addrspace(1) %bias, i32 %idx",
+                    "%x = load float, ptr addrspace(1) %ap, align 4",
+                    "%y = load float, ptr addrspace(1) %bp, align 4",
+                    "%z = load float, ptr addrspace(1) %biasp, align 4",
+                    "%product = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)",
+                    "icmp ult i32 %idx, %length",
+                    "store float %value, ptr addrspace(1) %op, align 4",
+                ];
+                let add = format!("%value = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"{operands}");
+                let mul_pos = ir.find(required[6]);
+                let add_pos = ir.find(&add);
+                if required.iter().any(|&value| !ir.contains(value))
+                    || !matches!((mul_pos, add_pos), (Some(m), Some(a)) if m < a)
+                    || ir.matches("call float asm sideeffect").count() != 2
+                    || ir.matches("fcmp ").count() != 0
+                    || !ir.contains("br i1 %valid, label %compute, label %done")
+                {
+                    return Err(invalid(format!("mul-add FP32 template mismatch at node {node}")));
+                }
+                audit_fp32_ptx(ir, asm)
+                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                report.rounded_adds += 1;
+                report.rounded_muls += 1;
+                report.details.push_str(&format!(
+                    "node={node} kind=mul_add reads={:?} writes={} rounding=mul.rn-then-add.rn operand_slot={} hardware=trusted\n",
+                    kernel.reads, kernel.writes, usize::from(multiply_on_right)
                 ));
                 continue;
             }

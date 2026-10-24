@@ -269,3 +269,44 @@ Known limitations and trusted boundaries:
   must increase them for a meaningful training run. There is no guarantee
   the short smoke test improves heldout BPC.
 - Reproducible checkpoint export/load and multi-seed studies remain open.
+
+
+## Experimental GPU Mul → Add fusion (architecturally neutral)
+
+`GpuLaunchConfig::with_pointwise_fusion()` opts into an exact-order,
+bounded GPU compiler rewrite for an exclusive pointwise `Mul → Add` chain.
+The semantic IR is **not rewritten**, and all selected outputs remain
+available. A candidate is rejected unless the producer is used exactly
+once by the selected Add, both operations and all operands have the
+same checked shape, and the producer is not separately observable.
+
+The CUDA kernel reads three ordinary operands, executes explicit
+`mul.rn.f32` followed by `add.rn.f32` in the original operand order
+(no `fma.rn.f32`), and stores the Add result. The fused producer
+is removed from the actual CUDA Graph launch/memory contracts.
+`TranslationKind::MulAdd` validates the two-operation LLVM template,
+operand order and PTX instruction counts. The compiler's
+`GpuCapabilityPlan` records the removed producer and exact preconditions.
+Like the existing PTX audit, this is **structural validation**, not a
+formally proved equivalence to executed SASS.
+
+The full-parameter BPTT example now explicitly opts in and prints
+`cuda_graph_before`, `cuda_graph_after`, removed kernel count,
+fusion candidates, and percentage of real CUDA kernel launch reduction.
+The baseline is compiled only, not allocated/run on GPU. For an optional
+CUDA-event timing of the **fused graph only** in Fish:
+
+```fish
+set -gx TORUS16_BENCH_FUSED 1
+task train-lab-torus16-ema4-bptt
+set -e TORUS16_BENCH_FUSED
+```
+
+This excludes host cross-entropy, AdamW, host-device updates, compilation,
+and memory allocations: it is **not** an end-to-end speedup metric.
+The default no-fusion GpuLaunchConfig preserves previous behavior.
+Check `task pointwise-mul-add-fusion` and
+`task verify-gpu-mul-add-fusion` before the full NVIDIA training run.
+Unfused and fused outputs are bitwise compared on two operand-order
+variants by the ignored hardware test. Full EMA4 training parity
+across several epochs and strict FP32 proof remain separate goals.

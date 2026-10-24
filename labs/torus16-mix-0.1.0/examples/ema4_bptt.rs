@@ -107,8 +107,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     )
-    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp().with_pointwise_fusion());
+    // Before/after reports count actual CUDA Graph kernel nodes, not the
+    // number of semantic IR nodes. Baseline is compiled but NOT executed.
+    let old_kernels = {
+        let baseline = GpuEngine::new(
+            "llc",
+            std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+        )
+        .with_launch_config(GpuLaunchConfig::default().with_approximate_exp())
+        .compile_outputs(reverse.graph(), &selected)?;
+        baseline.kernel_count()?
+    };
+    // Release the unfused program before constructing the GPU execution:
+    // large BPTT graphs should not retain two IR/LLVM copies simultaneously.
     let program = engine.compile_outputs(reverse.graph(), &selected)?;
+    let new_kernels = program.kernel_count()?;
+    if new_kernels > old_kernels {
+        return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
+    }
+    println!("cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} reduction_percent={:.2}",
+        old_kernels, new_kernels, old_kernels - new_kernels,
+        program.fused_mul_adds().len(),
+        100. * (old_kernels - new_kernels) as f64 / old_kernels as f64);
+
     let all = weights.bindings(0)?;
     let base = all
         .into_iter()
@@ -133,6 +155,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect::<Vec<_>>();
     let artifact = std::env::temp_dir().join(format!("vn_ema4_bptt_{}", std::process::id()));
     let mut gpu = engine.prepare(&program, &supplied, &artifact)?;
+    // Device CUDA-event timing of the fused graph alone. Compilation,
+    // HtoD copies, host CE, AdamW and holdout scoring are excluded.
+    if std::env::var_os("TORUS16_BENCH_FUSED").is_some() {
+        let event = gpu.benchmark(3, 10)?;
+        println!("fused_cuda_graph_event_average_ms={:.5} measured_launches=10",
+            event.average().as_secs_f64() * 1000.);
+    }
     let mut params = trainable_initial;
     let mut optimizer = AdamW::new(0.002, 0.01)?;
     let grad_begin = window_len;
