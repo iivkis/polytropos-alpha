@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::translation::{TranslationKernel, TranslationKind, TranslationPlan};
+use crate::translation::{LOG2_E_F32_LLVM, TranslationKernel, TranslationKind, TranslationPlan};
 use crate::{
     DType, LeanProgram, NeuralError, NeuralGraph, NodeId, NodeStorage, Operation, Shape, Tensor,
     TensorValue,
@@ -2438,8 +2438,8 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
                    %y = load float, ptr addrspace(1) %bp, align 4\n\
                    %value = call float asm sideeffect \"div.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)\n",
             ),
-            Some(TranslationKind::ExpApprox) => String::from(
-                "  %scaled = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float 1.442695e+00)\n\
+            Some(TranslationKind::ExpApprox) => format!(
+                "  %scaled = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float {LOG2_E_F32_LLVM})\n\
                    %value = call float asm sideeffect \"ex2.approx.f32 $0, $1;\", \"=f,f\"(float %scaled)\n",
             ),
             _ => unreachable!("pointwise signatures were validated before codegen"),

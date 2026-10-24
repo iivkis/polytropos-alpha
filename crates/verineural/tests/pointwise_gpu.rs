@@ -42,6 +42,10 @@ fn strict_rne_arithmetic_and_explicit_approximation() {
             .any(|k| k.kind == TranslationKind::ExpApprox)
     );
     assert!(code.llvm_ir().contains("ex2.approx.f32"));
+    // LLVM rejects non-exact decimal f32 literals such as 1.442695e+00.
+    // Check the exact binary32 constant encoded as an LLVM hex float.
+    assert!(code.llvm_ir().contains("float 0x3FF7154760000000"));
+    assert!(!code.llvm_ir().contains("float 1.442695e+00"));
 }
 
 #[test]

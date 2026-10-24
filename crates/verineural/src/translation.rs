@@ -9,6 +9,12 @@ use std::fmt;
 
 use crate::gpu::audit_fp32_ptx;
 
+/// LLVM IR requires precisely representable floating literals for type `float`.
+/// The decimal 1.442695e+00 is rejected by LLVM, whereas this hex encoding
+/// of the nearest binary32 log2(e) (bits 0x3FB8AA3B) is accepted.
+/// Shared by codegen and structural translation validation.
+pub(crate) const LOG2_E_F32_LLVM: &str = "0x3FF7154760000000";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TranslationKind {
     Add,
@@ -671,7 +677,7 @@ impl TranslationPlan {
                 };
                 let fp32_scales = usize::from(matches!(kernel.kind, TranslationKind::ExpApprox));
                 let correct_operands = if matches!(kernel.kind, TranslationKind::ExpApprox) {
-                    ir.contains("%scaled = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float 1.442695e+00)")
+                    ir.contains(&format!("%scaled = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float {LOG2_E_F32_LLVM})"))
                         && !ir.contains("%bp = getelementptr")
                 } else {
                     ir.contains("%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx")
