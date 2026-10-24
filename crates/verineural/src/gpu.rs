@@ -221,7 +221,10 @@ pub enum GpuMemoryPattern {
         left: usize,
     },
     /// The contiguous last-axis slice profile for shape [1, N].
-    SliceLastRow { start: usize, source_width: usize },
+    SliceLastRow {
+        start: usize,
+        source_width: usize,
+    },
     /// Replicate one scalar to a [1, N] output.
     BroadcastScalar,
     ArgMaxLast {
@@ -595,39 +598,53 @@ impl GpuProgram {
                         Operation::Concat { axis } => {
                             let left = &self.graph.nodes()[op_node.inputs[0].index()];
                             let right = &self.graph.nodes()[op_node.inputs[1].index()];
-                            if *axis != 0 && !(*axis == 1
-                                && left.shape.rank() == 2 && left.shape.dims()[0] == 1
-                                && right.shape.dims()[0] == 1)
+                            if *axis != 0
+                                && !(*axis == 1
+                                    && left.shape.rank() == 2
+                                    && left.shape.dims()[0] == 1
+                                    && right.shape.dims()[0] == 1)
                             {
                                 return Err(GpuError::UnsupportedOperation {
-                                    node: index, operation: op_node.operation.name(),
+                                    node: index,
+                                    operation: op_node.operation.name(),
                                 });
                             }
                             GpuMemoryPattern::ConcatAxis0 {
                                 left: left.shape.element_count(),
                             }
                         }
-                        Operation::SliceAxis { axis: 1, start, len } => {
+                        Operation::SliceAxis {
+                            axis: 1,
+                            start,
+                            len,
+                        } => {
                             let input = &self.graph.nodes()[op_node.inputs[0].index()];
-                            if input.shape.rank() != 2 || input.shape.dims()[0] != 1
+                            if input.shape.rank() != 2
+                                || input.shape.dims()[0] != 1
                                 || *len != writes
-                                || start.checked_add(*len).is_none_or(|end| end > input.shape.dims()[1])
+                                || start
+                                    .checked_add(*len)
+                                    .is_none_or(|end| end > input.shape.dims()[1])
                             {
                                 return Err(GpuError::UnsupportedOperation {
-                                    node: index, operation: op_node.operation.name(),
+                                    node: index,
+                                    operation: op_node.operation.name(),
                                 });
                             }
                             GpuMemoryPattern::SliceLastRow {
-                                start: *start, source_width: input.shape.dims()[1],
+                                start: *start,
+                                source_width: input.shape.dims()[1],
                             }
                         }
                         Operation::BroadcastTo(_) => {
                             let input = &self.graph.nodes()[op_node.inputs[0].index()];
-                            if input.shape.element_count() != 1 || node.shape.rank() != 2
+                            if input.shape.element_count() != 1
+                                || node.shape.rank() != 2
                                 || node.shape.dims()[0] != 1
                             {
                                 return Err(GpuError::UnsupportedOperation {
-                                    node: index, operation: op_node.operation.name(),
+                                    node: index,
+                                    operation: op_node.operation.name(),
                                 });
                             }
                             GpuMemoryPattern::BroadcastScalar
@@ -708,12 +725,18 @@ impl GpuProgram {
                     }
                     vec![writes]
                 }
-                GpuMemoryPattern::SliceLastRow { start, source_width } => {
-                    if read_nodes.len() != 1 || start.checked_add(writes)
-                        .is_none_or(|end| end > source_width)
+                GpuMemoryPattern::SliceLastRow {
+                    start,
+                    source_width,
+                } => {
+                    if read_nodes.len() != 1
+                        || start
+                            .checked_add(writes)
+                            .is_none_or(|end| end > source_width)
                     {
                         return Err(GpuError::InvalidInput {
-                            node: index, reason: "slice source extent mismatch",
+                            node: index,
+                            reason: "slice source extent mismatch",
                         });
                     }
                     vec![source_width]
@@ -903,17 +926,25 @@ impl GpuProgram {
                     },
                     Operation::BroadcastTo(_) => match contract.pattern {
                         GpuMemoryPattern::BroadcastScalar => TranslationKind::BroadcastScalar,
-                        _ => return Err(GpuError::Fp32PtxRejected {
-                            reason: "BroadcastTo lacks scalar memory contract".into(),
-                        }),
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "BroadcastTo lacks scalar memory contract".into(),
+                            });
+                        }
                     },
                     Operation::SliceAxis { axis: 1, .. } => match contract.pattern {
-                        GpuMemoryPattern::SliceLastRow { start, source_width } => {
-                            TranslationKind::SliceLastRow { start, source_width }
+                        GpuMemoryPattern::SliceLastRow {
+                            start,
+                            source_width,
+                        } => TranslationKind::SliceLastRow {
+                            start,
+                            source_width,
+                        },
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "SliceAxis(1) lacks memory contract".into(),
+                            });
                         }
-                        _ => return Err(GpuError::Fp32PtxRejected {
-                            reason: "SliceAxis(1) lacks memory contract".into(),
-                        }),
                     },
                     Operation::Concat { .. } => match contract.pattern {
                         GpuMemoryPattern::ConcatAxis0 { left } => {
@@ -1191,11 +1222,17 @@ impl GpuProgram {
                     theorems.push(name);
                 }
                 GpuMemoryPattern::BroadcastScalar => {
-                    let name = format!("memory_node_{}_broadcast_scalar_bound", contract.kernel_node);
+                    let name = format!(
+                        "memory_node_{}_broadcast_scalar_bound",
+                        contract.kernel_node
+                    );
                     source.push_str(&format!("theorem {name} : 0 < 1 := by decide\n\n"));
                     theorems.push(name);
                 }
-                GpuMemoryPattern::SliceLastRow { start, source_width } => {
+                GpuMemoryPattern::SliceLastRow {
+                    start,
+                    source_width,
+                } => {
                     let name = format!("memory_node_{}_slice_bound", contract.kernel_node);
                     source.push_str(&format!(
                         "theorem {name} (index : Nat) (active : index < {}) : index + {start} < {source_width} := by\n  exact VeriNeural.slice_last_row_address_bound active (by decide)\n\n",
@@ -1944,11 +1981,15 @@ impl GpuEngine {
                             *axis,
                         ));
                     }
-                    Operation::Concat { axis } if *axis == 0
-                        || (*axis == 1 && node.shape.rank() == 2 && node.shape.dims()[0] == 1) =>
+                    Operation::Concat { axis }
+                        if *axis == 0
+                            || (*axis == 1
+                                && node.shape.rank() == 2
+                                && node.shape.dims()[0] == 1) =>
                     {
                         let left = &graph.nodes()[node.inputs[0].index()];
-                        llvm_ir.push_str(&concat_axis0_kernel_ir(index, left.shape.element_count()));
+                        llvm_ir
+                            .push_str(&concat_axis0_kernel_ir(index, left.shape.element_count()));
                     }
                     Operation::SliceAxis { axis: 1, start, .. } => {
                         llvm_ir.push_str(&slice_last_row_kernel_ir(index, *start));
@@ -2523,7 +2564,8 @@ fn reverse2d_kernel_ir(index: usize, rows: usize, columns: usize, axis: usize) -
 
 // Contiguous structural kernels. No neural-architecture operation is hidden here.
 fn slice_last_row_kernel_ir(index: usize, start: usize) -> String {
-    format!(r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{
 entry:
   %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
   %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
@@ -2543,11 +2585,13 @@ done:
   ret void
 }}
 
-"#)
+"#
+    )
 }
 
 fn broadcast_scalar_kernel_ir(index: usize) -> String {
-    format!(r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %out, i32 %length) {{
 entry:
   %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
   %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
@@ -2566,7 +2610,8 @@ done:
   ret void
 }}
 
-"#)
+"#
+    )
 }
 
 fn concat_axis0_kernel_ir(index: usize, left: usize) -> String {

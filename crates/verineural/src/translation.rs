@@ -138,7 +138,10 @@ impl TranslationKind {
                 columns,
             },
             "concat_axis0" => Self::ConcatAxis0 { left: inner },
-            "slice_last_row" => Self::SliceLastRow { start: inner, source_width: columns },
+            "slice_last_row" => Self::SliceLastRow {
+                start: inner,
+                source_width: columns,
+            },
             "broadcast_scalar" => Self::BroadcastScalar,
             "argmax_last" => Self::ArgMaxLast { width: inner },
             "take_axis0" => Self::TakeAxis0 { lane: inner },
@@ -240,9 +243,10 @@ impl TranslationPlan {
                     | TranslationKind::MulBiasRelu { .. }
                     | TranslationKind::MatMul { .. }
             ) && columns == 0)
-                || (columns != 0 && (columns > i32::MAX as usize
-                    || (!matches!(kernel.kind, TranslationKind::SliceLastRow { .. })
-                        && kernel.writes % columns != 0)))
+                || (columns != 0
+                    && (columns > i32::MAX as usize
+                        || (!matches!(kernel.kind, TranslationKind::SliceLastRow { .. })
+                            && kernel.writes % columns != 0)))
             {
                 return Err(invalid("unrepresentable column extent"));
             }
@@ -291,12 +295,15 @@ impl TranslationPlan {
                 {
                     return Err(invalid("reverse2d source shape mismatch"));
                 }
-                TranslationKind::SliceLastRow { start, source_width }
-                    if source_width == 0
-                        || source_width > i32::MAX as usize
-                        || kernel.reads[0].1 != source_width
-                        || start.checked_add(kernel.writes)
-                            .is_none_or(|end| end > source_width) =>
+                TranslationKind::SliceLastRow {
+                    start,
+                    source_width,
+                } if source_width == 0
+                    || source_width > i32::MAX as usize
+                    || kernel.reads[0].1 != source_width
+                    || start
+                        .checked_add(kernel.writes)
+                        .is_none_or(|end| end > source_width) =>
                 {
                     return Err(invalid("last-row slice source mismatch"));
                 }
