@@ -363,7 +363,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         validation_start.elapsed().as_secs_f64()
     );
     println!(
-        "NOTE: deterministic untrained initial values; host AdamW/CE, GPU forward/VJP; no checkpoint parity or formal FP32 gradient proof."
+        "NOTE: deterministic initialization or restored checkpoint; host AdamW/CE and GPU forward/VJP; no formal FP32 gradient proof."
     );
     Ok(())
 }

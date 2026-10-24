@@ -386,7 +386,46 @@ For hardware acceptance run `task verify-gpu-batch-transfers` first.
 No numerical parity, GPU throughput, or long-run robustness result
 is claimed until the local NVIDIA acceptance passes.
 
-**Checkpoint/resume is not yet implemented.** Interrupting this
-example discards parameter and AdamW states. Do not interpret low
-individual two-token train BPC as holdout quality; the validation BPC
-is measured only after the full run.
+## Durable EMA4 TBPTT checkpoint and resume
+
+The BPTT trainer now writes an atomic, versioned checkpoint by default to
+`target/torus16-ema4-bptt.ckpt` (ignored by Git). A checkpoint stores all
+271 trainable parameter tensors, all AdamW moment tensors/hyperparameters,
+68 recurrent initial states at the next window boundary, BPTT size,
+vocabulary size, chronological window cursor, and a checksum/fingerprint
+of the exact corpus file. It is written every 128 windows and at the
+end of the requested training range. On startup, a matching checkpoint
+is resumed automatically; corrupt, truncated, wrong-corpus, wrong-BPTT,
+wrong-shape, wrong-moment or out-of-range checkpoints fail closed. A
+temporary file is synced and atomically renamed, leaving the previous
+complete checkpoint available after most interruptions. The fingerprint
+is not cryptographic authenticity verification.
+
+`TORUS16_TRAIN_WINDOWS` is a **total target count**, not an additional
+number of windows. To continue a previously completed 128-window
+checkpoint to 4096 windows in Fish:
+
+```fish
+set -gx TORUS16_BPTT 2
+set -gx TORUS16_TRAIN_WINDOWS 4096
+set -gx TORUS16_VAL_LIMIT 4096
+task train-lab-torus16-ema4-bptt
+```
+
+Change `TORUS16_CHECKPOINT` to use a separate path; change
+`TORUS16_CHECKPOINT_EVERY` to save more frequently (default 128).
+To **explicitly start from deterministic initial weights** and overwrite
+the previous checkpoint after the next save, set `TORUS16_FRESH=1`
+for that run and unset it afterwards (`set -e TORUS16_FRESH`).
+No checkpoint is silently imported from the previous pre-checkpoint
+runs. This version 1 format applies to this EMA4-LM schema; semantic
+architecture changes should bump the format tag. The optimizer snapshot
+API is architecture-neutral, while persistence stays lab-owned.
+Checkpoint writes add CPU/disk time at save windows and are included
+in `end_to_end_step_ms`. Run `task test-lab-torus16-ema4-checkpoint`
+for CPU unit tests and compare a resumed NVIDIA run to an uninterrupted
+run before claiming numerical parity.
+
+Short two-token train BPC is not holdout quality; validation BPC is
+measured after the requested total training range. No Lean or
+machine-code proof of checkpointed AdamW/FP32 training is claimed.

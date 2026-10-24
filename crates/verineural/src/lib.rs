@@ -94,7 +94,7 @@ pub use numeric::{
     RneModuleErrorContract, RneRangePlan, RneSelectEvidence, RneSelectPlan, RneStateRolloutPlan,
     RneStateStepContract, RneThresholdEvidence, RneThresholdSide,
 };
-pub use optimizer::{AdamW, OptimizerError};
+pub use optimizer::{AdamW, AdamWCheckpoint, OptimizerError};
 pub use primitive::{PointwiseExpr, PointwiseSpec, PrimitiveExpr, PrimitiveSpec};
 pub use proof::{
     CheckedLean, LeanAxiomAudit, LeanProgram, LeanProofEngine, ProofAssumption, ProofError,

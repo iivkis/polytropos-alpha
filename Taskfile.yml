@@ -495,6 +495,12 @@ tasks:
     cmds:
       - cargo test -p verineural --test gpu_batch_transfers -- --ignored --nocapture
 
+  test-lab-torus16-ema4-checkpoint:
+    desc: CPU round-trip, corruption rejection and AdamW restart continuity for EMA4 snapshots
+    deps: [prepare]
+    cmds:
+      - cargo test -p torus16-mix-lab --lib ema4_checkpoint -- --nocapture
+
   train-lab-torus16-ema4-bptt:
     desc: Release-optimized BPTT with batched transfers and per-stage wall-clock profiling
     deps: [prepare]

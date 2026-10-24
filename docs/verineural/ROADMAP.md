@@ -446,3 +446,27 @@ previous unfused-upload baseline on the same device. GPU time and
 speedup are **not** established by source changes. Durable training
 checkpoint + AdamW moment resume and faster GPU-side optimizer
 are separate future milestones, not claimed here.
+
+
+### Durable lab-owned EMA4 TBPTT restart snapshots (experimental, hardware acceptance pending)
+
+Versioned binary snapshots persist exact named trainable parameters,
+AdamW first/second moments and hyperparameters through the reusable
+`AdamW::checkpoint()/from_checkpoint()` API, plus EMA4 initial-state
+values at the next training window boundary, cumulative window cursor,
+BPTT/vocabulary, exact corpus fingerprint, and a truncated-file
+checksum. The checkpoint format and filesystem I/O remain private to
+the EMA4 research lab, not VeriNeural core. Strict shape/name
+validation and optimizer moment/step checks fail closed before resume;
+atomic same-directory temporary file replacement preserves the previous
+complete checkpoint on interruption. No extra Cargo dependency.
+Automatic path: `target/torus16-ema4-bptt.ckpt`. Environment knobs:
+`TORUS16_CHECKPOINT`, `TORUS16_CHECKPOINT_EVERY`,
+`TORUS16_FRESH=1`. `TORUS16_TRAIN_WINDOWS` means total target windows.
+
+CPU acceptance task: `task test-lab-torus16-ema4-checkpoint`
+(round-trip, corrupted/truncated/wrong corpus/schema rejection, resumed
+AdamW update matching uninterrupted update). GPU-level continuous vs
+interrupted/resumed training equality remains to be measured. The
+non-cryptographic fingerprint and file checksum do not guarantee
+authenticity or proof of neural model correctness.

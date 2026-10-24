@@ -27,6 +27,19 @@ struct Moments {
     second: Vec<f32>,
 }
 
+/// Architecture-neutral serializable AdamW state. Moments use explicit
+/// names and dense F32 vectors; callers own the on-disk format.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdamWCheckpoint {
+    pub learning_rate: f32,
+    pub weight_decay: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub epsilon: f32,
+    pub steps: u64,
+    pub moments: BTreeMap<String, (Vec<f32>, Vec<f32>)>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AdamW {
     learning_rate: f32,
@@ -59,6 +72,90 @@ impl AdamW {
             states: BTreeMap::new(),
         })
     }
+    /// Export all optimizer hyperparameters and first/second moments.
+    pub fn checkpoint(&self) -> AdamWCheckpoint {
+        AdamWCheckpoint {
+            learning_rate: self.learning_rate,
+            weight_decay: self.weight_decay,
+            beta1: self.beta1,
+            beta2: self.beta2,
+            epsilon: self.epsilon,
+            steps: self.steps,
+            moments: self
+                .states
+                .iter()
+                .map(|(name, state)| {
+                    (name.clone(), (state.first.clone(), state.second.clone()))
+                })
+                .collect(),
+        }
+    }
+
+    /// Restore optimizer state against the exact named parameter schema.
+    /// Rejects stale names, invalid hyperparameters, NaNs, shape changes and
+    /// missing moment buffers; never performs an implicit reset of AdamW.
+    pub fn from_checkpoint(
+        saved: AdamWCheckpoint,
+        parameters: &BTreeMap<String, Tensor<f32>>,
+    ) -> Result<Self, OptimizerError> {
+        if parameters.is_empty()
+            || !saved.learning_rate.is_finite()
+            || saved.learning_rate <= 0.
+            || !saved.weight_decay.is_finite()
+            || saved.weight_decay < 0.
+            || !saved.beta1.is_finite()
+            || saved.beta1 <= 0.
+            || saved.beta1 >= 1.
+            || !saved.beta2.is_finite()
+            || saved.beta2 <= 0.
+            || saved.beta2 >= 1.
+            || !saved.epsilon.is_finite()
+            || saved.epsilon <= 0.
+            || (saved.steps == 0 && !saved.moments.is_empty())
+            || (saved.steps > 0 && saved.moments.keys().ne(parameters.keys()))
+        {
+            return Err(OptimizerError::Invalid("invalid AdamW checkpoint metadata or keys"));
+        }
+        let mut states = BTreeMap::new();
+        for (name, tensor) in parameters {
+            if tensor.values().iter().any(|v| !v.is_finite()) {
+                return Err(OptimizerError::Parameter(format!(
+                    "invalid parameter values in checkpoint: {name}"
+                )));
+            }
+            if saved.steps == 0 {
+                continue;
+            }
+            let (first, second) = &saved.moments[name];
+            let count = tensor.values().len();
+            if first.len() != count
+                || second.len() != count
+                || first.iter().chain(second).any(|v| !v.is_finite())
+                || second.iter().any(|&v| v < 0.)
+            {
+                return Err(OptimizerError::Parameter(format!(
+                    "invalid AdamW moments in checkpoint: {name}"
+                )));
+            }
+            states.insert(
+                name.clone(),
+                Moments {
+                    first: first.clone(),
+                    second: second.clone(),
+                },
+            );
+        }
+        Ok(Self {
+            learning_rate: saved.learning_rate,
+            weight_decay: saved.weight_decay,
+            beta1: saved.beta1,
+            beta2: saved.beta2,
+            epsilon: saved.epsilon,
+            steps: saved.steps,
+            states,
+        })
+    }
+
     pub fn steps(&self) -> u64 {
         self.steps
     }
