@@ -159,3 +159,38 @@ EMA4-LM остаётся в `labs/`.
 сопоставление с исследовательской обученной моделью. Четырёхслойный
 потоковый inference и её обученное качество — разные вещи.
 
+
+## Экспериментальное обучение: reverse-mode IR + AdamW
+
+Новый `task train-lab-torus16-ema4` выполняет конкретный CUDA
+training vertical slice: один запуск GPU forward → стабилизированный
+softmax/cross-entropy и seed dL/dlogits на host → повторный CUDA Graph
+для сгенерированного IR-backward → host AdamW → обновление `final_beta`
+через `GpuExecution::update_input` без перекомпиляции.
+Демонстрационный словарь по умолчанию V=16, teacher-forced токен 0,
+target 1, восемь шагов. Выводим training CE и *игрушечный* BPC
+(`loss/ln(2)`), **не результат на исследовательском корпусе**.
+
+Общий `verineural::differentiate` не содержит сетевых компонентов.
+Он дифференцирует проверенный фрагмент Semantic Neural IR с
+fan-out accumulation: Add, Mul, MatMul, BiasAdd, Reshape,
+Permute(2D), ReverseAxis(2D), SliceAxis(1), Concat(1),
+BroadcastTo([1,N]) и versioned Pointwise Sub/Div/Exp/Sqrt.
+Возвращает граф с явным seed-входом и источниками числовых констант.
+Неподдерживаемые операции, включая ReLU derivative в этой версии,
+отклоняются. Непосредственно NVIDIA backend использует **тот же**
+GPU-компилятор и CUDA Graph, без собственной GPU-математики в лаборатории.
+
+`verineural::AdamW` с именованными `Tensor<f32>` хранит моменты,
+делает bias correction и decoupled decay; проверяет весь набор
+градиентов и финитность **до** мутации. На сегодня параметрический
+update исполняется на host; не называем его GPU optimizer.
+
+Текущий эксперимент учит только `final_beta` (48 значений).
+Он соответствует **градиенту одного токена** при фиксированных
+входных state buffers, то есть TBPTT=1. Это не настоящий
+многошаговый BPTT, не обновление всех 24 908 весов, не
+обучение исходной EMA4-LM и не проверка сходимости.
+`task autodiff-stage` и `task verify-gpu-autodiff` проверяют
+универсальные правила, в том числе аналитику против finite differences.
+Все новые тесты после добавления подлежат отдельной локальной проверке.

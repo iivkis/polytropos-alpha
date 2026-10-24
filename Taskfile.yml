@@ -452,6 +452,24 @@ tasks:
     cmds:
       - cargo test -p torus16-mix-lab --test gpu_forward -- --ignored --nocapture
 
+  autodiff-stage:
+    desc: Validate architecture-neutral reverse-mode IR rules, finite difference checks and atomic AdamW
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test autodiff
+
+  verify-gpu-autodiff:
+    desc: Validate reverse-mode MatMul/fanout gradients through CUDA Graph against independent oracle
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test autodiff -- --ignored --nocapture
+
+  train-lab-torus16-ema4:
+    desc: GPU CE to reverse-IR VJP to host AdamW, one-token truncated gradient for final-beta only
+    deps: [prepare]
+    cmds:
+      - cargo run -p torus16-mix-lab --example ema4_train
+
   lab-torus16-ema4:
     desc: Inspect the 4-layer streaming EMA4-LM architecture built from VeriNeural primitives
     deps: [prepare]

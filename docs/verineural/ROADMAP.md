@@ -290,3 +290,36 @@ experimental `ExpApprox`, в strict/certified-режиме fail-closed.
 checkpoint importer и сопоставление GPU FP32 с исходными обученными
 весами. Это полный *streaming forward* на Rust/IR, не законченная
 система обучения.
+
+### Универсальный reverse-mode IR и первый trainable CUDA Graph vertical slice
+
+Код `crates/verineural/src/autodiff.rs` строит reverse-mode VJP
+в **той же** идентичности Semantic Neural IR: исходный forward
+является неизменным префиксом, а производные являются обычными
+узлами Add/Mul/MatMul/Permute/Reshape/Slice/Concat/Broadcast и
+фиксированных versioned Pointwise. Учёт повторного использования
+узлов через суммирование вкладов, seed явный. Проверка
+достижимости и всех поддерживаемых reverse-правил выполняется
+до построения производной; неизвестные операции fail-closed.
+Контракт производной математический, **не** доказанная Lean
+связь с точной FP32 производной приближённой `ex2.approx`.
+Для выбранных параметров отсечение не относящихся к ним
+ветвей уменьшает IR, не меняя семантику требуемого VJP.
+
+`crates/verineural/src/optimizer.rs` добавляет архитектурно-
+нейтральный **host AdamW** с атомарной валидацией named parameter
+set, non-finite и shape guard. GPU backward исполняется без
+нового backend через обычный CUDA Graph. Приёмка:
+`task autodiff-stage`, `task verify-gpu-autodiff`,
+`task train-lab-torus16-ema4` и структурный тест EMA4.
+Аппаратная проверка ещё не была запущена при внесении кода.
+
+Лабораторная команда демонстрирует *teacher-forced* CE,
+GPU dL/d(final_beta), host AdamW и обновление параметра
+в persistent GPU execution (только 48 trainable значений,
+один токен, фиксированное состояние). Выводит toy-BPC,
+который нельзя сравнивать с исследовательской метрикой.
+Недостающие крупные части: unroll и 2+ шаговый truncated BPTT,
+all-parameter train/optimizer на GPU, loss reduction внутри
+Semantic IR, полноценная загрузка корпуса, стабильность градиента
+на реальных данных, Lean численная сертификация reverse-pass.

@@ -37,6 +37,7 @@
 //! structural validation is distinct from semantic proof or JIT/SASS assurance.
 
 mod architecture;
+mod autodiff;
 mod auto_build;
 mod auto_bundle;
 mod canonical;
@@ -51,6 +52,7 @@ mod model;
 mod model_execution;
 mod modules;
 mod numeric;
+mod optimizer;
 mod primitive;
 mod proof;
 mod special;
@@ -59,6 +61,8 @@ mod symbolic;
 mod tensor;
 mod translation;
 
+pub use autodiff::{DifferentiationError, ReverseGraph, differentiate};
+pub use optimizer::{AdamW, OptimizerError};
 pub use architecture::{ArchitectureMetadata, ArchitectureSnapshot, snapshot_architecture};
 pub use auto_build::{
     ArchitectureAutoCompiler, ArchitectureProofTask, AutoBuildError, AutoBuildPlan,
