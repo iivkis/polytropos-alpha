@@ -115,12 +115,12 @@ fn reference(p: &Parameters, dict: &Dictionary, input: &str) -> Reference {
         let turn = action % TURNS;
         let bits = rotating_matrices_lab::Dictionary::bits(token);
         let mut next = [0.0f32; WIDTH];
-        for col in 0..WIDTH {
+        for (col, next_value) in next.iter_mut().enumerate() {
             let mut accumulator = 0.0f32;
             for row in 0..WIDTH {
                 accumulator += (state[row] + bits[row]) * matrix_at(p, core, turn, row, col);
             }
-            next[col] = (accumulator + p.core_bias[col]).max(0.0);
+            *next_value = (accumulator + p.core_bias[col]).max(0.0);
         }
         state = next;
     }
