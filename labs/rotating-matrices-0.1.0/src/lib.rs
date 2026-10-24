@@ -392,7 +392,10 @@ fn rotating_bank(g: &mut NeuralGraph, core0: NodeId, core1: NodeId) -> Result<No
 pub fn architecture_model() -> Result<Model, ModelError> {
     let mut m = ModelBuilder::new("rotating-matrices", "0.1.0");
     let dictionary = m.input("dictionary_state", [1, WIDTH], Domain::NonNegativeFinite)?;
-    let state = m.state("recurrent_state", [1, WIDTH], Domain::NonNegativeFinite)?;
+    // Structural IR cannot establish finiteness across MatMul/BiasAdd because
+    // strict FP32 arithmetic may overflow. Runtime deterministic/stochastic
+    // paths separately reject non-finite recurrent outputs before reuse.
+    let state = m.state("recurrent_state", [1, WIDTH], Domain::Any)?;
     let token = m.input("token_bits", [1, WIDTH], Domain::NonNegativeFinite)?;
 
     let router_weights = m.parameter("router_weights", [WIDTH, ACTIONS], Domain::Finite)?;
@@ -1322,6 +1325,9 @@ mod tests {
         assert!(ir.contains("routed_recurrent_transition"));
         assert!(ir.contains("terminal_scalar_readout"));
         assert_eq!(model.state_links().len(), 1);
+        let (state, role) = model.source("recurrent_state").unwrap();
+        assert_eq!(role, verineural::SourceRole::State);
+        assert_eq!(model.graph().node(state).unwrap().domain, Domain::Any);
         let outputs = [
             model.output("router_logits").unwrap(),
             model.output("next_state").unwrap(),
