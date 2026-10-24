@@ -562,17 +562,7 @@ theorem approx_contract_positive_mask_select_positive
   have hactual : 0 < conditionActual := by omega
   have hideal : 0 < conditionIdeal := by omega
   have hzeroOne : (0 : Int) < 1 := by decide
-  have hidealSelect :
-      (if 0 < (if 0 < conditionIdeal then (1 : Int) else 0)
-        then yesIdeal else noIdeal) = yesIdeal := by
-    rw [if_pos hideal]
-    exact if_pos hzeroOne
-  have hactualSelect :
-      (if 0 < (if 0 < conditionActual then (1 : Int) else 0)
-        then yesActual else noActual) = yesActual := by
-    rw [if_pos hactual]
-    exact if_pos hzeroOne
-  exact hidealSelect.symm ▸ (hactualSelect.symm ▸ hyes)
+  simpa only [if_pos hideal, if_pos hactual, if_pos hzeroOne] using hyes
 
 theorem approx_contract_positive_mask_select_nonpositive
     {conditionBound conditionEpsilon conditionIdeal conditionActual
@@ -592,16 +582,6 @@ theorem approx_contract_positive_mask_select_nonpositive
   have hactualNot : ¬ 0 < conditionActual := Int.not_lt.mpr hactual
   have hidealNot : ¬ 0 < conditionIdeal := Int.not_lt.mpr hideal
   have hzeroZero : ¬ (0 : Int) < 0 := by decide
-  have hidealSelect :
-      (if 0 < (if 0 < conditionIdeal then (1 : Int) else 0)
-        then yesIdeal else noIdeal) = noIdeal := by
-    rw [if_neg hidealNot]
-    exact if_neg hzeroZero
-  have hactualSelect :
-      (if 0 < (if 0 < conditionActual then (1 : Int) else 0)
-        then yesActual else noActual) = noActual := by
-    rw [if_neg hactualNot]
-    exact if_neg hzeroZero
-  exact hidealSelect.symm ▸ (hactualSelect.symm ▸ hno)
+  simpa only [if_neg hidealNot, if_neg hactualNot, if_neg hzeroZero] using hno
 
 end VeriNeural
