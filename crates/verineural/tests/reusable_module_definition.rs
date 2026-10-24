@@ -5,9 +5,9 @@
 //! input hypotheses. Same identity with different normalized semantics fails.
 
 use verineural::{
-    Domain, LeanProofEngine, MathContract, NeuralError, NeuralGraph, NeuralModule, NodeId,
-    PortContract, ProofError, Shape, MultiOutputContract, MultiOutputModule,
-    NamedPortContract,
+    Domain, LeanProofEngine, MathContract, MultiOutputContract, MultiOutputModule,
+    NamedPortContract, NeuralError, NeuralGraph, NeuralModule, NodeId, PortContract, ProofError,
+    Shape,
 };
 
 fn shape() -> Shape {
@@ -248,7 +248,6 @@ fn global_composition_rejects_same_identity_with_different_body() {
     ));
 }
 
-
 struct PositivePair {
     contract: MultiOutputContract,
     body: Body,
@@ -273,7 +272,11 @@ impl PositivePair {
                 vec![
                     first,
                     second,
-                    if all_claims { third.nonnegative() } else { third },
+                    if all_claims {
+                        third.nonnegative()
+                    } else {
+                        third
+                    },
                 ],
             ),
             body,
@@ -340,7 +343,12 @@ fn reusable_multi_module_shares_one_three_output_definition() {
         .generate_reusable_multi_module_nonnegative(&graph, &[0, 1], "positive_pair")
         .unwrap();
     let source = proof.source();
-    assert_eq!(source.matches("def module_definition_positive_pair ").count(), 1);
+    assert_eq!(
+        source
+            .matches("def module_definition_positive_pair ")
+            .count(),
+        1
+    );
     assert_eq!(
         source
             .matches("theorem module_definition_positive_pair_nonnegative ")
@@ -354,8 +362,12 @@ fn reusable_multi_module_shares_one_three_output_definition() {
             assert!(proof.theorem_names().contains(&name));
         }
     }
-    assert!(source.contains("VeriNeural.Nonnegative ((module_definition_positive_pair p_0 p_1).2.1)"));
-    assert!(source.contains("VeriNeural.Nonnegative ((module_definition_positive_pair p_0 p_1).2.2)"));
+    assert!(
+        source.contains("VeriNeural.Nonnegative ((module_definition_positive_pair p_0 p_1).2.1)")
+    );
+    assert!(
+        source.contains("VeriNeural.Nonnegative ((module_definition_positive_pair p_0 p_1).2.2)")
+    );
     assert!(!source.contains("sorry"));
     assert!(!source.contains("admit"));
 }
@@ -364,8 +376,11 @@ fn reusable_multi_module_shares_one_three_output_definition() {
 fn reusable_multi_module_identity_is_bound_to_all_output_semantics() {
     let graph = repeated_multi_graph(Body::Mul, true, true);
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_reusable_multi_module_nonnegative(&graph, &[0, 1], "different_body"),
+        LeanProofEngine::default().generate_reusable_multi_module_nonnegative(
+            &graph,
+            &[0, 1],
+            "different_body"
+        ),
         Err(ProofError::ModuleDefinitionMismatch {
             representative: 0,
             other: 1
@@ -377,14 +392,20 @@ fn reusable_multi_module_identity_is_bound_to_all_output_semantics() {
 fn reusable_multi_module_requires_all_declared_properties_and_premises() {
     let graph = repeated_multi_graph(Body::Add, true, false);
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_reusable_multi_module_nonnegative(&graph, &[0, 1], "missing_port_claim"),
+        LeanProofEngine::default().generate_reusable_multi_module_nonnegative(
+            &graph,
+            &[0, 1],
+            "missing_port_claim"
+        ),
         Err(ProofError::UnsupportedGuarantee { .. })
     ));
     let graph = repeated_multi_graph(Body::Add, false, true);
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_reusable_multi_module_nonnegative(&graph, &[0, 1], "missing_input_contract"),
+        LeanProofEngine::default().generate_reusable_multi_module_nonnegative(
+            &graph,
+            &[0, 1],
+            "missing_input_contract"
+        ),
         Err(ProofError::UnsupportedGuarantee { .. })
     ));
 }
@@ -393,13 +414,19 @@ fn reusable_multi_module_requires_all_declared_properties_and_premises() {
 fn reusable_multi_module_rejects_duplicate_or_invalid_requests() {
     let graph = repeated_multi_graph(Body::Add, true, true);
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_reusable_multi_module_nonnegative(&graph, &[0, 0], "duplicate"),
+        LeanProofEngine::default().generate_reusable_multi_module_nonnegative(
+            &graph,
+            &[0, 0],
+            "duplicate"
+        ),
         Err(ProofError::InvalidOutputs)
     ));
     assert!(matches!(
-        LeanProofEngine::default()
-            .generate_reusable_multi_module_nonnegative(&graph, &[0, 1], "bad-name"),
+        LeanProofEngine::default().generate_reusable_multi_module_nonnegative(
+            &graph,
+            &[0, 1],
+            "bad-name"
+        ),
         Err(ProofError::InvalidGoalName)
     ));
 }
@@ -412,16 +439,24 @@ fn lean_checks_multi_output_shared_theorem_and_all_applications() {
     let program = LeanProofEngine::default()
         .generate_reusable_multi_module_nonnegative(&graph, &[0, 1], "positive_pair")
         .unwrap();
-    let dir = std::env::temp_dir().join(format!(
-        "verineural-multi-reusable-{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("verineural-multi-reusable-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let (_checked, audit) = LeanProofEngine::default()
         .verify_certified(&program, &dir.join("reusable_multi.lean"))
         .unwrap();
-    assert!(audit.theorem_names.iter().any(|t| t == "module_definition_positive_pair_nonnegative"));
-    assert!(audit.theorem_names.iter().any(|t| t == "module_definition_positive_pair_instance_1_port_2"));
+    assert!(
+        audit
+            .theorem_names
+            .iter()
+            .any(|t| t == "module_definition_positive_pair_nonnegative")
+    );
+    assert!(
+        audit
+            .theorem_names
+            .iter()
+            .any(|t| t == "module_definition_positive_pair_instance_1_port_2")
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -453,12 +488,8 @@ fn global_composition_reuses_multi_output_definition_port_and_checks_instances()
     assert!(source.contains("theorem architecture_module_instance_0_port_1 "));
     assert!(source.contains("theorem architecture_module_instance_1_port_1 "));
     assert!(source.contains("theorem architecture_module_instance_2 "));
-    assert!(source.contains(
-        "have arch_module_0_port_1 := architecture_module_instance_0_port_1"
-    ));
-    assert!(source.contains(
-        "have arch_module_1_port_1 := architecture_module_instance_1_port_1"
-    ));
+    assert!(source.contains("have arch_module_0_port_1 := architecture_module_instance_0_port_1"));
+    assert!(source.contains("have arch_module_1_port_1 := architecture_module_instance_1_port_1"));
     assert!(source.contains("have arch_module_2 := architecture_module_instance_2"));
 }
 
@@ -538,19 +569,24 @@ fn lean_checks_global_reused_definition_and_instance_premises() {
     let pair = PositiveJoin::new(Body::Add);
     let left = graph.apply_module(&pair, &[x, y]).unwrap();
     let right = graph.apply_module(&pair, &[x, z]).unwrap();
-    let output = graph.apply_module(&GlobalJoin::new(), &[left, right]).unwrap();
+    let output = graph
+        .apply_module(&GlobalJoin::new(), &[left, right])
+        .unwrap();
     let program = LeanProofEngine::default()
         .generate_global_nonnegative(&graph, output, &[x, y, z])
         .unwrap();
-    let dir = std::env::temp_dir().join(format!(
-        "verineural-global-reusable-{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("verineural-global-reusable-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let (_checked, audit) = LeanProofEngine::default()
         .verify_certified(&program, &dir.join("global_reusable.lean"))
         .unwrap();
-    assert!(audit.theorem_names.iter().any(|t| t == "architecture_global_nonnegative"));
+    assert!(
+        audit
+            .theorem_names
+            .iter()
+            .any(|t| t == "architecture_global_nonnegative")
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

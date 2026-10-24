@@ -389,10 +389,20 @@ mod root_tests {
         std::fs::write(root.join("architecture.png"), "old png").unwrap();
         let identity = "verineural-certified-model-v1\nid=lab\nversion=1\n";
         assert!(publish_root_transaction(&root, identity, Some(2)).is_err());
-        assert_eq!(std::fs::read_to_string(root.join("architecture.dot")).unwrap(), "old dot");
-        assert_eq!(std::fs::read_to_string(root.join("architecture.png")).unwrap(), "old png");
+        assert_eq!(
+            std::fs::read_to_string(root.join("architecture.dot")).unwrap(),
+            "old dot"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("architecture.png")).unwrap(),
+            "old png"
+        );
         assert!(!root.join("semantic.ir").exists());
-        assert!(!root.join(".verineural-pre-stage10/architecture.dot").exists());
+        assert!(
+            !root
+                .join(".verineural-pre-stage10/architecture.dot")
+                .exists()
+        );
         publish_root(&root, identity).unwrap();
         verify_root(&root, identity).unwrap();
         std::fs::remove_dir_all(root).unwrap();

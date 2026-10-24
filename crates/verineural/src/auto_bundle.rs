@@ -77,8 +77,7 @@ fn identity_without_graph_allocation(text: &str) -> String {
 
 fn compatible_identity(saved: &str, expected: &str) -> bool {
     saved == expected
-        || identity_without_graph_allocation(saved)
-            == identity_without_graph_allocation(expected)
+        || identity_without_graph_allocation(saved) == identity_without_graph_allocation(expected)
 }
 
 /// Reject foreign or legacy bundles before starting a new staged build.

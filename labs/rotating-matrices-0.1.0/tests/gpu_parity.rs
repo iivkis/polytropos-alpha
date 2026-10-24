@@ -5,7 +5,7 @@
 //! NOT a proof of LLVM/PTX/JIT/SASS correctness or IEEE-754 equivalence.
 
 use rotating_matrices_lab::{
-    Dictionary, Example, Parameters, Rng, Runner, ACTIONS, CORES, TURNS, WIDTH,
+    ACTIONS, CORES, Dictionary, Example, Parameters, Rng, Runner, TURNS, WIDTH,
 };
 
 fn dictionary() -> Dictionary {
@@ -118,8 +118,7 @@ fn reference(p: &Parameters, dict: &Dictionary, input: &str) -> Reference {
         for col in 0..WIDTH {
             let mut accumulator = 0.0f32;
             for row in 0..WIDTH {
-                accumulator += (state[row] + bits[row])
-                    * matrix_at(p, core, turn, row, col);
+                accumulator += (state[row] + bits[row]) * matrix_at(p, core, turn, row, col);
             }
             next[col] = (accumulator + p.core_bias[col]).max(0.0);
         }
@@ -185,7 +184,11 @@ fn deterministic_cuda_graph_matches_independent_cpu_oracle() {
                 .forward(&p, &dict, input, &mut rng, false)
                 .expect("deterministic CUDA Graph replay");
             assert_eq!(
-                actual.decisions.iter().map(|d| d.action).collect::<Vec<_>>(),
+                actual
+                    .decisions
+                    .iter()
+                    .map(|d| d.action)
+                    .collect::<Vec<_>>(),
                 cpu.actions,
                 "GPU router decisions for route {route}, input {input}"
             );
@@ -196,12 +199,18 @@ fn deterministic_cuda_graph_matches_independent_cpu_oracle() {
                     assert_near(
                         got,
                         want,
-                        &format!("route {route}, input {input}, step {step}, probability[{action}]"),
+                        &format!(
+                            "route {route}, input {input}, step {step}, probability[{action}]"
+                        ),
                     );
                 }
             }
             for (slot, (&got, &expected)) in actual.state.iter().zip(&cpu.state).enumerate() {
-                assert_near(got, expected, &format!("route {route}, input {input}, state[{slot}]"));
+                assert_near(
+                    got,
+                    expected,
+                    &format!("route {route}, input {input}, state[{slot}]"),
+                );
             }
             assert_near(
                 actual.normalized,
@@ -217,7 +226,14 @@ fn deterministic_cuda_graph_matches_independent_cpu_oracle() {
     let actual = gpu
         .forward(&p, &dict, "badc", &mut rng, false)
         .expect("first-tie CUDA Graph replay");
-    assert_eq!(actual.decisions.iter().map(|d| d.action).collect::<Vec<_>>(), cpu.actions);
+    assert_eq!(
+        actual
+            .decisions
+            .iter()
+            .map(|d| d.action)
+            .collect::<Vec<_>>(),
+        cpu.actions
+    );
     for (&got, &expected) in actual.state.iter().zip(&cpu.state) {
         assert_near(got, expected, "first-tie recurrent state");
     }

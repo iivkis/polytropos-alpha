@@ -671,9 +671,7 @@ mod tests {
     fn certified_identity_is_independent_of_graph_allocation_history() {
         fn build_identity() -> String {
             let mut builder = ModelBuilder::new("stable_ident", "1");
-            let x = builder
-                .input("x", [2], Domain::NonNegativeFinite)
-                .unwrap();
+            let x = builder.input("x", [2], Domain::NonNegativeFinite).unwrap();
             let y = builder.graph_mut().relu(x).unwrap();
             builder.output("y", y).unwrap();
             builder

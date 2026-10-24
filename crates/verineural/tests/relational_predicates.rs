@@ -206,7 +206,11 @@ fn reusable_order_rules_prove_nested_branches_and_transitivity() {
         .unwrap();
     assert!(program.source().contains("VeriNeural.add_nonnegative"));
     assert!(program.source().contains("VeriNeural.pointwise_le_trans"));
-    assert!(program.source().contains("VeriNeural.pointwise_le_relu_add_of_nonnegative"));
+    assert!(
+        program
+            .source()
+            .contains("VeriNeural.pointwise_le_relu_add_of_nonnegative")
+    );
     assert!(!program.source().contains("sorry"));
 }
 
@@ -251,11 +255,6 @@ fn lean_accepts_true_relation_and_rejects_false_one() {
         Err(ProofError::LeanRejected { .. })
     ));
     let (multi_graph, multi_goal) = multi_step_case();
-    certify(
-        &multi_graph,
-        &multi_goal,
-        &dir.join("multi_step_true.lean"),
-    )
-    .unwrap();
+    certify(&multi_graph, &multi_goal, &dir.join("multi_step_true.lean")).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }

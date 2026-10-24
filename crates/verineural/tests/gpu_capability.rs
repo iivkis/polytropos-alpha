@@ -5,8 +5,7 @@
 
 use verineural::{
     Domain, GpuAssuranceStatus, GpuEngine, GpuLaunchConfig, GpuOptimizationKind, LeanProofEngine,
-    audit_fp32_ptx,
-    NeuralGraph, ReluFusion, Shape, TranslationKind,
+    NeuralGraph, ReluFusion, Shape, TranslationKind, audit_fp32_ptx,
 };
 
 fn concat_program() -> verineural::GpuProgram {

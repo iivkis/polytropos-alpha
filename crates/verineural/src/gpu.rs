@@ -1604,13 +1604,11 @@ impl GpuExecution {
             .into_iter()
             .map(|(node, value)| match value {
                 TensorValue::F32(tensor) => Ok((node, tensor)),
-                TensorValue::Index(_) => {
-                    Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
-                        operation: "read_outputs",
-                        expected: DType::F32,
-                        actual: DType::Index,
-                    }))
-                }
+                TensorValue::Index(_) => Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
+                    operation: "read_outputs",
+                    expected: DType::F32,
+                    actual: DType::Index,
+                })),
             })
             .collect()
     }

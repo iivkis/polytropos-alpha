@@ -425,9 +425,7 @@ mod platform {
             self.synchronize()?;
             // SAFETY: the async transfer completed and the caller supplied a
             // writable destination covering exactly `bytes`.
-            unsafe {
-                ptr::copy_nonoverlapping(pinned.cast::<u8>(), out.cast::<u8>(), bytes)
-            };
+            unsafe { ptr::copy_nonoverlapping(pinned.cast::<u8>(), out.cast::<u8>(), bytes) };
             self.release_completed_staging();
             Ok(())
         }

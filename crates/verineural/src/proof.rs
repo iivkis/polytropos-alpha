@@ -1302,7 +1302,11 @@ impl LeanProofEngine {
             return Err(ProofError::InvalidGoalName);
         }
         if module_indices.is_empty()
-            || module_indices.iter().copied().collect::<BTreeSet<_>>().len()
+            || module_indices
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
                 != module_indices.len()
         {
             return Err(ProofError::InvalidOutputs);
@@ -1347,12 +1351,18 @@ impl LeanProofEngine {
         let expr_tokens = definition
             .outputs
             .iter()
-            .flat_map(|out| out.expression.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+            .flat_map(|out| {
+                out.expression
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            })
             .collect::<BTreeSet<_>>();
         let proof_tokens = definition
             .outputs
             .iter()
-            .flat_map(|out| out.proof_term.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+            .flat_map(|out| {
+                out.proof_term
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            })
             .collect::<BTreeSet<_>>();
         let mut def_params = Vec::new();
         let mut theorem_params = Vec::new();
@@ -1412,10 +1422,12 @@ impl LeanProofEngine {
             fields.join(".")
         };
         let properties = (0..definition.outputs.len())
-            .map(|port| format!(
-                "VeriNeural.Nonnegative (({definition_name} {port_args}).{})",
-                projection(port)
-            ))
+            .map(|port| {
+                format!(
+                    "VeriNeural.Nonnegative (({definition_name} {port_args}).{})",
+                    projection(port)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ∧ ");
         let property_proof = definition
@@ -1446,36 +1458,62 @@ impl LeanProofEngine {
             .collect::<Vec<_>>();
         let params = sources
             .iter()
-            .map(|&i| format!(
-                "(x_{i} : {})",
-                lean_value_type(graph.nodes()[i].dtype, graph.nodes()[i].shape.element_count())
-            ))
+            .map(|&i| {
+                format!(
+                    "(x_{i} : {})",
+                    lean_value_type(
+                        graph.nodes()[i].dtype,
+                        graph.nodes()[i].shape.element_count()
+                    )
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ");
-        let args = sources.iter().map(|&i| format!("x_{i}")).collect::<Vec<_>>().join(" ");
-        let source_hypotheses = program.assumptions()
+        let args = sources
+            .iter()
+            .map(|&i| format!("x_{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source_hypotheses = program
+            .assumptions()
             .iter()
             .map(|a| a.input_node)
             .collect::<BTreeSet<_>>();
         for &instance_index in module_indices {
             let instance = &graph.multi_modules()[instance_index];
-            let input_values = instance.inputs.iter()
+            let input_values = instance
+                .inputs
+                .iter()
                 .map(|id| format!("(node_{} {args})", id.index()))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let premises = definition.required_ports.iter()
-                .map(|&port| prove_ideal_nonnegative(
-                    graph, instance.inputs[port], &args,
-                    &source_hypotheses, &mut BTreeMap::new(),
-                ))
+            let premises = definition
+                .required_ports
+                .iter()
+                .map(|&port| {
+                    prove_ideal_nonnegative(
+                        graph,
+                        instance.inputs[port],
+                        &args,
+                        &source_hypotheses,
+                        &mut BTreeMap::new(),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
-            let hypothesis_params = program.assumptions().iter()
+            let hypothesis_params = program
+                .assumptions()
+                .iter()
                 .map(|a| {
                     let needed = format!("h_{}", a.input_node);
-                    let used = premises.iter().any(|term| term
-                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                        .any(|token| token == needed));
-                    let binder = if used { needed } else { format!("_h_{}", a.input_node) };
+                    let used = premises.iter().any(|term| {
+                        term.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .any(|token| token == needed)
+                    });
+                    let binder = if used {
+                        needed
+                    } else {
+                        format!("_h_{}", a.input_node)
+                    };
                     format!("({binder} : VeriNeural.Nonnegative x_{})", a.input_node)
                 })
                 .collect::<Vec<_>>()
@@ -1486,7 +1524,8 @@ impl LeanProofEngine {
                 format!(" {}", premises.join(" "))
             };
             for (port, &output) in instance.outputs.iter().enumerate() {
-                let property_name = format!("{definition_name}_instance_{instance_index}_port_{port}");
+                let property_name =
+                    format!("{definition_name}_instance_{instance_index}_port_{port}");
                 let path = projection(port);
                 program.source.push_str(&format!(
                     "theorem {property_name} {params} {hypothesis_params} :\n\
@@ -1581,7 +1620,10 @@ impl LeanProofEngine {
 
         let mut producers = BTreeMap::<usize, GlobalModuleOutputKey>::new();
         for (sequence, module) in top_level {
-            for (port, output) in global_module_outputs(graph, module)?.into_iter().enumerate() {
+            for (port, output) in global_module_outputs(graph, module)?
+                .into_iter()
+                .enumerate()
+            {
                 if !used.contains(&output.index()) {
                     continue;
                 }
@@ -2004,13 +2046,8 @@ impl LeanProofEngine {
                                 "  rfl".to_owned(),
                             ),
                             Predicate::PointwiseLe(_, _) => {
-                                let derived = derived_pointwise_le(
-                                    graph,
-                                    left,
-                                    right,
-                                    &term,
-                                    used.len() + 1,
-                                );
+                                let derived =
+                                    derived_pointwise_le(graph, left, right, &term, used.len() + 1);
                                 (
                                     format!(
                                         "VeriNeural.PointwiseLe {} {}",
@@ -2563,13 +2600,22 @@ fn normalize_multi_nonnegative_definition(
             });
         }
         let expression = normalized_module_expression(
-            graph, module.body_start, module.body_end, output.index(),
-            &boundary, &mut BTreeMap::new(),
+            graph,
+            module.body_start,
+            module.body_end,
+            output.index(),
+            &boundary,
+            &mut BTreeMap::new(),
         )?;
         let mut needed = BTreeSet::new();
         let proof_term = normalized_module_nonnegative_proof(
-            graph, module.body_start, module.body_end, output.index(),
-            &boundary, &mut needed, &mut BTreeMap::new(),
+            graph,
+            module.body_start,
+            module.body_end,
+            output.index(),
+            &boundary,
+            &mut needed,
+            &mut BTreeMap::new(),
         )?;
         for &port in &needed {
             let contract = &module.contract.inputs[port].port;
@@ -2741,7 +2787,8 @@ fn normalized_module_expression(
             spec.expression().lean(&|port| {
                 normalized_module_expression(
                     graph,
-                    body_start, body_end,
+                    body_start,
+                    body_end,
                     node.inputs[port].index(),
                     boundary,
                     &mut BTreeMap::new(),
@@ -2786,7 +2833,8 @@ fn normalized_module_nonnegative_proof(
     let term = |input: NodeId| {
         normalized_module_expression(
             graph,
-            body_start, body_end,
+            body_start,
+            body_end,
             input.index(),
             boundary,
             &mut BTreeMap::new(),
@@ -2797,7 +2845,8 @@ fn normalized_module_nonnegative_proof(
                  cache: &mut BTreeMap<usize, String>| {
         normalized_module_nonnegative_proof(
             graph,
-            body_start, body_end,
+            body_start,
+            body_end,
             input.index(),
             boundary,
             required_ports,
@@ -2929,7 +2978,8 @@ fn normalized_module_nonnegative_proof(
             .nonnegative_lean(&|port| {
                 normalized_module_expression(
                     graph,
-                    body_start, body_end,
+                    body_start,
+                    body_end,
                     node.inputs[port].index(),
                     boundary,
                     &mut BTreeMap::new(),
@@ -2973,7 +3023,11 @@ fn derived_nonnegative(
             } else {
                 "VeriNeural.mul_nonnegative"
             };
-            Some(format!("({lemma} {} {} {hl} {hr})", term(left), term(right)))
+            Some(format!(
+                "({lemma} {} {} {hl} {hr})",
+                term(left),
+                term(right)
+            ))
         }
         _ => None,
     }
@@ -3031,22 +3085,20 @@ fn derived_pointwise_le(
             // branch is independently proven nonnegative.
             for (base, other, lemma) in [
                 (left, right, "VeriNeural.pointwise_le_add_of_nonnegative"),
-                (right, left, "VeriNeural.pointwise_le_add_of_nonnegative_left"),
+                (
+                    right,
+                    left,
+                    "VeriNeural.pointwise_le_add_of_nonnegative_left",
+                ),
             ] {
                 let Some(nonnegative) = derived_nonnegative(graph, other, term, fuel - 1) else {
                     continue;
                 };
-                let step = format!(
-                    "({lemma} {} {} {nonnegative})",
-                    term(left),
-                    term(right)
-                );
+                let step = format!("({lemma} {} {} {nonnegative})", term(left), term(right));
                 if lower == base {
                     return Some(step);
                 }
-                if let Some(previous) =
-                    derived_pointwise_le(graph, lower, base, term, fuel - 1)
-                {
+                if let Some(previous) = derived_pointwise_le(graph, lower, base, term, fuel - 1) {
                     return Some(format!(
                         "(VeriNeural.pointwise_le_trans {} {} {} {previous} {step})",
                         term(lower),
@@ -3171,7 +3223,10 @@ fn global_module_same_interface(
 ) -> Result<bool, ProofError> {
     Ok(match (left, right) {
         (GlobalModuleKey::Single(left), GlobalModuleKey::Single(right)) => {
-            let left = graph.modules().get(left).ok_or(ProofError::InvalidOutputs)?;
+            let left = graph
+                .modules()
+                .get(left)
+                .ok_or(ProofError::InvalidOutputs)?;
             let right = graph
                 .modules()
                 .get(right)

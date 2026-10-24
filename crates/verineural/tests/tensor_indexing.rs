@@ -102,9 +102,7 @@ fn graph_uses_a_real_index_dtype_and_rejects_float_indices() {
 fn gpu_public_argmax_output_preserves_index_dtype_and_values() {
     let mut graph = NeuralGraph::default();
     let logits = graph.input(Shape::new(vec![2, 4]).unwrap(), Domain::Finite);
-    let action = graph
-        .argmax(logits, 1, ArgMaxTieBreak::First)
-        .unwrap();
+    let action = graph.argmax(logits, 1, ArgMaxTieBreak::First).unwrap();
     let values = Tensor::new(
         Shape::new(vec![2, 4]).unwrap(),
         vec![1.0, 5.0, 5.0, 2.0, 9.0, 8.0, 7.0, 9.0],
