@@ -109,6 +109,13 @@ tasks:
       - cargo test -p verineural --test inductive_invariant
       - cargo test -p verineural --test inductive_invariant -- --ignored
 
+  verify-reusable-module-proof:
+    desc: Check one reusable module-definition theorem and separate concrete instance obligations
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test reusable_module_definition
+      - cargo test -p verineural --test reusable_module_definition -- --ignored
+
   auto-architecture:
     desc: Generate and audit all ideal-Int architecture/goal proofs and lower each supported output to NVPTX
     cmds:
