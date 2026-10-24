@@ -69,7 +69,7 @@ task train-lab-rotating -- 128
 # Требует NVPTX llc и NVIDIA CUDA Graph; нет тихого CPU fallback
 
 task certify-lab-rotating
-# Fail-closed probe, пока structural/indexing P0 не имеет GPU lowering
+# Требует Lean + LLVM NVPTX; structural/indexing routing уже имеет GPU lowering
 ```
 
 Потребитель теперь использует `Tensor::from_slice` вместо собственного helper.
@@ -79,8 +79,10 @@ task certify-lab-rotating
 сертифицируемый bundle в `artifacts/certified/auto-build/` с собственными
 `SHA256SUMS`, `identity.txt`, Lean, PTX, DOT/PNG и manifest. Лаборатория
 не копирует файлы из bundle вручную и не пересчитывает SHA-256 сама.
-До появления P0 GPU lowering `--certify-architecture` отклоняется и не
-выдаёт успешного сертификата. Это намеренно.
+Structural/indexing P0 lowering уже входит в общий architecture graph.
+Успех `--certify-architecture` всё ещё зависит от локально доступных Lean/LLVM
+и проходит fail-closed через translation/memory evidence; это не сертификат
+IEEE-754/JIT/SASS или качества обучения.
 
 `architecture.png` рендерится VeriNeural/Graphviz именно из сохранённого
 `architecture.dot`. Общий Lean генерируется из объединённого Semantic Neural IR,
@@ -93,11 +95,11 @@ P0-граница `selected_rotated_weight` из общего IR удалена.
 `permute + reverse_axis + concat`, получает индекс через `argmax` с явной
 политикой `First` и выбирает матрицу через `take`.
 
-GPU/numeric lowering для `permute/reverse_axis/concat/argmax/take` пока
-намеренно `unsupported`, поэтому `Model::certify` на этой архитектуре обязан
-fail-closed. Это не повод возвращать host-only параметр в Semantic IR. Исполняемый
-training runtime пока сохраняет host sampling/materialization до появления
-backend lowering; он не объявляется CUDA/FP32-сертифицированным.
+GPU lowering для `permute/reverse_axis/concat/argmax/take` реализован в узком
+профиле rotating-matrices вместе с translation audit и Lean bounds для адресов.
+Обычный deterministic forward исполняет этот же объединённый graph:
+`router → ArgMax → Take → transition → readout`. Стохастическое обучение
+остаётся отдельной host sampling policy и не объявляется CUDA/FP32-сертифицированным.
 
 Для публикации реальных результатов после запуска:
 
@@ -122,18 +124,18 @@ git push origin dev
 * Ядра выполняются через `GpuEngine::prepare` + `GpuExecution::update_inputs` /
   `replay` / `read_output`, то есть VeriNeural CUDA Graph. Нет собственного
   CUDA kernel и второго CPU forward.
-* Runtime использует три переиспользуемых исполнения, но evidence-модель одна:
-  `architecture_model()` содержит `routing_logits`,
-  `routed_recurrent_transition` и `terminal_scalar_readout` в одном IR.
+* Deterministic runtime использует один shared CUDA Graph из
+  `architecture_model()`; stochastic training дополнительно сохраняет
+  специализированные reusable executions для внешней sampling policy.
 * `architecture.lean` kernel-check'ит определения, формы и локальную семантику
   объединённого поддерживаемого графа. Глобальная теорема корректности
   маршрутизации и произвольного recurrent loop пока не заявлена.
-* Evidence path больше не скрывает deterministic route/rotation на host:
-  `argmax(First) → take` и `permute/reverse_axis/concat` находятся в общем IR.
-  Training runtime всё ещё использует stochastic host sampling и materialization
-  выбранного rotated binding, потому что structural/indexing GPU lowering пока
-  отсутствует. Последовательное состояние передаётся между запусками CUDA Graph;
-  полный цикл и его свойство не доказаны. CUDA/IEEE-754/SASS не заверены.
+* Evidence path и deterministic execution больше не скрывают route/rotation на host:
+  `argmax(First) → take` и `permute/reverse_axis/concat` исполняются в общем
+  CUDA Graph. Training runtime всё ещё использует stochastic host sampling как
+  внешнюю policy и отдельный fixed-route replay для SPSA. Последовательное
+  состояние пока переходит между deterministic replays через host binding;
+  P1 переводит этот путь на `ModelExecution::step`. CUDA/IEEE-754/SASS не заверены.
 * Обучение действительно меняет router weights (REINFORCE с baseline),
   scalar head (онлайн SGD) и обе базовые матрицы (SPSA с фиксированным
   маршрутом). Это исследовательский стохастический метод, **не обещание
@@ -144,9 +146,9 @@ git push origin dev
 
 ## Требующие отдельного развития
 
-Полная сертификация `rotate` и selection теперь упирается только в GPU/numeric
-lowering уже используемых evidence-моделью `permute`, `reverse_axis`, `argmax`,
-`take` и `concat`. GPU lowering и его translation evidence остаются отдельной
-обязательной работой. Верификация рекуррентного цикла требует инварианта состояния и
-доказанной композиции по времени. Отдельно стоит добавить ablation:
+Structural/indexing GPU lowering и translation/memory evidence для `permute`,
+`reverse_axis`, `argmax`, `take` и `concat` закрыты на узком профиле
+лаборатории. Открыты P1: stateful `ModelExecution` без host rebinding,
+численная композиция routing/branching и верификация рекуррентного цикла.
+Отдельно стоит добавить ablation:
 фиксированный маршрут против обучаемого, один core против двух, без вращений.

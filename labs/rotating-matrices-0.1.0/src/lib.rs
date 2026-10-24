@@ -3,10 +3,10 @@
 //! VeriNeural API; host code owns tokenizer/dataset, discrete action sampling,
 //! parameter updates, and the boundary between successive graph replays.
 //!
-//! The evidence model expresses the rotation bank and deterministic selection in
-//! Semantic IR. The stochastic training runtime still materializes the sampled
-//! rotated binding on the host through VeriNeural's generic tensor references;
-//! BPTT/training and arbitrary-length recurrence are not claimed certified.
+//! The evidence model and deterministic runtime share one Semantic IR containing
+//! the rotation bank and first-tie selection. Stochastic training remains an
+//! explicit laboratory policy and may choose a route on the host; BPTT/training
+//! and arbitrary-length recurrence are not claimed certified.
 
 use std::error::Error;
 use std::fmt;
@@ -240,9 +240,9 @@ impl Dictionary {
 }
 
 /// Row-major clockwise quarter turns using the same generic host tensor
-/// primitives as the Semantic IR construction. The training runtime still
-/// materializes this sampled binding on the host until GPU indexing lowering
-/// exists, but the laboratory no longer carries a second rotation algorithm.
+/// primitives as the Semantic IR construction. This is a host oracle/helper
+/// for stochastic training and tests; deterministic inference routes and
+/// rotates inside the unified Semantic IR GPU graph.
 pub fn rotate(matrix: &[f32], turns: usize) -> Result<Vec<f32>, LabError> {
     if matrix.len() != WIDTH * WIDTH || turns >= TURNS {
         return Err(LabError(
@@ -315,9 +315,9 @@ pub fn core_model() -> Result<Model, ModelError> {
     m.finish()
 }
 
-/// Learned logits for 2 cores x 4 orientations. This executable runtime still
-/// resolves sampling/argmax on the host because the new semantic ArgMax/Take
-/// slice does not yet have GPU lowering. Sampling remains laboratory policy.
+/// Learned logits for 2 cores x 4 orientations. This standalone model is kept
+/// for stochastic-training policy, where sampling intentionally remains on the
+/// host. Deterministic inference uses architecture_model() and GPU ArgMax/Take.
 pub fn router_model() -> Result<Model, ModelError> {
     let mut m = ModelBuilder::new("rotating_router", "0.1.0");
     let dictionary = m.input("dictionary_state", [1, WIDTH], Domain::NonNegativeFinite)?;
@@ -411,6 +411,7 @@ pub fn architecture_model() -> Result<Model, ModelError> {
 }
 
 pub struct Architectures {
+    pub architecture: Model,
     pub core: Model,
     pub router: Model,
     pub head: Model,
@@ -418,6 +419,7 @@ pub struct Architectures {
 impl Architectures {
     pub fn new() -> Result<Self, ModelError> {
         Ok(Self {
+            architecture: architecture_model()?,
             core: core_model()?,
             router: router_model()?,
             head: head_model()?,
@@ -490,6 +492,7 @@ impl Parameters {
 /// not a hidden CPU implementation of the same neural forward pass.
 pub struct Runner {
     pub models: Architectures,
+    deterministic: GpuExecution,
     core: GpuExecution,
     router: GpuExecution,
     head: GpuExecution,
@@ -499,6 +502,49 @@ impl Runner {
         let workspace = ArtifactWorkspace::new()?;
         let models = Architectures::new()?;
         let gpu = GpuEngine::default();
+        let deterministic_outputs = [
+            models.architecture.output("router_logits").unwrap(),
+            models.architecture.output("next_state").unwrap(),
+            models.architecture.output("normalized_result").unwrap(),
+        ];
+        let deterministic_program =
+            gpu.compile_outputs(models.architecture.graph(), &deterministic_outputs)?;
+        // Deterministic inference is the same graph that is certified: router
+        // ArgMax, rotation bank, Take, transition and readout stay on-device.
+        let deterministic = gpu.prepare(
+            &deterministic_program,
+            &models.architecture.bind([
+                (
+                    "dictionary_state",
+                    Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
+                ),
+                (
+                    "recurrent_state",
+                    Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
+                ),
+                (
+                    "token_bits",
+                    Tensor::from_slice([1, WIDTH], &[0.0; WIDTH])?,
+                ),
+                (
+                    "router_weights",
+                    Tensor::from_slice([WIDTH, ACTIONS], &p.router)?,
+                ),
+                (
+                    "router_bias",
+                    Tensor::from_slice([ACTIONS], &p.router_bias)?,
+                ),
+                ("core0", Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?),
+                ("core1", Tensor::from_slice([WIDTH, WIDTH], &p.cores[1])?),
+                ("core_bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
+                (
+                    "head_weights",
+                    Tensor::from_slice([WIDTH, 1], &p.head)?,
+                ),
+                ("head_bias", Tensor::from_slice([1], &[p.head_bias])?),
+            ])?,
+            &workspace.path().join("deterministic"),
+        )?;
         let core_program = gpu.compile(
             models.core.graph(),
             models.core.output("next_state").unwrap(),
@@ -551,6 +597,7 @@ impl Runner {
         )?;
         Ok(Self {
             models,
+            deterministic,
             core,
             router,
             head,
@@ -629,6 +676,110 @@ impl Runner {
         Ok(value)
     }
 
+    fn deterministic_forward(
+        &mut self,
+        p: &Parameters,
+        dictionary: &Dictionary,
+        input: &str,
+    ) -> Result<Trace, Box<dyn Error>> {
+        let tokens = dictionary.encode(input)?;
+        if tokens.is_empty() {
+            let state = [0.0; WIDTH];
+            return Ok(Trace {
+                normalized: self.readout(p, &state)?,
+                state,
+                decisions: Vec::new(),
+            });
+        }
+        let dict = dictionary.state(&tokens);
+        let mut state = [0f32; WIDTH];
+        let mut decisions = Vec::with_capacity(tokens.len());
+        let logits_id = self.models.architecture.output("router_logits").unwrap();
+        let next_id = self.models.architecture.output("next_state").unwrap();
+        let scalar_id = self
+            .models
+            .architecture
+            .output("normalized_result")
+            .unwrap();
+        let mut normalized = 0.0f32;
+
+        for &token in &tokens {
+            let features = std::array::from_fn(|i| dict[i] + state[i]);
+            let values = self.models.architecture.bind([
+                ("dictionary_state", Tensor::from_slice([1, WIDTH], &dict)?),
+                (
+                    "recurrent_state",
+                    Tensor::from_slice([1, WIDTH], &state)?,
+                ),
+                (
+                    "token_bits",
+                    Tensor::from_slice([1, WIDTH], &Dictionary::bits(token))?,
+                ),
+                (
+                    "router_weights",
+                    Tensor::from_slice([WIDTH, ACTIONS], &p.router)?,
+                ),
+                (
+                    "router_bias",
+                    Tensor::from_slice([ACTIONS], &p.router_bias)?,
+                ),
+                ("core0", Tensor::from_slice([WIDTH, WIDTH], &p.cores[0])?),
+                ("core1", Tensor::from_slice([WIDTH, WIDTH], &p.cores[1])?),
+                ("core_bias", Tensor::from_slice([WIDTH], &p.core_bias)?),
+                (
+                    "head_weights",
+                    Tensor::from_slice([WIDTH, 1], &p.head)?,
+                ),
+                ("head_bias", Tensor::from_slice([1], &[p.head_bias])?),
+            ])?;
+            self.deterministic.update_inputs(&values)?;
+            self.deterministic.replay()?;
+            let outputs = self.deterministic.read_outputs()?;
+
+            let mut logits = None;
+            let mut next = None;
+            let mut scalar = None;
+            for (id, tensor) in outputs {
+                if id == logits_id {
+                    logits = Some(
+                        tensor
+                            .values()
+                            .try_into()
+                            .map_err(|_| LabError("router shape".into()))?,
+                    );
+                } else if id == next_id {
+                    next = Some(
+                        tensor
+                            .values()
+                            .try_into()
+                            .map_err(|_| LabError("core shape".into()))?,
+                    );
+                } else if id == scalar_id {
+                    scalar = tensor.values().first().copied();
+                }
+            }
+            let logits: [f32; ACTIONS] =
+                logits.ok_or_else(|| LabError("missing router output".into()))?;
+            state = next.ok_or_else(|| LabError("missing next_state output".into()))?;
+            normalized = scalar.ok_or_else(|| LabError("missing scalar output".into()))?;
+            if state.iter().any(|v| !v.is_finite()) || !normalized.is_finite() {
+                return Err(Box::new(LabError(
+                    "nonfinite deterministic architecture output".into(),
+                )));
+            }
+            decisions.push(Decision {
+                action: argmax_first(&logits),
+                probs: probabilities(&logits),
+                features,
+            });
+        }
+        Ok(Trace {
+            normalized,
+            state,
+            decisions,
+        })
+    }
+
     pub fn forward(
         &mut self,
         p: &Parameters,
@@ -637,7 +788,11 @@ impl Runner {
         rng: &mut Rng,
         sample_routes: bool,
     ) -> Result<Trace, Box<dyn Error>> {
-        self.forward_with_route(p, dictionary, input, rng, sample_routes, None)
+        if sample_routes {
+            self.forward_with_route(p, dictionary, input, rng, true, None)
+        } else {
+            self.deterministic_forward(p, dictionary, input)
+        }
     }
 
     /// Fixed-action counterfactual for measuring the effect of learned routing.
@@ -650,6 +805,9 @@ impl Runner {
         sample_routes: bool,
         fixed: Option<usize>,
     ) -> Result<Trace, Box<dyn Error>> {
+        if fixed.is_none() && !sample_routes {
+            return self.deterministic_forward(p, dictionary, input);
+        }
         if let Some(action) = fixed {
             route_parts(action)?;
         }
@@ -728,15 +886,22 @@ fn probabilities(logits: &[f32; ACTIONS]) -> [f32; ACTIONS] {
     }
     weights
 }
+fn argmax_first(values: &[f32; ACTIONS]) -> usize {
+    let mut best = 0;
+    for index in 1..ACTIONS {
+        if values[index].is_nan() {
+            continue;
+        }
+        if values[best].is_nan() || values[index] > values[best] {
+            best = index;
+        }
+    }
+    best
+}
+
 fn choose(probs: &[f32; ACTIONS], rng: &mut Rng, stochastic: bool) -> usize {
     if !stochastic {
-        let mut best = 0;
-        for index in 1..ACTIONS {
-            if probs[index] > probs[best] {
-                best = index;
-            }
-        }
-        return best;
+        return argmax_first(probs);
     }
     let mut sample = rng.uniform();
     for (i, &prob) in probs.iter().enumerate() {
@@ -1088,6 +1253,8 @@ mod tests {
             assert_eq!(route_parts(action).unwrap(), (action / 4, action % 4));
         }
         assert!(route_parts(8).is_err());
+        assert_eq!(argmax_first(&[f32::NAN, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), 1);
+        assert_eq!(argmax_first(&[f32::NAN; ACTIONS]), 0);
 
         let mut rng = Rng::new(7);
         let mut probs = [0.0; ACTIONS];
@@ -1151,6 +1318,10 @@ mod tests {
         assert!(plan.contains("transpose2d"));
         assert!(plan.contains("argmax_last"));
         assert!(plan.contains("take_axis0"));
+        let memory = gpu.memory_lean_source().unwrap();
+        assert!(memory.contains("transpose2d_address_bound"));
+        assert!(memory.contains("argmax_candidate_address_bound"));
+        assert!(memory.contains("take_axis0_address_bound"));
         assert_eq!(model.proof_goals().len(), 0);
     }
 }

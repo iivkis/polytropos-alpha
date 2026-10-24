@@ -30,3 +30,6 @@ Open requirements:
 - **P11/P12**: general nonlinear/branch/recurrent FP32 error composition, backend capability proof obligations for every optimization and full machine-code correspondence.
 
 Do not label these incomplete areas certified. The generated bounded scan theorem must pass the external Lean checker and axiom audit; code generation alone is not a proof. Local Rust, Lean and CUDA build/test commands were not executed by the agent per AGENTS.md.
+
+
+- **Rotating-matrices structural P0 closure (код; локальная приёмка ожидается):** narrow GPU lowering + translation audit + Lean memory-address obligations cover `Permute/ReverseAxis/Concat/ArgMax(First)/Take`. The deterministic laboratory forward now compiles one shared `architecture_model()` CUDA Graph and obtains routing, selected rotation, recurrent transition and readout from that graph; host `route_parts()/rotate()` are no longer part of deterministic inference. Host stochastic sampling remains an explicit training policy, not a second certified deterministic semantics. P1 owns removal of per-token rebinding/state round trips via `ModelExecution`.
