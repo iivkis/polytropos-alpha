@@ -16,9 +16,12 @@
 //! ModuleInvocation elementwise, including direct nested-module theorem reuse.
 //! Architecture-level range theorems compose the reachable top-level module DAG,
 //! including fork/fan-in boundaries, under the same formal RNE target relation.
-//! An explicit global ideal-Int nonnegativity request composes Add/Mul/MatMul/
-//! BiasAdd/ReLU/Reshape module proofs over a DAG from source hypotheses.
-//! Nested modules reuse direct child theorems recursively. This property is
+//! An explicit global ideal-Int nonnegativity request groups compatible
+//! top-level module invocations by normalized definition, proves each shared
+//! definition once, checks concrete invocation premises separately, and builds
+//! the architecture theorem from those applications. Nested module bodies are
+//! normalized inside their enclosing definition in this profile; a general
+//! typed theorem-dependency graph remains future work. This property is
 //! separate from FP32/GPU guarantees.
 //! Stage 8 ReLU threshold decisions use conditional per-node error margins;
 //! uncertain pre-activations remain indeterminate.
