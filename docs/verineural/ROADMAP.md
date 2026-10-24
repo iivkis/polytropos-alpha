@@ -193,3 +193,15 @@ Lean `approx_contract_relu_positive_branch` / `approx_contract_relu_nonpositive_
 **Stage 10, регрессии после первой локальной приёмки:** `task check` прошёл, три `verify-certified-stage10` проверки Lean/SHA-256 прошли; полный `task test` остановился на некорректном домене входа теста `sqrt`, `task clippy` остановился на `too_many_arguments`, Cargo предупредил о совпадении имён двух `certified` examples. В следующем срезе test input изменён на `NonNegativeFinite` (контракт `sqrt` остаётся строгим), replay переиспользует один `AutoBuildPlan`, а имена executable examples различаются. Локальная повторная приёмка этих исправлений ожидается.
 
 **Stage 10, первая успешная локальная end-to-end приёмка (2026-10-23, `84980ea`):** разработчик подтвердил `task check`, `task test --workspace` (все запущенные тесты прошли, отдельные tool-dependent тесты по умолчанию ignored), `task clippy` с `-D warnings` и `task verify-certified-stage10` (3/3 включая ложную цель, чужую identity и tamper). `task certified-build` и `task verify-certified-build` через Cargo CLI успешно собрали и перепроверили *обе* независимые модели с отдельными absolute artifact roots: XOR (`6bc265ca583d2e4c6803fecf74c5b7df0f39f3817d7902d425ccc6deeda77797`) и CoupledField (`0788971dd228bc51de0105780817d45d9141c832f1fc18d279cf386d83c47f44`). Lean checker: 4.29.1, по одной обязательной named goal на архитектуру. Это подтверждение Lean ideal-Int + структурного GPU lowering и offline replay, **не** GPU hardware/JIT/SASS equivalence. В этих логах нет второго build в тот же root, проверки неверного внешнего SHA-256 pin или запуска CUDA Graph. Добавлен четвёртый ignored acceptance-тест, воспроизводящий повторную публикацию, детерминированность SHA-256, верный/неверный pin и post-reissue replay; его локальный результат ещё ожидается. Первый root alias migration остаётся неатомарным; универсальному consumer пока нужен явно оформленный `examples/<name>_certified.rs`.
+
+**Приёмка P0/P1/P2 и rotating GPU, новый код (локальный прогон ожидается):**
+`task verify-api-acceptance` объединяет существующие P0 Lean/consumer gates без изменения
+математических контрактов; `task verify-lab-rotating-gpu` запускает проверку
+типизированного GPU `ArgMax/Index` и новый `labs/rotating-matrices-0.1.0/tests/gpu_parity.rs`.
+Независимый CPU-оракул адресует все восемь пространственных маршрутов формулами
+координат и проверяет многотокенный deterministic GPU forward, readout, state reset
+и политику `ArgMax First` против одного переиспользуемого CUDA Graph. CPU smoke-test
+требует различимых результатов всех маршрутов. Всё GPU/Lean acceptance — пока
+**не проверено локально**; `task gpu-state-replay` и `task lab-rotating` остаются
+обязательными отдельными аппаратными проверками. Это численная validation,
+не доказательство FP32/LLVM/PTX/JIT/SASS.

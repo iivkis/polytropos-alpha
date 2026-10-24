@@ -344,6 +344,22 @@ tasks:
     cmds:
       - cargo test -p verineural-consumer-acceptance --all-targets -- --ignored
 
+  verify-api-acceptance:
+    desc: Developer-run P0/P1/P2 API contracts, real Lean checks, and independent consumer cases
+    cmds:
+      - task p0-acceptance
+      - task verify-reusable-module-proof
+      - task p2-consumers
+      - task verify-p2-consumers
+
+  verify-lab-rotating-gpu:
+    desc: NVIDIA acceptance for typed ArgMax output and independent rotating-matrices CUDA Graph parity
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test tensor_indexing -- --ignored
+      - cargo test -p rotating-matrices-lab --test gpu_parity
+      - cargo test -p rotating-matrices-lab --test gpu_parity -- --ignored
+
   lab-rotating:
     desc: Inspect and train rotating-matrices; deterministic routing uses the unified structural/index CUDA Graph
     deps: [prepare]

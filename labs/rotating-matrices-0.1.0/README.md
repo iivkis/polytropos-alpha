@@ -70,6 +70,16 @@ task train-lab-rotating -- 128
 
 task certify-lab-rotating
 # Требует Lean + LLVM NVPTX; structural/indexing routing уже имеет GPU lowering
+
+# Сквозная приёмка (только в pinned Nix devShell):
+task verify-api-acceptance
+# P0/P1/P2 контракты, Lean-аудит и независимые consumer-сценарии
+
+task gpu-state-replay
+# Named state feedback, persistent CUDA Graph, проверка битов FP32
+
+task verify-lab-rotating-gpu
+# GPU ArgMax/Index и восемь маршрутов против независимого CPU-оракула
 ```
 
 Потребитель теперь использует `Tensor::from_slice` вместо собственного helper.
@@ -87,8 +97,8 @@ IEEE-754/JIT/SASS или качества обучения.
 `architecture.png` рендерится VeriNeural/Graphviz именно из сохранённого
 `architecture.dot`. Общий Lean генерируется из объединённого Semantic Neural IR,
 в котором присутствуют router logits, recurrent transition и terminal readout.
-Runtime может исполнять части раздельно для последовательного CUDA Graph replay,
-но это не превращает их в три разные архитектуры.
+Deterministic runtime исполняет единый Semantic IR в одном CUDA Graph;
+для стохастической политики отдельные route-specific графы остаются вне certified forward.
 
 P0-граница `selected_rotated_weight` из общего IR удалена. Evidence-модель
 строит восемь вариантов двух параметров только универсальными
@@ -160,3 +170,15 @@ Structural/indexing GPU lowering и translation/memory evidence для `permute`
 численная композиция routing/branching и инвариант рекуррентного цикла.
 Отдельно стоит добавить ablation:
 фиксированный маршрут против обучаемого, один core против двух, без вращений.
+
+## Новая проверка маршрутизации (код добавлен, NVIDIA-приёмка не выполнена)
+
+`tests/gpu_parity.rs` независимо вычисляет индексы R0/R90/R180/R270,
+router logits, recurrent step и scalar readout через простые CPU-циклы.
+Восемь forced-action сценариев, повторное использование одного GPU execution,
+смена длины последовательности, сброс state и восьмикратный tie `ArgMax First`
+сопоставляются с реальным единым CUDA Graph; CPU-only smoke-test проверяет,
+что oracle различает все восемь маршрутов. Численная проверка использует
+ограниченную погрешность FP32, **не** доказательство machine equivalence.
+Для полного пункта GPU-приёмки отдельно выполнить `task lab-rotating`;
+он включает обучение 128 обновлений, но **не заменяет** parity test.
