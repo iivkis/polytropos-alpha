@@ -97,7 +97,7 @@ fn three_op_fusion_is_structurally_checked_and_roundtrippable() {
 #[test]
 fn fanout_or_fourth_distinct_buffer_prevents_three_way_fusion() {
     let config = GpuLaunchConfig::default().with_pointwise_fusion();
-    let (mut graph, [a, _, _], [mul, add, root]) = fixture(false, false, 2);
+    let (mut graph, [a, _, _], [_, add, root]) = fixture(false, false, 2);
     let extra = graph.add(add, a).unwrap();
     let selected = graph.add(root, extra).unwrap();
     let shared = GpuEngine::default()

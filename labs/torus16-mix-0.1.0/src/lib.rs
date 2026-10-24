@@ -244,7 +244,7 @@ pub fn reference_project(
             .flat_map(|row| row.iter().copied())
             .collect(),
     )?;
-    let weight = if role % 2 == 0 {
+    let weight = if role.is_multiple_of(2) {
         weight.permute(&[1, 0])?
     } else {
         weight

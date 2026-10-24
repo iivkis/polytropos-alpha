@@ -358,7 +358,7 @@ fn project(
     p: &ProjectionPorts,
 ) -> Result<NodeId, ModelError> {
     let ports = &p.roles[role];
-    let w = if role % 2 == 0 {
+    let w = if role.is_multiple_of(2) {
         p.transposed
     } else {
         p.weight
@@ -396,13 +396,15 @@ fn conv_step(
         history.push(id);
     }
     let mut conv = None;
-    for tap in 0..KERNEL {
+    // The last convolution tap consumes the current token; the preceding
+    // HISTORY taps consume their matching recurrent history entries.
+    // HISTORY = KERNEL - 1, so this iterator contains exactly KERNEL taps.
+    for (tap, &source) in history.iter().chain(std::iter::once(&x)).enumerate() {
         let weight = model.parameter(
             format!("dw_{layer}_{stage}_{tap}"),
             vec![1, WIDTH],
             Domain::Finite,
         )?;
-        let source = if tap == HISTORY { x } else { history[tap] };
         let term = model.graph_mut().mul(source, weight)?;
         conv = Some(if let Some(sum) = conv {
             model.graph_mut().add(sum, term)?
@@ -433,10 +435,8 @@ fn conv_step(
     Ok(model.graph_mut().add(x, scaled)?)
 }
 
-fn block_step(
-    model: &mut ModelBuilder,
-    mut x: NodeId,
-    layer: usize,
+#[derive(Clone, Copy)]
+struct BlockStepPorts {
     norm: NormPorts,
     one_vec: NodeId,
     minus_vec: NodeId,
@@ -445,6 +445,22 @@ fn block_step(
     minus_up: NodeId,
     inv_sqrt: NodeId,
     minus_scalar: NodeId,
+}
+
+fn block_step(
+    model: &mut ModelBuilder,
+    mut x: NodeId,
+    layer: usize,
+    BlockStepPorts {
+        norm,
+        one_vec,
+        minus_vec,
+        half_vec,
+        one_up,
+        minus_up,
+        inv_sqrt,
+        minus_scalar,
+    }: BlockStepPorts,
 ) -> Result<NodeId, ModelError> {
     let weight = model.parameter(
         format!("weight_{layer}"),
@@ -597,20 +613,18 @@ pub fn architecture_model(vocabulary: usize) -> Result<Model, ModelError> {
         epsilon,
     };
     let mut x = model.graph_mut().matmul(token, embedding)?;
+    let block_ports = BlockStepPorts {
+        norm,
+        one_vec,
+        minus_vec,
+        half_vec,
+        one_up,
+        minus_up,
+        inv_sqrt,
+        minus_scalar,
+    };
     for layer in 0..LAYERS {
-        x = block_step(
-            &mut model,
-            x,
-            layer,
-            norm,
-            one_vec,
-            minus_vec,
-            half_vec,
-            one_up,
-            minus_up,
-            inv_sqrt,
-            minus_scalar,
-        )?;
+        x = block_step(&mut model, x, layer, block_ports)?;
     }
     let gamma = model.parameter("final_gamma", vec![1, WIDTH], Domain::Finite)?;
     let beta = model.parameter("final_beta", vec![1, WIDTH], Domain::Finite)?;

@@ -17,10 +17,18 @@ fn synthetic_ptx(plan: &TranslationPlan) -> String {
             | TranslationKind::BiasAdd { .. }
             | TranslationKind::AddRelu
             | TranslationKind::BiasAddRelu { .. } => (1, 0),
-            TranslationKind::Mul | TranslationKind::MulRelu => (0, 1),
-            TranslationKind::MatMul { .. } | TranslationKind::MulBiasRelu { .. } => (1, 1),
+            TranslationKind::Mul | TranslationKind::MulRelu | TranslationKind::ExpApprox => (0, 1),
+            TranslationKind::MatMul { .. }
+            | TranslationKind::MulBiasRelu { .. }
+            | TranslationKind::MulAdd { .. } => (1, 1),
+            TranslationKind::MulAddMul { .. } => (1, 2),
             TranslationKind::AddBiasRelu { .. } => (2, 0),
             TranslationKind::Relu
+            | TranslationKind::Sub
+            | TranslationKind::DivRne
+            | TranslationKind::SqrtRne
+            | TranslationKind::BroadcastScalar
+            | TranslationKind::SliceLastRow { .. }
             | TranslationKind::Transpose2D { .. }
             | TranslationKind::ReverseRows2D { .. }
             | TranslationKind::ReverseColumns2D { .. }
