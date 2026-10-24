@@ -44,7 +44,7 @@ impl From<NeuralError> for DifferentiationError {
 pub struct ReverseGraph {
     graph: NeuralGraph,
     root: NodeId,
-    seed: NodeId,
+    seed: Option<NodeId>,
     gradients: Vec<(NodeId, NodeId)>,
     constants: Vec<(NodeId, Tensor<f32>)>,
 }
@@ -57,7 +57,7 @@ impl ReverseGraph {
         self.root
     }
     pub fn seed(&self) -> NodeId {
-        self.seed
+        self.seed.expect("graph-provided VJP has no external seed")
     }
     pub fn gradients(&self) -> &[(NodeId, NodeId)] {
         &self.gradients
@@ -79,6 +79,9 @@ impl ReverseGraph {
         primal: &[(NodeId, Tensor<f32>)],
         seed: Tensor<f32>,
     ) -> Result<Vec<(NodeId, Tensor<f32>)>, DifferentiationError> {
+        let source = self.seed.ok_or(DifferentiationError::Invalid(
+            "graph-provided VJP does not accept an external seed",
+        ))?;
         if seed.shape() != &self.graph.node(self.root)?.shape {
             return Err(DifferentiationError::Invalid(
                 "seed shape differs from differentiated output",
@@ -88,7 +91,7 @@ impl ReverseGraph {
             return Err(DifferentiationError::Invalid("seed must be finite"));
         }
         let mut result = primal.to_vec();
-        result.push((self.seed, seed));
+        result.push((source, seed));
         result.extend(self.constants.iter().cloned());
         Ok(result)
     }
@@ -205,8 +208,46 @@ pub fn differentiate(
     wrt: &[NodeId],
 ) -> Result<ReverseGraph, DifferentiationError> {
     let output = primal.node(root)?;
-    if output.dtype != DType::F32 {
-        return Err(DifferentiationError::Invalid("only F32 output roots"));
+    let mut seeded = primal.clone();
+    let seed = seeded.input(output.shape.clone(), Domain::Finite);
+    differentiate_impl(&seeded, &[(root, seed)], wrt, Some(seed))
+}
+
+/// Compute the sum of vector-Jacobian products for multiple output roots.
+/// Each seed is an existing IR expression, treated as a terminal adjoint.
+/// Gradients do NOT propagate through the expression producing a seed.
+/// This allows GPU loss-gradient construction and parameter VJPs in one
+/// executable CUDA Graph; no machine-code/FP32 certificate is claimed.
+pub fn differentiate_with_seeds(
+    primal: &NeuralGraph,
+    roots: &[(NodeId, NodeId)],
+    wrt: &[NodeId],
+) -> Result<ReverseGraph, DifferentiationError> {
+    differentiate_impl(primal, roots, wrt, None)
+}
+
+fn differentiate_impl(
+    primal: &NeuralGraph,
+    roots: &[(NodeId, NodeId)],
+    wrt: &[NodeId],
+    external_seed: Option<NodeId>,
+) -> Result<ReverseGraph, DifferentiationError> {
+    let Some(&(root, _)) = roots.first() else {
+        return Err(DifferentiationError::Invalid("at least one output/seed pair required"));
+    };
+    let mut unique_roots = BTreeSet::new();
+    for &(output, seed) in roots {
+        let y = primal.node(output)?;
+        let s = primal.node(seed)?;
+        if !unique_roots.insert(output.index())
+            || y.dtype != DType::F32
+            || s.dtype != DType::F32
+            || y.shape != s.shape
+        {
+            return Err(DifferentiationError::Invalid(
+                "output/seed pairs must be unique, matching F32 tensors",
+            ));
+        }
     }
     if wrt.is_empty() {
         return Err(DifferentiationError::Invalid(
@@ -227,7 +268,7 @@ pub fn differentiate(
     }
 
     let mut reachable = BTreeSet::new();
-    let mut pending = vec![root];
+    let mut pending = roots.iter().map(|&(y, _)| y).collect::<Vec<_>>();
     while let Some(id) = pending.pop() {
         let node = primal.node(id)?;
         if !reachable.insert(id.index()) {
@@ -265,9 +306,10 @@ pub fn differentiate(
         constants: Vec::new(),
         fills: BTreeMap::new(),
     };
-    let seed = b.graph.input(output.shape.clone(), Domain::Finite);
     let mut adjoints = BTreeMap::<usize, NodeId>::new();
-    adjoints.insert(root.index(), seed);
+    for &(y, seed) in roots {
+        adjoints.insert(y.index(), seed);
+    }
     for index in reachable.into_iter().rev() {
         if !relevant.contains(&index) {
             continue;
@@ -372,7 +414,7 @@ pub fn differentiate(
     Ok(ReverseGraph {
         graph: b.graph,
         root,
-        seed,
+        seed: external_seed,
         gradients,
         constants: b.constants,
     })

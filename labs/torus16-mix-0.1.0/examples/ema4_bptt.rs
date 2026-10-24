@@ -1,15 +1,20 @@
 //! Experimental all-parameter finite-window BPTT for four-layer EMA4-LM.
 //! Corpus defaults to this lab's checked-in research snapshot.
-//! Training CE seeds and AdamW are on host; forward and all VJPs use one
-//! compiled VeriNeural CUDA Graph. Validation is reset-state streaming BPC.
+//! Softmax CE cotangents and VJPs share one CUDA Graph replay per window;
+//! CE reporting and AdamW are on host. CUDA FP32 parity is not certified. Validation is reset-state streaming BPC.
 //! This is not equivalence with the trained handoff PyTorch checkpoint.
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 use torus16_mix_lab::corpus::CharCorpus;
 use torus16_mix_lab::ema4::{Ema4Weights, architecture_model};
-use verineural::{AdamW, GpuEngine, GpuLaunchConfig, Tensor, differentiate, unroll_model};
+use torus16_mix_lab::ema4_checkpoint::{Ema4Checkpoint, fingerprint};
+use verineural::{
+    AdamW, ArgMaxTieBreak, Domain, GpuEngine, GpuLaunchConfig, NodeId, Shape, Tensor,
+    differentiate_with_seeds, unroll_model,
+};
 
 fn onehot(token: usize, width: usize) -> Result<Tensor<f32>, Box<dyn Error>> {
     if token >= width {
@@ -68,6 +73,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let window_len = option_usize("TORUS16_BPTT", 2, 2, 8)?;
     let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 4096)?;
     let val_limit = option_usize("TORUS16_VAL_LIMIT", 64, 2, 100000)?;
+    let checkpoint_every = option_usize("TORUS16_CHECKPOINT_EVERY", 128, 1, 4096)?;
+    let checkpoint_path = std::env::var_os("TORUS16_CHECKPOINT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target/torus16-ema4-bptt.ckpt"));
+    let fresh = std::env::var_os("TORUS16_FRESH").is_some();
+    let corpus_hash = fingerprint(&fs::read(&corpus_path)?);
     if train_windows
         .checked_mul(window_len)
         .ok_or("training count overflow")?
@@ -93,7 +104,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("training parameter {name} absent from unrolled model"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let reverse = differentiate(window.graph(), window.objective(), &targets)?;
+    // Graph-provided CE cotangents are terminal VJP adjoints, not
+    // differentiated as ordinary logits functions (no spurious Hessian).
+    let mut train_graph = window.graph().clone();
+    let ones_id = train_graph.input(Shape::new(vec![vocab, 1])?, Domain::Finite);
+    let scale_id = train_graph.input(Shape::new(vec![1, 1])?, Domain::Finite);
+    let row = Shape::new(vec![1, vocab])?;
+    let scale_row = train_graph.broadcast_to(scale_id, row.clone())?;
+    let mut supervised = Vec::<(NodeId, NodeId)>::new();
+    for (&logits, &target) in window.outputs().iter().zip(window.cotangents()) {
+        // Stable softmax max = take(transpose(logits), argmax(logits)).
+        let max_index = train_graph.argmax(logits, 1, ArgMaxTieBreak::First)?;
+        let column = train_graph.permute(logits, &[1, 0])?;
+        let maximum = train_graph.take(column, max_index, 0)?;
+        let maximum = train_graph.reshape(maximum, Shape::new(vec![1, 1])?)?;
+        let max_row = train_graph.broadcast_to(maximum, row.clone())?;
+        let shifted = train_graph.sub(logits, max_row)?;
+        let exps = train_graph.exp(shifted)?;
+        let denom = train_graph.matmul(exps, ones_id)?;
+        let denom_row = train_graph.broadcast_to(denom, row.clone())?;
+        let normalized = train_graph.div(exps, denom_row)?;
+        let difference = train_graph.sub(normalized, target)?;
+        let seed = train_graph.mul(difference, scale_row)?;
+        supervised.push((logits, seed));
+    }
+    let reverse = differentiate_with_seeds(&train_graph, &supervised, &targets)?;
     let gradients = targets
         .iter()
         .map(|&p| {
@@ -143,9 +178,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let all = weights.bindings(0)?;
+    let expected_states = window
+        .initial_states()
+        .keys()
+        .map(|name| {
+            all.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| (name.clone(), value.clone()))
+                .ok_or_else(|| format!("missing initial recurrent state: {name}"))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let (mut params, mut states, mut optimizer, first_window) =
+        if !fresh && checkpoint_path.exists() {
+            let ckpt = Ema4Checkpoint::read(&checkpoint_path)?;
+            ckpt.validate(
+                window_len, vocab, corpus_hash, train_windows,
+                &trainable_initial, &expected_states,
+            )?;
+            let opt = AdamW::from_checkpoint(ckpt.optimizer, &ckpt.parameters)?;
+            println!("checkpoint_resumed={} completed_windows={}", checkpoint_path.display(), ckpt.completed_windows);
+            (ckpt.parameters, ckpt.states, opt, ckpt.completed_windows)
+        } else {
+            (trainable_initial, expected_states, AdamW::new(0.002, 0.01)?, 0usize)
+        };
     let base = all
         .into_iter()
         .filter(|(name, _)| name != "token")
+        .map(|(name, value)| {
+            let value = params.get(&name).or_else(|| states.get(&name)).cloned().unwrap_or(value);
+            (name, value)
+        })
         .collect::<Vec<_>>();
     let step_tokens = (0..window_len)
         .map(|step| {
@@ -159,7 +221,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|_| Tensor::zeros(vec![1, vocab]))
         .collect::<Result<Vec<_>, _>>()?;
     let supplied = window.bindings(&base, &step_tokens, &blank_seeds)?;
-    let supplied = reverse.bindings(&supplied, Tensor::from_slice(vec![1, 1], &[1.])?)?;
+    let mut supplied = supplied;
+    supplied.extend(reverse.constants().iter().cloned());
+    supplied.push((ones_id, Tensor::from_vec(vec![vocab, 1], vec![1.; vocab])?));
+    supplied.push((scale_id, Tensor::from_slice(vec![1, 1], &[1. / window_len as f32])?));
     let supplied = supplied
         .into_iter()
         .filter(|(id, _)| program.source_inputs().contains(id))
@@ -207,10 +272,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             event.average().as_secs_f64() * 1000.
         );
     }
-    let mut params = trainable_initial;
-    let mut optimizer = AdamW::new(0.002, 0.01)?;
-    let mut backward_selected = gradients.clone();
-    backward_selected.extend(window.terminal_states().values().copied());
+    // Selected logits are read with gradients/states after one replay.
+    let output_count = window.outputs().len();
     println!(
         "BPTT={} trainable_tensors={} trainable_values={} vocab={} IR_nodes={} CUDA_graph_kernels={}",
         window_len,
@@ -221,18 +284,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         program.kernel_count()?
     );
     let train_start = Instant::now();
-    for iteration in 0..train_windows {
+    for iteration in first_window..train_windows {
         let step_start = Instant::now();
         let start = iteration * window_len;
         let tokens = (0..window_len)
             .map(|t| onehot(corpus.train[start + t], vocab))
             .collect::<Result<Vec<_>, _>>()?;
+        let labels = (0..window_len)
+            .map(|t| onehot(corpus.train[start + t + 1], vocab))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut input_updates = Vec::with_capacity(window_len * 2);
         for (t, tensor) in tokens.iter().enumerate() {
             input_updates.push((window.inputs()[t]["token"], tensor));
-        }
-        for (t, seed) in blank_seeds.iter().enumerate() {
-            input_updates.push((window.cotangents()[t], seed));
+            input_updates.push((window.cotangents()[t], &labels[t]));
         }
         let timing = Instant::now();
         gpu.update_input_subset(&input_updates)?;
@@ -240,53 +304,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let timing = Instant::now();
         gpu.replay()?;
-        let forward_replay_ms = timing.elapsed().as_secs_f64() * 1000.;
+        let graph_replay_ms = timing.elapsed().as_secs_f64() * 1000.;
 
         let timing = Instant::now();
-        // Only logits are needed for CE; gradients and all 68 states are not
-        // downloaded during the seed-building forward pass.
-        let forward = gpu.read_outputs_selected(window.outputs())?;
-        let read_logits_ms = timing.elapsed().as_secs_f64() * 1000.;
-
+        // Single D2H batch, after the sole replay of the training graph.
+        let outputs = gpu.read_outputs_selected(&selected)?;
+        let read_outputs_ms = timing.elapsed().as_secs_f64() * 1000.;
         let timing = Instant::now();
         let mut total = 0f32;
-        let mut seed_tensors = Vec::with_capacity(window_len);
         for t in 0..window_len {
-            let (loss, mut gradient) =
-                cross_entropy(forward[t].1.values(), corpus.train[start + t + 1])?;
-            total += loss;
-            for v in &mut gradient {
-                *v /= window_len as f32;
-            }
-            seed_tensors.push(Tensor::from_vec(vec![1, vocab], gradient)?);
+            total += cross_entropy(outputs[t].1.values(), corpus.train[start + t + 1])?.0;
         }
         let ce_ms = timing.elapsed().as_secs_f64() * 1000.;
-
-        let timing = Instant::now();
-        let seed_updates = window
-            .cotangents()
-            .iter()
-            .copied()
-            .zip(seed_tensors.iter())
-            .collect::<Vec<_>>();
-        gpu.update_input_subset(&seed_updates)?;
-        let upload_seed_ms = timing.elapsed().as_secs_f64() * 1000.;
-
-        let timing = Instant::now();
-        gpu.replay()?;
-        let backward_replay_ms = timing.elapsed().as_secs_f64() * 1000.;
-
-        let timing = Instant::now();
-        // Queue all gradient/state D2H copies and wait for them once, rather
-        // than synchronizing for each of 271 gradients and 68 states.
-        let backward = gpu.read_outputs_selected(&backward_selected)?;
-        let read_backward_ms = timing.elapsed().as_secs_f64() * 1000.;
 
         let timing = Instant::now();
         let derivative = names
             .iter()
             .enumerate()
-            .map(|(i, name)| (name.clone(), backward[i].1.clone()))
+            .map(|(i, name)| (name.clone(), outputs[output_count + i].1.clone()))
             .collect::<BTreeMap<_, _>>();
         // Host staging of all next states before the single H2D update batch
         // preserves recurrent TBPTT semantics even with aliased GPU buffers.
@@ -294,7 +329,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .terminal_states()
             .keys()
             .enumerate()
-            .map(|(i, name)| (name.clone(), backward[names.len() + i].1.clone()))
+            .map(|(i, name)| (name.clone(), outputs[output_count + names.len() + i].1.clone()))
             .collect::<BTreeMap<_, _>>();
         optimizer.step(&mut params, &derivative)?;
         let adam_ms = timing.elapsed().as_secs_f64() * 1000.;
@@ -313,6 +348,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         gpu.update_input_subset(&updates)?;
         let upload_parameters_states_ms = timing.elapsed().as_secs_f64() * 1000.;
+        states = next_states;
+        if (iteration + 1) % checkpoint_every == 0 || iteration + 1 == train_windows {
+            Ema4Checkpoint {
+                completed_windows: iteration + 1,
+                bptt: window_len,
+                vocab,
+                corpus_fingerprint: corpus_hash,
+                parameters: params.clone(),
+                states: states.clone(),
+                optimizer: optimizer.checkpoint(),
+            }
+            .write_atomic(&checkpoint_path)?;
+        }
 
         println!(
             "train_window={} ce_nats={:.6} train_bpc={:.6} optimizer_step={} end_to_end_step_ms={:.3}",
@@ -324,7 +372,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         if iteration < 3 || (iteration + 1) % 128 == 0 {
             println!(
-                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} forward_replay_ms={forward_replay_ms:.3} logits_d2h_ms={read_logits_ms:.3} ce_ms={ce_ms:.3} seed_h2d_ms={upload_seed_ms:.3} backward_replay_ms={backward_replay_ms:.3} gradients_states_d2h_ms={read_backward_ms:.3} host_adamw_ms={adam_ms:.3} parameters_states_h2d_ms={upload_parameters_states_ms:.3}",
+                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} graph_replay_ms={graph_replay_ms:.3} logits_gradients_states_d2h_ms={read_outputs_ms:.3} ce_ms={ce_ms:.3} host_adamw_ms={adam_ms:.3} parameters_states_h2d_ms={upload_parameters_states_ms:.3}",
                 iteration
             );
         }
@@ -333,8 +381,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} scope=GPU_replay_plus_host_CE_AdamW_transfers",
         train_elapsed,
-        train_windows * window_len,
-        (train_windows * window_len) as f64 / train_elapsed
+        (train_windows - first_window) * window_len,
+        ((train_windows - first_window) * window_len) as f64 / train_elapsed
     );
     // Real holdout: chronological final 10% only. One recurrent inference
     // step per symbol, with state reset to zero at the validation boundary.
@@ -363,7 +411,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         validation_start.elapsed().as_secs_f64()
     );
     println!(
-        "NOTE: deterministic initialization or restored checkpoint; host AdamW/CE and GPU forward/VJP; no formal FP32 gradient proof."
+        "NOTE: GPU approximate-exp softmax CE seed + VJP, host CE metric and AdamW; no formal FP32 gradient proof."
     );
     Ok(())
 }

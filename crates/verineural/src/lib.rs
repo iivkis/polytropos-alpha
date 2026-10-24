@@ -68,7 +68,7 @@ pub use auto_build::{
     AutoBuildReport, ConnectivityEvidence, GpuRequirement, OutputBuildEvidence, PlannedGpu,
     check_architecture_connectivity,
 };
-pub use autodiff::{DifferentiationError, ReverseGraph, differentiate};
+pub use autodiff::{DifferentiationError, ReverseGraph, differentiate, differentiate_with_seeds};
 pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage5Report};
 pub use certified::{CertifiedBuildConfig, certified_example_main};
 pub use consumer::{BindingError, ComponentBinder, ObligationError};

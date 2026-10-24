@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 use verineural::{
     AdamW, Domain, GpuEngine, NeuralGraph, PointwiseExpr, PointwiseSpec, Shape, Tensor,
-    differentiate,
+    differentiate, differentiate_with_seeds,
 };
 
 fn fixture() -> (
@@ -197,4 +197,48 @@ fn gpu_reverse_graph_matches_scalar_matmul_finite_difference() {
     for col in 0..2 {
         assert!((outputs[2].1.values()[col] - 2. * z[col] * seed[col]).abs() < 2e-5);
     }
+}
+
+#[test]
+fn graph_provided_multi_output_vjp_rejects_bad_seeds() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![1, 1]).unwrap();
+    let weight = graph.input(shape.clone(), Domain::Finite);
+    let input = graph.input(shape.clone(), Domain::Finite);
+    let square = graph.mul(weight, weight).unwrap();
+    let output = graph.add(square, input).unwrap();
+    let first_seed = graph.mul(square, input).unwrap();
+    let second_seed = graph.sub(input, weight).unwrap();
+    let reverse = differentiate_with_seeds(
+        &graph, &[(square, first_seed), (output, second_seed)], &[weight],
+    ).unwrap();
+    assert_eq!(reverse.graph().node(reverse.gradient_of(weight).unwrap()).unwrap().shape, shape);
+    assert!(reverse.bindings(&[], Tensor::from_slice(vec![1, 1], &[1.]).unwrap()).is_err());
+    assert!(differentiate_with_seeds(&graph, &[], &[weight]).is_err());
+    assert!(differentiate_with_seeds(&graph, &[(square, input), (square, input)], &[weight]).is_err());
+}
+
+#[test]
+#[ignore = "requires NVIDIA GPU and LLVM NVPTX for graph-provided seed parity"]
+fn gpu_graph_provided_multi_output_vjp_stops_gradient_at_cotangents() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![1, 1]).unwrap();
+    let weight = graph.input(shape.clone(), Domain::Finite);
+    let input = graph.input(shape.clone(), Domain::Finite);
+    let square = graph.mul(weight, weight).unwrap();
+    let output = graph.add(square, input).unwrap();
+    let first_seed = graph.mul(square, input).unwrap();
+    let second_seed = graph.sub(input, weight).unwrap();
+    let reverse = differentiate_with_seeds(&graph, &[(square, first_seed), (output, second_seed)], &[weight]).unwrap();
+    let gradient = reverse.gradient_of(weight).unwrap();
+    let engine = GpuEngine::new("llc", std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()));
+    let program = engine.compile_outputs(reverse.graph(), &[gradient]).unwrap();
+    let values = vec![
+        (weight, Tensor::from_slice(vec![1, 1], &[2.]).unwrap()),
+        (input, Tensor::from_slice(vec![1, 1], &[3.]).unwrap()),
+    ];
+    let path = std::env::temp_dir().join(format!("vn_seeded_vjp_{}", std::process::id()));
+    let result = engine.execute(&program, &values, &path).unwrap();
+    // seeds: 2^2 * 3=12 and 3-2=1; VJP=4*(12+1)=52.
+    assert!((result.values()[0] - 52.).abs() < 1e-5);
 }

@@ -426,6 +426,17 @@ in `end_to_end_step_ms`. Run `task test-lab-torus16-ema4-checkpoint`
 for CPU unit tests and compare a resumed NVIDIA run to an uninterrupted
 run before claiming numerical parity.
 
+Training now computes per-step softmax CE cotangents directly in the
+Semantic IR as `ArgMax → Take` for a stable maximum, `Exp`, `MatMul`
+(sum), and `Div/Sub`. The library's architecture-neutral
+`differentiate_with_seeds` treats these as terminal adjoints. One CUDA
+Graph replay computes both the forward logits and all parameter VJPs;
+logits are downloaded only with gradient/state outputs for CE diagnostics.
+The separate holdout `ModelExecution` remains forward-only. This removes
+the previous two training replays and host CE seed transfer, but does NOT
+promise a speedup until tested on NVIDIA hardware. GPU approximate-exp,
+optimizer behavior and the generated CUDA code are not Lean-certified.
+
 Short two-token train BPC is not holdout quality; validation BPC is
 measured after the requested total training range. No Lean or
 machine-code proof of checkpointed AdamW/FP32 training is claimed.
