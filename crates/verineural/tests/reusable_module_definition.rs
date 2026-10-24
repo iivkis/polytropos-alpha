@@ -197,7 +197,9 @@ fn global_composition_reuses_definition_theorem_and_checks_each_invocation() {
     let module = PositiveJoin::new(Body::Add);
     let left = graph.apply_module(&module, &[x, y]).unwrap();
     let right = graph.apply_module(&module, &[x, z]).unwrap();
-    let output = graph.apply_module(&GlobalJoin::new(), &[left, right]).unwrap();
+    let output = graph
+        .apply_module(&GlobalJoin::new(), &[left, right])
+        .unwrap();
 
     let program = LeanProofEngine::default()
         .generate_global_nonnegative(&graph, output, &[x, y, z])
