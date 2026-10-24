@@ -111,7 +111,7 @@ theorem concat_axis0_right_address_bound {left right index : Nat}
     (rightBranch : left ≤ index)
     (active : index < left + right) :
     index - left < right :=
-  (Nat.sub_lt_iff_lt_add' rightBranch).2 active
+  Nat.sub_lt_left_of_lt_add rightBranch active
 
 /-- The first ArgMax load is inside the selected row. -/
 theorem argmax_first_address_bound {rows width index : Nat}

@@ -8,6 +8,14 @@ use verineural::{
     NeuralGraph, ReluFusion, Shape, TranslationKind,
 };
 
+fn concat_program() -> verineural::GpuProgram {
+    let mut graph = NeuralGraph::default();
+    let left = graph.input(Shape::new(vec![1, 2]).unwrap(), Domain::Finite);
+    let right = graph.input(Shape::new(vec![2, 2]).unwrap(), Domain::Finite);
+    let output = graph.concat(0, &[left, right]).unwrap();
+    GpuEngine::default().compile(&graph, output).unwrap()
+}
+
 fn fused_program() -> verineural::GpuProgram {
     let mut graph = NeuralGraph::default();
     let matrix = Shape::new(vec![2, 3]).unwrap();
@@ -124,14 +132,25 @@ fn memory_capability_has_named_auditable_theorems() {
 #[test]
 #[ignore = "requires pinned Lean 4 from Nix devShell"]
 fn lean_kernel_and_axiom_audit_check_memory_capability() {
-    let program = fused_program();
-    let memory = program.memory_lean_program().unwrap();
     let root =
         std::env::temp_dir().join(format!("verineural-gpu-capability-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
-    let (_, audit) = LeanProofEngine::default()
-        .verify_certified(&memory, &root.join("memory.lean"))
-        .unwrap();
-    assert_eq!(audit.theorem_names.as_slice(), memory.theorem_names());
+
+    for (name, program) in [("fused", fused_program()), ("concat", concat_program())] {
+        let memory = program.memory_lean_program().unwrap();
+        let (_, audit) = LeanProofEngine::default()
+            .verify_certified(&memory, &root.join(format!("{name}.lean")))
+            .unwrap();
+        assert_eq!(audit.theorem_names.as_slice(), memory.theorem_names());
+        if name == "concat" {
+            assert!(
+                memory
+                    .theorem_names()
+                    .iter()
+                    .any(|theorem| theorem.ends_with("_concat_right_bound"))
+            );
+        }
+    }
+
     std::fs::remove_dir_all(root).unwrap();
 }
