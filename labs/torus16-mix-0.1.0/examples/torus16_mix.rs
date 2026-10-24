@@ -41,10 +41,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             let engine = GpuEngine::new(
                 "llc",
                 std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
-            ).with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
-            let workspace = std::env::temp_dir().join(format!(
-                "vn_torus16_mix_gpu_{}", std::process::id()
-            ));
+            )
+            .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+            let workspace =
+                std::env::temp_dir().join(format!("vn_torus16_mix_gpu_{}", std::process::id()));
             let mut runner = engine.prepare_model(&model, params.bindings(&input)?, &workspace)?;
             runner.run()?;
             let mut worst_error = 0.0_f32;
@@ -58,15 +58,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         return Err(format!(
                             "GPU mismatch: role={role} lane={lane} \
                              actual={} expected={} error={error} tolerance={tolerance}",
-                            result.values()[lane], reference[lane]
-                        ).into());
+                            result.values()[lane],
+                            reference[lane]
+                        )
+                        .into());
                     }
                     worst_error = worst_error.max(error);
                 }
             }
-            println!(
-                "Torus16-Mix CUDA Graph: eight roles verified; max_abs_error={worst_error:e}"
-            );
+            println!("Torus16-Mix CUDA Graph: eight roles verified; max_abs_error={worst_error:e}");
             println!(
                 "Numerical boundary: exp2 APPROX opt-in; no strict expf parity, \
                  no Lean FP32 proof, no training/BPC claim."
@@ -82,9 +82,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("Certified; verify evidence in artifacts/certified.");
         }
         _ => {
-            return Err(
-                format!("unsupported mode: {mode} (use --inspect, --gpu, --ir or --certify)").into(),
-            );
+            return Err(format!(
+                "unsupported mode: {mode} (use --inspect, --gpu, --ir or --certify)"
+            )
+            .into());
         }
     }
     Ok(())

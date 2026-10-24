@@ -399,9 +399,15 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
     let expected_adds = llvm_ir.matches(ADD_ASM).count();
     let expected_muls = llvm_ir.matches(MUL_ASM).count();
     // Explicitly authored inline PTX, not arbitrary machine substitutions.
-    let expected_subs = llvm_ir.matches("call float asm sideeffect \"sub.rn.f32").count();
-    let expected_divs = llvm_ir.matches("call float asm sideeffect \"div.rn.f32").count();
-    let expected_exp2s = llvm_ir.matches("call float asm sideeffect \"ex2.approx.f32").count();
+    let expected_subs = llvm_ir
+        .matches("call float asm sideeffect \"sub.rn.f32")
+        .count();
+    let expected_divs = llvm_ir
+        .matches("call float asm sideeffect \"div.rn.f32")
+        .count();
+    let expected_exp2s = llvm_ir
+        .matches("call float asm sideeffect \"ex2.approx.f32")
+        .count();
     let mut rounded_subs = 0usize;
     let mut rounded_divs = 0usize;
     let mut approximate_exp2s = 0usize;
@@ -462,7 +468,8 @@ pub fn audit_fp32_ptx(llvm_ir: &str, ptx: &str) -> Result<Fp32PtxAudit, GpuError
             _ => return Err(rejected(format!("unapproved PTX FP32 opcode: {opcode}"))),
         }
     }
-    if rounded_subs != expected_subs || rounded_divs != expected_divs
+    if rounded_subs != expected_subs
+        || rounded_divs != expected_divs
         || approximate_exp2s != expected_exp2s
     {
         return Err(rejected(format!(
@@ -920,12 +927,12 @@ impl GpuProgram {
                 match node.operation {
                     Operation::Add => TranslationKind::Add,
                     Operation::Mul => TranslationKind::Mul,
-                    Operation::Pointwise(ref spec) => supported_pointwise(spec).ok_or(
-                        GpuError::UnsupportedOperation {
+                    Operation::Pointwise(ref spec) => {
+                        supported_pointwise(spec).ok_or(GpuError::UnsupportedOperation {
                             node: contract.kernel_node,
                             operation: node.operation.name(),
-                        },
-                    )?,
+                        })?
+                    }
                     Operation::BiasAdd => {
                         let columns = match contract.pattern {
                             GpuMemoryPattern::BiasAdd { columns } => columns,
@@ -1910,11 +1917,13 @@ impl GpuEngine {
             }
             if let Operation::Pointwise(ref spec) = node.operation {
                 let kind = supported_pointwise(spec);
-                if kind.is_none() || (matches!(kind, Some(TranslationKind::ExpApprox))
-                    && !self.launch.approximate_exp())
+                if kind.is_none()
+                    || (matches!(kind, Some(TranslationKind::ExpApprox))
+                        && !self.launch.approximate_exp())
                 {
                     return Err(GpuError::UnsupportedOperation {
-                        node: id.index(), operation: node.operation.name(),
+                        node: id.index(),
+                        operation: node.operation.name(),
                     });
                 }
             }

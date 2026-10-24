@@ -28,9 +28,13 @@ fn full_forward_requires_explicit_approx_exponential() {
     let outputs: Vec<_> = (0..ROLES)
         .map(|role| model.output(&format!("role_{role}")).unwrap())
         .collect();
-    assert!(GpuEngine::default().compile_outputs(model.graph(), &outputs).is_err());
-    let engine = GpuEngine::default()
-        .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    assert!(
+        GpuEngine::default()
+            .compile_outputs(model.graph(), &outputs)
+            .is_err()
+    );
+    let engine =
+        GpuEngine::default().with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
     let compiled = engine.compile_outputs(model.graph(), &outputs).unwrap();
     assert_eq!(compiled.outputs(), outputs.as_slice());
     let plan = compiled.translation_plan().unwrap();
@@ -39,11 +43,19 @@ fn full_forward_requires_explicit_approx_exponential() {
         TranslationKind::DivRne,
         TranslationKind::ExpApprox,
     ] {
-        assert_eq!(plan.kernels.iter().filter(|k| k.kind == kind).count(), ROLES);
+        assert_eq!(
+            plan.kernels.iter().filter(|k| k.kind == kind).count(),
+            ROLES
+        );
     }
     let text = plan.to_text();
     assert_eq!(verineural::TranslationPlan::from_text(&text).unwrap(), plan);
-    assert!(compiled.memory_lean_source().unwrap().contains("slice_last_row_address_bound"));
+    assert!(
+        compiled
+            .memory_lean_source()
+            .unwrap()
+            .contains("slice_last_row_address_bound")
+    );
 }
 
 #[test]
@@ -83,7 +95,6 @@ fn all_eight_gpu_outputs_match_independent_tensor_reference() {
     }
 }
 
-
 #[test]
 #[ignore = "requires NVIDIA CUDA and LLVM NVPTX"]
 fn persistent_named_execution_reuses_graph_after_new_input_and_parameter() {
@@ -93,9 +104,12 @@ fn persistent_named_execution_reuses_graph_after_new_input_and_parameter() {
     let engine = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".to_owned()),
-    ).with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    )
+    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
     let path = std::env::temp_dir().join(format!("vn_torus16_named_{}", std::process::id()));
-    let mut runner = engine.prepare_model(&model, p.bindings(&x).unwrap(), &path).unwrap();
+    let mut runner = engine
+        .prepare_model(&model, p.bindings(&x).unwrap(), &path)
+        .unwrap();
     runner.run().unwrap();
     let original = runner.output("role_0").unwrap();
     let expected = reference_project(&x, &p, 0).unwrap();
@@ -105,17 +119,23 @@ fn persistent_named_execution_reuses_graph_after_new_input_and_parameter() {
 
     x = std::array::from_fn(|i| (i as f32 - 20.0) * 0.02);
     p.roles[0].mix_bias = -2.5;
-    runner.set_input("x", &Tensor::from_slice(vec![1, WIDTH], &x).unwrap()).unwrap();
-    runner.set_parameter(
-        "mix_bias_0",
-        &Tensor::from_slice(vec![1, 1], &[p.roles[0].mix_bias]).unwrap(),
-    ).unwrap();
+    runner
+        .set_input("x", &Tensor::from_slice(vec![1, WIDTH], &x).unwrap())
+        .unwrap();
+    runner
+        .set_parameter(
+            "mix_bias_0",
+            &Tensor::from_slice(vec![1, 1], &[p.roles[0].mix_bias]).unwrap(),
+        )
+        .unwrap();
     runner.run().unwrap();
     let result = runner.output("role_0").unwrap();
     let expected = reference_project(&x, &p, 0).unwrap();
     assert!((0..WIDTH).any(|i| (result.values()[i] - original.values()[i]).abs() > 1e-5));
     for lane in 0..WIDTH {
-        assert!((result.values()[lane] - expected[lane]).abs() < 5e-5,
-            "role=0 lane={lane}");
+        assert!(
+            (result.values()[lane] - expected[lane]).abs() < 5e-5,
+            "role=0 lane={lane}"
+        );
     }
 }

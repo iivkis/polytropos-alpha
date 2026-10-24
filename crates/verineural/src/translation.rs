@@ -19,22 +19,51 @@ pub enum TranslationKind {
     DivRne,
     /// Explicit experimental ex2.approx-based natural exponential.
     ExpApprox,
-    BiasAdd { columns: usize },
-    MatMul { inner: usize, columns: usize },
-    Transpose2D { rows: usize, columns: usize },
-    ReverseRows2D { rows: usize, columns: usize },
-    ReverseColumns2D { rows: usize, columns: usize },
-    ConcatAxis0 { left: usize },
-    SliceLastRow { start: usize, source_width: usize },
+    BiasAdd {
+        columns: usize,
+    },
+    MatMul {
+        inner: usize,
+        columns: usize,
+    },
+    Transpose2D {
+        rows: usize,
+        columns: usize,
+    },
+    ReverseRows2D {
+        rows: usize,
+        columns: usize,
+    },
+    ReverseColumns2D {
+        rows: usize,
+        columns: usize,
+    },
+    ConcatAxis0 {
+        left: usize,
+    },
+    SliceLastRow {
+        start: usize,
+        source_width: usize,
+    },
     BroadcastScalar,
-    ArgMaxLast { width: usize },
-    TakeAxis0 { lane: usize },
+    ArgMaxLast {
+        width: usize,
+    },
+    TakeAxis0 {
+        lane: usize,
+    },
     Relu,
     AddRelu,
     MulRelu,
-    BiasAddRelu { columns: usize },
-    AddBiasRelu { columns: usize },
-    MulBiasRelu { columns: usize },
+    BiasAddRelu {
+        columns: usize,
+    },
+    AddBiasRelu {
+        columns: usize,
+    },
+    MulBiasRelu {
+        columns: usize,
+    },
 }
 
 impl TranslationKind {
