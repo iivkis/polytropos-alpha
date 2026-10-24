@@ -3,6 +3,7 @@
 //! This backend is executable but *not certified*: LLVM, PTX JIT, CUDA driver,
 //! hardware and IEEE-754 behavior are outside the current formal proof chain.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -93,6 +94,8 @@ pub enum GpuError {
     NoKernelGraph,
     /// A prior CUDA device transfer/sync failed; contents may be partially updated.
     ExecutionPoisoned,
+    /// No successful replay has produced results for the current inputs.
+    OutputNotReady,
     MissingInput {
         node: usize,
     },
@@ -134,7 +137,8 @@ impl fmt::Display for GpuError {
                 "GPU benchmark needs at least one measured graph replay, got {iterations}"
             ),
             Self::NoKernelGraph => write!(f, "GPU benchmark requires at least one CUDA kernel"),
-            Self::ExecutionPoisoned => write!(f, "CUDA feedback failed; discard and prepare a new execution"),
+            Self::ExecutionPoisoned => write!(f, "CUDA execution is poisoned; discard and prepare a new execution"),
+            Self::OutputNotReady => write!(f, "GPU outputs are not ready; run a successful CUDA Graph replay first"),
             Self::Io(err) => write!(f, "GPU I/O failure: {err}"),
             Self::LlvmFailed { diagnostics } => write!(f, "NVPTX lowering failed: {diagnostics}"),
             Self::Fp32PtxRejected { reason } => {
@@ -646,25 +650,45 @@ impl GpuBenchmark {
     }
 }
 
-/// A D2D enqueue can fail after earlier copies were submitted. We cannot
-/// prove the state buffers are intact, so the session is permanently unusable.
+/// One session-wide fail-closed gate for GPU launches, copies and sync.
+/// Cell preserves existing replay(&self) and benchmark(&self) signatures.
 #[derive(Default)]
-struct FeedbackHealth {
-    poisoned: bool,
+struct ExecutionHealth {
+    poisoned: Cell<bool>,
+    outputs_ready: Cell<bool>,
 }
 
-impl FeedbackHealth {
+impl ExecutionHealth {
     fn ensure_ready(&self) -> Result<(), GpuError> {
-        if self.poisoned {
+        if self.poisoned.get() {
             Err(GpuError::ExecutionPoisoned)
         } else {
             Ok(())
         }
     }
 
-    fn record_transfer(&mut self, result: Result<(), GpuError>) -> Result<(), GpuError> {
+    fn ensure_outputs_ready(&self) -> Result<(), GpuError> {
+        self.ensure_ready()?;
+        if self.outputs_ready.get() {
+            Ok(())
+        } else {
+            Err(GpuError::OutputNotReady)
+        }
+    }
+
+    fn invalidate_outputs(&self) {
+        self.outputs_ready.set(false);
+    }
+
+    fn outputs_completed(&self) {
+        self.outputs_ready.set(true);
+    }
+
+    /// Call only after metadata preflight, for operations involving CUDA.
+    fn record_io<T>(&self, result: Result<T, GpuError>) -> Result<T, GpuError> {
         if result.is_err() {
-            self.poisoned = true;
+            self.poisoned.set(true);
+            self.invalidate_outputs();
         }
         result
     }
@@ -681,7 +705,7 @@ pub struct GpuExecution {
     // Buffers are allocated once at prepare, before any CUDA Graph replay.
     preserved_output_addresses: BTreeMap<usize, u64>,
     preserved_output_valid: bool,
-    feedback_health: FeedbackHealth,
+    execution_health: ExecutionHealth,
     has_graph: bool,
 }
 
@@ -691,21 +715,23 @@ impl GpuExecution {
     /// metadata cannot partially replace the previous input set.
     /// Transfers finish on the owned non-blocking stream before returning.
     pub fn update_inputs(&mut self, inputs: &[(NodeId, Tensor<f32>)]) -> Result<(), GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_ready()?;
         let given = validate_inputs(&self.program, inputs)?;
+        self.execution_health.invalidate_outputs();
+        self.preserved_output_valid = false;
         for id in self.program.source_inputs() {
-            self.session.copy_to_device(
+            self.execution_health.record_io(self.session.copy_to_device(
                 self.input_addresses[&id.index()],
                 given[&id.index()].values(),
-            )?;
+            ))?;
         }
-        self.session.flush_input_copies()
+        self.execution_health.record_io(self.session.flush_input_copies())
     }
 
     /// Rebind one named source without uploading unchanged parameters or state.
     /// Metadata and domain are checked before touching GPU memory.
     pub fn update_input(&mut self, id: NodeId, value: &Tensor<f32>) -> Result<(), GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_ready()?;
         let node = self.program.graph.node(id)?;
         if !self.program.source_inputs().contains(&id) {
             return Err(GpuError::InvalidInput {
@@ -721,8 +747,10 @@ impl GpuExecution {
         }
         value.validate_domain(node.domain)?;
         let address = self.input_addresses[&id.index()];
-        self.session.copy_to_device(address, value.values())?;
-        self.session.flush_input_copies()
+        self.execution_health.invalidate_outputs();
+        self.preserved_output_valid = false;
+        self.execution_health.record_io(self.session.copy_to_device(address, value.values()))?;
+        self.execution_health.record_io(self.session.flush_input_copies())
     }
 
     /// Establish the static state feedback memory contract before any replay.
@@ -733,7 +761,7 @@ impl GpuExecution {
         public_outputs: &[NodeId],
         links: &[(NodeId, NodeId)],
     ) -> Result<(), GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_ready()?;
         self.feedback_copy_plan(links)?;
         let destinations = links
             .iter()
@@ -762,7 +790,7 @@ impl GpuExecution {
     /// Save the pure step's observable values before writing feedback state.
     /// All copies stay on the owned non-blocking stream; no host round-trip.
     pub(crate) fn snapshot_outputs(&mut self) -> Result<(), GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_outputs_ready()?;
         self.preserved_output_valid = false;
         for (&index, &snapshot) in &self.preserved_output_addresses {
             let (_, shape, source) = self
@@ -770,12 +798,12 @@ impl GpuExecution {
                 .iter()
                 .find(|(node, _, _)| node.index() == index)
                 .expect("configured public output has a live buffer");
-            self.feedback_health.record_transfer(
+            self.execution_health.record_io(
                 self.session.copy_device_to_device(snapshot, *source, shape.element_count())
             )?;
         }
         if !self.preserved_output_addresses.is_empty() {
-            self.feedback_health.record_transfer(self.session.synchronize())?;
+            self.execution_health.record_io(self.session.synchronize())?;
         }
         self.preserved_output_valid = true;
         Ok(())
@@ -783,7 +811,7 @@ impl GpuExecution {
 
     /// Read just one selected output (not every public and private root).
     pub(crate) fn read_selected_output(&mut self, id: NodeId) -> Result<Tensor<f32>, GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_outputs_ready()?;
         let (_, shape, live) = self
             .output_addresses
             .iter()
@@ -801,7 +829,7 @@ impl GpuExecution {
             *live
         };
         let mut values = vec![0.0f32; shape.element_count()];
-        self.session.copy_to_host(&mut values, address)?;
+        self.execution_health.record_io(self.session.copy_to_host(&mut values, address))?;
         Ok(Tensor::new(shape.clone(), values)?)
     }
 
@@ -874,21 +902,21 @@ impl GpuExecution {
     /// Copy selected completed outputs to next-step state inputs on-device.
     /// A prevalidated layout is still checked before each transfer.
     pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_ready()?;
         let copies = self.feedback_copy_plan(links)?;
         for (dst, src, elements) in copies {
             if dst != src {
-                self.feedback_health.record_transfer(
+                self.execution_health.record_io(
                     self.session.copy_device_to_device(dst, src, elements)
                 )?;
             }
         }
-        self.feedback_health.record_transfer(self.session.synchronize())
+        self.execution_health.record_io(self.session.synchronize())
     }
 
     /// Read a current source (for state inspection) without another replay.
     pub fn read_source(&mut self, id: NodeId) -> Result<Tensor<f32>, GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_ready()?;
         let node = self.program.graph.node(id)?;
         let address =
             self.input_addresses
@@ -899,34 +927,38 @@ impl GpuExecution {
                     reason: "source is outside the compiled output slice",
                 })?;
         let mut values = vec![0.0f32; node.shape.element_count()];
-        self.session.copy_to_host(&mut values, address)?;
+        self.execution_health.record_io(self.session.copy_to_host(&mut values, address))?;
         Ok(Tensor::new(node.shape.clone(), values)?)
     }
 
     pub fn replay(&self) -> Result<(), GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_ready()?;
+        self.execution_health.invalidate_outputs();
         if self.has_graph {
-            self.session.launch_graph()?;
+            self.execution_health.record_io(self.session.launch_graph())?;
         }
-        self.session.synchronize()
+        self.execution_health.record_io(self.session.synchronize())?;
+        self.execution_health.outputs_completed();
+        Ok(())
     }
 
     pub fn read_output(&mut self) -> Result<Tensor<f32>, GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_outputs_ready()?;
         let mut values = vec![0.0f32; self.output_shape.element_count()];
-        self.session
-            .copy_to_host(&mut values, self.output_address)?;
+        self.execution_health.record_io(
+            self.session.copy_to_host(&mut values, self.output_address)
+        )?;
         Ok(Tensor::new(self.output_shape.clone(), values)?)
     }
 
     /// Read each selected output in declaration order. One CUDA Graph replay
     /// computes all results, with common intermediate tensors evaluated once.
     pub fn read_outputs(&mut self) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_outputs_ready()?;
         let mut result = Vec::with_capacity(self.output_addresses.len());
         for (node, shape, pointer) in &self.output_addresses {
             let mut values = vec![0.0f32; shape.element_count()];
-            self.session.copy_to_host(&mut values, *pointer)?;
+            self.execution_health.record_io(self.session.copy_to_host(&mut values, *pointer))?;
             result.push((*node, Tensor::new(shape.clone(), values)?));
         }
         Ok(result)
@@ -937,16 +969,17 @@ impl GpuExecution {
         warmup_launches: usize,
         measured_launches: usize,
     ) -> Result<GpuBenchmark, GpuError> {
-        self.feedback_health.ensure_ready()?;
+        self.execution_health.ensure_ready()?;
         if measured_launches == 0 {
             return Err(GpuError::InvalidBenchmark { iterations: 0 });
         }
         if !self.has_graph {
             return Err(GpuError::NoKernelGraph);
         }
-        let milliseconds = self
-            .session
-            .benchmark_graph(warmup_launches, measured_launches)?;
+        self.execution_health.invalidate_outputs();
+        let milliseconds = self.execution_health.record_io(
+            self.session.benchmark_graph(warmup_launches, measured_launches)
+        )?;
         if !milliseconds.is_finite() || milliseconds < 0.0 {
             return Err(GpuError::Driver(
                 "CUDA event benchmark returned an invalid duration".into(),
@@ -1360,7 +1393,7 @@ impl GpuEngine {
             output_addresses,
             preserved_output_addresses: BTreeMap::new(),
             preserved_output_valid: false,
-            feedback_health: FeedbackHealth::default(),
+            execution_health: ExecutionHealth::default(),
             has_graph,
         })
     }
@@ -1584,37 +1617,75 @@ fn matmul_kernel_ir(index: usize, inner: usize, columns: usize) -> String {
 
 
 #[cfg(test)]
-mod feedback_health_tests {
+mod execution_health_tests {
     use super::*;
+
+
+    #[test]
+    fn outputs_not_ready_until_successful_replay_and_invalidated_by_h2d() {
+        let health = ExecutionHealth::default();
+        assert!(matches!(health.ensure_outputs_ready(), Err(GpuError::OutputNotReady)));
+        health.outputs_completed();
+        assert!(health.ensure_outputs_ready().is_ok());
+        // A validated input update begins a new logical input epoch.
+        health.invalidate_outputs();
+        assert!(health.ensure_ready().is_ok());
+        assert!(matches!(health.ensure_outputs_ready(), Err(GpuError::OutputNotReady)));
+        // An invalid input contract is rejected before any IO or invalidation.
+        health.outputs_completed();
+        let _invalid = GpuError::InvalidInput { node: 0, reason: "shape mismatch" };
+        assert!(health.ensure_outputs_ready().is_ok());
+    }
+
+    #[test]
+    fn failed_h2d_launch_and_readback_all_fail_closed() {
+        for function in [
+            "cuMemcpyHtoDAsync_v2",
+            "cuGraphLaunch",
+            "cuMemcpyDtoHAsync_v2",
+        ] {
+            let health = ExecutionHealth::default();
+            health.outputs_completed();
+            let error: Result<(), GpuError> = health.record_io(Err(GpuError::Cuda {
+                function,
+                code: 700,
+            }));
+            assert!(matches!(error, Err(GpuError::Cuda { .. })));
+            assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
+            assert!(matches!(health.ensure_outputs_ready(), Err(GpuError::ExecutionPoisoned)));
+            health.outputs_completed();
+            assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
+        }
+    }
 
     #[test]
     fn failed_feedback_transfer_poison_is_permanent_until_new_execution() {
-        let mut health = FeedbackHealth::default();
+        let health = ExecutionHealth::default();
         assert!(health.ensure_ready().is_ok());
-        assert!(health.record_transfer(Ok(())).is_ok());
+        assert!(health.record_io(Ok(())).is_ok());
         assert!(health.ensure_ready().is_ok());
         // Simulates a CUDA enqueue failure after another D2D copy succeeded.
-        let failure = health.record_transfer(Err(GpuError::Cuda {
+        let failure: Result<(), GpuError> = health.record_io(Err(GpuError::Cuda {
             function: "cuMemcpyDtoDAsync_v2",
             code: 719,
         }));
         assert!(matches!(failure, Err(GpuError::Cuda { .. })));
         assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
-        assert!(health.record_transfer(Ok(())).is_ok());
+        assert!(health.record_io(Ok(())).is_ok());
         assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
-        assert!(FeedbackHealth::default().ensure_ready().is_ok());
+        assert!(ExecutionHealth::default().ensure_ready().is_ok());
     }
 
     #[test]
     fn cuda_sync_error_also_poisoned_but_validation_does_not() {
-        let mut health = FeedbackHealth::default();
-        // Preflight contract failures don't call record_transfer.
+        let health = ExecutionHealth::default();
+        // Preflight contract failures don't call record_io.
         let _validation = GpuError::InvalidInput {
             node: 0,
             reason: "bad feedback mapping",
         };
         assert!(health.ensure_ready().is_ok());
-        let failure = health.record_transfer(Err(GpuError::Cuda {
+        let failure: Result<(), GpuError> = health.record_io(Err(GpuError::Cuda {
             function: "cuStreamSynchronize",
             code: 700,
         }));

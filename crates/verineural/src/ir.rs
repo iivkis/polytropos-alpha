@@ -973,6 +973,20 @@ impl NeuralGraph {
     /// when a module body does not read every port directly. Artifact writers
     /// and proof planning use this one definition of semantic reachability.
     pub fn dependency_scope(&self, roots: &[NodeId]) -> Result<BTreeSet<usize>, NeuralError> {
+        // A module declares dependencies beyond its body edges: even an unused
+        // port remains part of its interface. Index them once for this walk
+        // instead of scanning every module once per reachable IR node.
+        // Multiple invocations can name the same output: preserve every
+        // declaration by accumulating rather than overwriting input lists.
+        let mut module_inputs: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+        for module in self.module_instances() {
+            for output in module.outputs() {
+                module_inputs
+                    .entry(output.index())
+                    .or_default()
+                    .extend_from_slice(module.inputs());
+            }
+        }
         let mut used = BTreeSet::new();
         let mut pending = roots.to_vec();
         while let Some(id) = pending.pop() {
@@ -981,10 +995,8 @@ impl NeuralGraph {
                 continue;
             }
             pending.extend(node.inputs.iter().copied());
-            for module in self.module_instances() {
-                if module.contains_output(id) {
-                    pending.extend(module.inputs().iter().copied());
-                }
+            if let Some(inputs) = module_inputs.get(&id.index()) {
+                pending.extend(inputs.iter().copied());
             }
         }
         Ok(used)
@@ -1826,6 +1838,80 @@ impl Default for NeuralGraph {
 #[cfg(test)]
 mod graph_append_transaction_tests {
     use super::*;
+
+    #[test]
+    fn scope_indexes_all_module_outputs_and_unused_declared_ports() {
+        let mut graph = NeuralGraph::default();
+        let x = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        let unused = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        let unrelated = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        let outputs = graph.compose_multi_inferred(
+            "branch",
+            "1",
+            &[("x", x), ("unused", unused)],
+            &["one", "two"],
+            |g, values| {
+                let one = g.relu(values[0])?;
+                let two = g.mul(one, values[0])?;
+                Ok(vec![one, two])
+            },
+        ).unwrap();
+        let outer = graph.compose_inferred("outer", "1", &[outputs[1]], |g, values| {
+            g.relu(values[0])
+        }).unwrap();
+        // The output of a declared module pulls *all* its named inputs,
+        // even when its body doesn't use one of them.
+        for &root in &[outputs[0], outputs[1], outer] {
+            let scope = graph.dependency_scope(&[root]).unwrap();
+            assert!(scope.contains(&x.index()));
+            assert!(scope.contains(&unused.index()));
+            assert!(!scope.contains(&unrelated.index()));
+        }
+        // Every selected root still validates its graph identity.
+        let foreign = NeuralGraph::default().input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        assert!(matches!(graph.dependency_scope(&[foreign]), Err(NeuralError::InvalidNode)));
+    }
+
+    #[test]
+    fn indexed_dependency_scope_matches_reference_for_nested_and_shared_blocks() {
+        let mut graph = NeuralGraph::default();
+        let a = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        let b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+        let mut head = a;
+        for _ in 0..48 {
+            let ports = graph.compose_multi_inferred(
+                "pair",
+                "1",
+                &[("head", head), ("extra", b)],
+                &["next", "diagnostic"],
+                |g, xs| {
+                    let next = g.add(xs[0], xs[1])?;
+                    let diag = g.relu(next)?;
+                    Ok(vec![next, diag])
+                },
+            ).unwrap();
+            head = ports[0];
+        }
+        let roots = [head];
+        let indexed = graph.dependency_scope(&roots).unwrap();
+        let mut old = BTreeSet::new();
+        let mut pending = roots.to_vec();
+        while let Some(id) = pending.pop() {
+            let node = graph.node(id).unwrap();
+            if !old.insert(id.index()) {
+                continue;
+            }
+            pending.extend(node.inputs.iter().copied());
+            for module in graph.module_instances() {
+                if module.contains_output(id) {
+                    pending.extend(module.inputs().iter().copied());
+                }
+            }
+        }
+        assert_eq!(indexed, old);
+        assert!(indexed.contains(&a.index()));
+        assert!(indexed.contains(&b.index()));
+    }
 
     #[test]
     fn failed_parent_rolls_back_successful_nested_multi_module() {

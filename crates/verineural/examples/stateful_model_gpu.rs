@@ -8,7 +8,7 @@
 use std::error::Error;
 use std::path::Path;
 
-use verineural::{Domain, GpuEngine, ModelBuilder, ModelExecution, Tensor};
+use verineural::{Domain, GpuEngine, GpuError, ModelBuilder, ModelExecution, ModelExecutionError, Tensor};
 
 const WIDTH: usize = 4;
 
@@ -85,6 +85,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         Path::new("target/verineural/stateful-model-gpu"),
     )?;
 
+    // Output allocation is not an executed value. Even if a source alias
+    // exists, public output reads require a completed pure replay.
+    assert!(matches!(
+        execution.output("readout"),
+        Err(ModelExecutionError::Gpu(GpuError::OutputNotReady))
+    ));
+
     // run() leaves temporal state unchanged; next_state is deliberately NOT
     // a public model output and must still be compiled for state feedback.
     execution.run()?;
@@ -123,6 +130,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Only the token is uploaded. gain and accumulated state stay on-device.
     execution.set_input("token", &tensor([2.0, 1.0, 0.0, 3.0])?)?;
+    assert!(matches!(
+        execution.output("readout"),
+        Err(ModelExecutionError::Gpu(GpuError::OutputNotReady))
+    ));
     execution.step()?;
     check(
         &mut execution,
@@ -145,6 +156,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Explicit named parameter update must affect the very next replay
     // without recompilation or CUDA Graph reconstruction.
     execution.set_parameter("gain", &tensor([3.0, 2.0, 1.0, 4.0])?)?;
+    assert!(matches!(
+        execution.output("increment"),
+        Err(ModelExecutionError::Gpu(GpuError::OutputNotReady))
+    ));
     execution.step()?;
     check(
         &mut execution,
@@ -216,6 +231,10 @@ fn check_replacement_and_aliased_outputs(gpu: &GpuEngine) -> Result<(), Box<dyn 
         Path::new("target/verineural/stateful-model-gpu/replacement"),
     )?;
 
+    assert!(matches!(
+        execution.output("previous"),
+        Err(ModelExecutionError::Gpu(GpuError::OutputNotReady))
+    ));
     execution.run()?;
     expect_bits(
         "replacement run",
