@@ -162,13 +162,13 @@ theorem pointwise_le_relu_add_of_nonnegative {n : Nat} (a b : Tensor n)
 theorem pointwise_le_refl {n : Nat} (a : Tensor n) :
     PointwiseLe a a := by
   intro i
-  exact le_refl _
+  exact Int.le_refl (a i)
 
 theorem pointwise_le_trans {n : Nat} (a b c : Tensor n)
     (hab : PointwiseLe a b) (hbc : PointwiseLe b c) :
     PointwiseLe a c := by
   intro i
-  exact le_trans (hab i) (hbc i)
+  exact Int.le_trans (hab i) (hbc i)
 
 theorem pointwise_le_add_of_nonnegative {n : Nat} (a b : Tensor n)
     (hb : Nonnegative b) : PointwiseLe a (add a b) := by
