@@ -596,15 +596,18 @@ fn proof_generator_composes_explicit_global_nonnegative_property_over_module_dag
         .unwrap();
     let lean = proof.source();
 
-    assert!(lean.contains("theorem module_0_global_nonnegative"));
-    assert!(lean.contains("theorem module_1_global_nonnegative"));
-    assert!(lean.contains("theorem module_2_global_nonnegative"));
+    assert!(lean.contains("theorem architecture_module_definition_0_nonnegative"));
+    assert!(lean.contains("theorem architecture_module_definition_1_nonnegative"));
+    assert!(!lean.contains("theorem architecture_module_definition_2_nonnegative"));
+    assert!(lean.contains("theorem architecture_module_instance_0"));
+    assert!(lean.contains("theorem architecture_module_instance_1"));
+    assert!(lean.contains("theorem architecture_module_instance_2"));
     assert!(lean.contains("theorem architecture_global_nonnegative"));
     assert!(lean.contains("VeriNeural.add_nonnegative"));
     assert!(lean.contains("VeriNeural.mul_nonnegative"));
-    assert!(lean.contains("have arch_module_0 := module_0_global_nonnegative"));
-    assert!(lean.contains("have arch_module_1 := module_1_global_nonnegative"));
-    assert!(lean.contains("have arch_module_2 := module_2_global_nonnegative"));
+    assert!(lean.contains("have arch_module_0 := architecture_module_instance_0"));
+    assert!(lean.contains("have arch_module_1 := architecture_module_instance_1"));
+    assert!(lean.contains("have arch_module_2 := architecture_module_instance_2"));
     assert!(lean.contains("exact arch_module_2"));
     assert!(!lean.contains("sorry"));
     assert!(!lean.contains("axiom "));
@@ -647,10 +650,12 @@ fn proof_generator_global_nonnegative_handles_matmul_reduction_and_bias_broadcas
     let lean = program.source();
     assert!(lean.contains("VeriNeural.matmul_nonnegative (m := 2) (k := 3) (n := 2)"));
     assert!(lean.contains("VeriNeural.biasAdd_nonnegative (m := 2) (n := 2)"));
-    assert!(lean.contains("theorem module_0_global_nonnegative"));
-    assert!(lean.contains("theorem module_1_global_nonnegative"));
-    assert!(lean.contains("have arch_module_0 := module_0_global_nonnegative"));
-    assert!(lean.contains("have arch_module_1 := module_1_global_nonnegative"));
+    assert!(lean.contains("theorem architecture_module_definition_0_nonnegative"));
+    assert!(lean.contains("theorem architecture_module_definition_1_nonnegative"));
+    assert!(lean.contains("theorem architecture_module_instance_0"));
+    assert!(lean.contains("theorem architecture_module_instance_1"));
+    assert!(lean.contains("have arch_module_0 := architecture_module_instance_0"));
+    assert!(lean.contains("have arch_module_1 := architecture_module_instance_1"));
     assert!(lean.contains("exact arch_module_1"));
     assert!(!lean.contains("sorry"));
     assert!(!lean.contains("admit"));
@@ -693,23 +698,14 @@ fn proof_generator_composes_global_nonnegative_recursively_through_nested_dag() 
         .generate_global_nonnegative(&graph, output, &[x, y, z])
         .unwrap();
     let source = program.source();
-    let inner = source
-        .split("theorem module_2_global_nonnegative")
-        .nth(1)
-        .unwrap()
-        .split("theorem module_3_global_nonnegative")
-        .next()
-        .unwrap();
-    let outer = source
-        .split("theorem module_3_global_nonnegative")
-        .nth(1)
-        .unwrap();
-    assert!(inner.contains("module_0_global_nonnegative"));
-    assert!(inner.contains("module_1_global_nonnegative"));
-    assert!(outer.contains("module_2_global_nonnegative"));
-    assert!(!outer.contains("module_0_global_nonnegative"));
-    assert!(!outer.contains("module_1_global_nonnegative"));
-    assert!(source.contains("have arch_module_3 := module_3_global_nonnegative"));
+    assert!(source.contains("theorem architecture_module_definition_3_nonnegative"));
+    assert!(source.contains("theorem architecture_module_instance_3"));
+    assert!(!source.contains("theorem architecture_module_definition_0_nonnegative"));
+    assert!(!source.contains("theorem architecture_module_definition_1_nonnegative"));
+    assert!(!source.contains("theorem architecture_module_definition_2_nonnegative"));
+    assert!(source.contains("VeriNeural.add_nonnegative"));
+    assert!(source.contains("VeriNeural.mul_nonnegative"));
+    assert!(source.contains("have arch_module_3 := architecture_module_instance_3"));
     assert!(!source.contains("have arch_module_0 :="));
     assert!(!source.contains("have arch_module_1 :="));
     assert!(!source.contains("have arch_module_2 :="));

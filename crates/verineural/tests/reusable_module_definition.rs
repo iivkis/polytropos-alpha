@@ -153,6 +153,63 @@ fn one_definition_theorem_is_reused_by_two_concrete_instances() {
 }
 
 #[test]
+fn global_composition_reuses_definition_theorem_and_checks_each_invocation() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(), Domain::NonNegativeFinite);
+    let y = graph.input(shape(), Domain::NonNegativeFinite);
+    let z = graph.input(shape(), Domain::NonNegativeFinite);
+    let module = PositiveJoin::new(Body::Add);
+    let left = graph.apply_module(&module, &[x, y]).unwrap();
+    let right = graph.apply_module(&module, &[x, z]).unwrap();
+    let output = graph.apply_module(&module, &[left, right]).unwrap();
+
+    let program = LeanProofEngine::default()
+        .generate_global_nonnegative(&graph, output, &[x, y, z])
+        .unwrap();
+    let source = program.source();
+
+    assert_eq!(
+        source
+            .matches("theorem architecture_module_definition_0_nonnegative ")
+            .count(),
+        1
+    );
+    assert!(!source.contains("theorem architecture_module_definition_1_nonnegative "));
+    assert!(!source.contains("theorem architecture_module_definition_2_nonnegative "));
+    assert!(source.contains("theorem architecture_module_instance_0 "));
+    assert!(source.contains("theorem architecture_module_instance_1 "));
+    assert!(source.contains("theorem architecture_module_instance_2 "));
+    assert!(source.contains("have arch_module_0 := architecture_module_instance_0"));
+    assert!(source.contains("have arch_module_1 := architecture_module_instance_1"));
+    assert!(source.contains("have arch_module_2 := architecture_module_instance_2"));
+}
+
+#[test]
+fn global_composition_rejects_same_identity_with_different_body() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(shape(), Domain::NonNegativeFinite);
+    let y = graph.input(shape(), Domain::NonNegativeFinite);
+    let z = graph.input(shape(), Domain::NonNegativeFinite);
+    let left = graph
+        .apply_module(&PositiveJoin::new(Body::Add), &[x, y])
+        .unwrap();
+    let right = graph
+        .apply_module(&PositiveJoin::new(Body::Mul), &[x, z])
+        .unwrap();
+    let output = graph
+        .apply_module(&PositiveJoin::new(Body::Add), &[left, right])
+        .unwrap();
+
+    assert!(matches!(
+        LeanProofEngine::default().generate_global_nonnegative(&graph, output, &[x, y, z]),
+        Err(ProofError::ModuleDefinitionMismatch {
+            representative: 0,
+            other: 1
+        })
+    ));
+}
+
+#[test]
 fn same_identity_with_different_body_cannot_reuse_definition_proof() {
     let mut graph = NeuralGraph::default();
     let x = graph.input(shape(), Domain::NonNegativeFinite);
