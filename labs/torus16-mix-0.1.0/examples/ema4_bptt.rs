@@ -1,5 +1,5 @@
 //! Experimental all-parameter finite-window BPTT for four-layer EMA4-LM.
-//! Corpus is REQUIRED, explicitly provided through TORUS16_CORPUS.
+//! Corpus defaults to this lab's checked-in research snapshot.
 //! Training CE seeds and AdamW are on host; forward and all VJPs use one
 //! compiled VeriNeural CUDA Graph. Validation is reset-state streaming BPC.
 //! This is not equivalence with the trained handoff PyTorch checkpoint.
@@ -56,9 +56,15 @@ fn option_usize(
     Ok(value)
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let corpus_path = std::env::var("TORUS16_CORPUS")
-        .map_err(|_| "TORUS16_CORPUS=/absolute/path/to/corpus_snapshot.txt is required")?;
-    let corpus = CharCorpus::read(std::path::Path::new(&corpus_path))?;
+    // The research handoff corpus is versioned with this lab. A custom
+    // TORUS16_CORPUS remains optional for explicit alternative experiments.
+    let corpus_path = std::env::var_os("TORUS16_CORPUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("data/corpus_snapshot.txt")
+        });
+    let corpus = CharCorpus::read(&corpus_path)?;
     let window_len = option_usize("TORUS16_BPTT", 2, 2, 8)?;
     let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 4096)?;
     let val_limit = option_usize("TORUS16_VAL_LIMIT", 64, 2, 100000)?;

@@ -214,12 +214,19 @@ Command sequence:
     task temporal-bptt-stage
     task verify-gpu-temporal-bptt
 
-    # Extract the attached research handoff. Use its original corpus snapshot.
-    export TORUS16_CORPUS=/absolute/path/to/corpus_snapshot.txt
-    export TORUS16_BPTT=2
-    export TORUS16_TRAIN_WINDOWS=2
-    export TORUS16_VAL_LIMIT=64
     task train-lab-torus16-ema4-bptt
+
+The exact research handoff UTF-8 snapshot is checked in at
+`labs/torus16-mix-0.1.0/data/corpus_snapshot.txt` (SHA-256:
+`c1d0509878099a43c85866c2f582be04fe8253292b137a83c58ebd04fb16ca85`).
+No download, unpacking, `TORUS16_CORPUS` or shell setup is needed.
+The example resolves the path relative to `CARGO_MANIFEST_DIR`,
+not the current working directory. Optional Fish overrides for a
+different run: `set -gx TORUS16_BPTT 2`,
+`set -gx TORUS16_TRAIN_WINDOWS 2`,
+`set -gx TORUS16_VAL_LIMIT 64`; provide
+`set -gx TORUS16_CORPUS /absolute/path/to/other.txt` only when
+intentionally changing the experiment.
 
 Corpus must be an existing UTF-8 file. Alphabet is the sorted set of
 Unicode scalar values in the entire file. The first 90% of characters

@@ -351,11 +351,13 @@ host cross-entropy seed, compiled GPU forward+backward via CUDA Graph
 and a held-out reset-state streaming validation pass.
 
 The lab's CharCorpus::from_text uses a sorted Unicode character alphabet
-and a 90/10 chronological split. An explicit TORUS16_CORPUS path is
-required, so the handoff's corpus_snapshot.txt is never silently replaced.
+and a 90/10 chronological split. The original handoff corpus_snapshot.txt is versioned in
+labs/torus16-mix-0.1.0/data/ and selected by default through
+CARGO_MANIFEST_DIR; TORUS16_CORPUS is optional for deliberate overrides.
+SHA-256: c1d0509878099a43c85866c2f582be04fe8253292b137a83c58ebd04fb16ca85.
 Expected handoff data: 524859 characters, 104 symbols. Commands:
 task temporal-bptt-stage, task verify-gpu-temporal-bptt,
-task train-lab-torus16-ema4-bptt (with the corpus path).
+task train-lab-torus16-ema4-bptt (no external corpus path required).
 Training default is BPTT=2 and two windows; the validation position
 count is explicitly reported and by default capped at 64. No GPU run
 of this new stage was performed by the agent, and full all-parameter
