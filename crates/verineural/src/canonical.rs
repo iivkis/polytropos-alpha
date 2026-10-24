@@ -174,11 +174,11 @@ pub(crate) fn graph_ir(graph: &NeuralGraph) -> String {
             nodes(node.inputs.iter().map(|id| id.index())),
             shape(&node.shape),
             node.dtype.name(),
+            node.domain.name(),
             graph
                 .storage(node.id)
                 .expect("canonical node belongs to graph")
                 .describe(),
-            node.domain.name(),
             ports(node.contract.requires.iter().map(port)),
             port(&node.contract.ensures),
             claims(&node.contract.claims),

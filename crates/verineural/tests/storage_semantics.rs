@@ -77,8 +77,8 @@ fn canonical_ir_v4_binds_layout_and_alias_identity() {
 
     let ir = graph.canonical_ir();
     assert!(ir.starts_with("verineural-semantic-ir-v4\n"));
-    assert!(ir.contains("storage=owned_contiguous:strides=[3, 1]"));
-    assert!(ir.contains("storage=alias_node_0:strides=[2, 1]"));
+    assert!(ir.contains("domain=finite;storage=owned_contiguous:strides=[3, 1]"));
+    assert!(ir.contains("domain=finite;storage=alias_node_0:strides=[2, 1]"));
 
     let program = GpuEngine::default().compile(&graph, output).unwrap();
     let capability = program.capability_plan().unwrap();
