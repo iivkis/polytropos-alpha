@@ -69,8 +69,8 @@ mod tests {
     }
     #[test]
     fn checked_in_research_snapshot_is_available_and_has_expected_alphabet() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("data/corpus_snapshot.txt");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/corpus_snapshot.txt");
         let text = std::fs::read_to_string(path).unwrap();
         assert_eq!(text.chars().count(), 524_859);
         let corpus = CharCorpus::from_text(&text).unwrap();
@@ -78,5 +78,4 @@ mod tests {
         assert_eq!(corpus.train.len(), 472_373);
         assert_eq!(corpus.validation.len(), 52_486);
     }
-
 }

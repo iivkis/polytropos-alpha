@@ -61,8 +61,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let corpus_path = std::env::var_os("TORUS16_CORPUS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("data/corpus_snapshot.txt")
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/corpus_snapshot.txt")
         });
     let corpus = CharCorpus::read(&corpus_path)?;
     let window_len = option_usize("TORUS16_BPTT", 2, 2, 8)?;
