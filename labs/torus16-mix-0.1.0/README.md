@@ -352,3 +352,41 @@ host CE/AdamW, host/device copies, compilation and graph setup.
 The comparison mode increases setup cost and does not compare whole
 training wall-clock performance between different optimized profiles.
 Hardware measurements must be gathered on the user's NVIDIA system.
+
+
+## Batched host/device I/O and long-run throughput
+
+The BPTT example now uses the architecture-neutral
+`GpuExecution::update_input_subset(&[(NodeId, &Tensor<f32>)])`
+and `GpuExecution::read_outputs_selected(&[NodeId])` APIs.
+The former validates **all** updated IDs (no duplicates), shapes and
+domains before scheduling pinned H2D transfers on the owned nonblocking
+stream, synchronizing exactly once for the batch. Unmentioned inputs
+retain their values. The latter rejects invalid/duplicate/unselected
+or non-F32 outputs before transfer, queues D2H to session-owned pinned
+buffers and synchronizes once. Existing `read_outputs()` is now
+batched too; `read_values()` retains its mixed-dtype semantics.
+
+For BPTT=2, the forward CE seed calculation retrieves only **two**
+logits rather than the entire 341-output VJP graph. After backward,
+all 271 gradients and 68 terminal states are downloaded in one batch.
+Weights (271) and recurrent initial states (68) are updated together
+after AdamW and host state snapshot. The GPU kernel graph and the
+mathematical/AD computation are unchanged.
+
+`task train-lab-torus16-ema4-bptt` uses a **release Rust build** for
+host optimizer performance. Its first invocation recompiles; later
+invocations reuse Cargo artifacts. `step_profile_window` records
+per-stage elapsed wall time for windows 0..2 and every 128th window:
+H2D inputs, forward replay, selected logits D2H, host CE,
+H2D seeds, backward replay, selected gradient/state D2H, host AdamW,
+and H2D updated parameters/states. Stage times do not include
+print/log output or setup; they are not CUDA event timings.
+For hardware acceptance run `task verify-gpu-batch-transfers` first.
+No numerical parity, GPU throughput, or long-run robustness result
+is claimed until the local NVIDIA acceptance passes.
+
+**Checkpoint/resume is not yet implemented.** Interrupting this
+example discards parameter and AdamW states. Do not interpret low
+individual two-token train BPC as holdout quality; the validation BPC
+is measured only after the full run.

@@ -430,6 +430,57 @@ mod platform {
             Ok(())
         }
 
+        /// Queue F32 device-to-host copies into session-owned pinned staging
+        /// on the same explicit non-blocking CUDA stream. Synchronize once,
+        /// then copy the completed data into ordinary owned host vectors.
+        /// Pending pinned buffers remain alive on any enqueue/sync failure,
+        /// and are reclaimed only after a successful stream barrier.
+        pub fn copy_f32_batch_to_host(
+            &mut self,
+            transfers: &[(DevicePtr, usize)],
+        ) -> Result<Vec<Vec<f32>>, GpuError> {
+            if transfers.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Fail before enqueueing any operation on invalid byte counts.
+            let byte_counts = transfers
+                .iter()
+                .map(|&(_, elements)| {
+                    elements
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or(GpuError::UnsupportedSize { elements })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let _context = self.enter_context()?;
+            let mut staged = Vec::with_capacity(transfers.len());
+            for (&(address, elements), &bytes) in transfers.iter().zip(&byte_counts) {
+                let pinned = self.staging_buffer(bytes)?;
+                let pointer = pinned.address;
+                self.staging_pending.push(pinned);
+                check("cuMemcpyDtoHAsync_v2", unsafe {
+                    (self.functions.device_to_host)(pointer, address, bytes, self.stream)
+                })?;
+                staged.push((pointer, elements));
+            }
+            self.synchronize()?;
+            let mut outputs = Vec::with_capacity(staged.len());
+            for (pointer, elements) in staged {
+                let mut values = vec![0f32; elements];
+                // SAFETY: the copy completed on this stream; staging is
+                // pinned and remains owned by staging_pending until release.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        pointer.cast::<f32>(),
+                        values.as_mut_ptr(),
+                        elements,
+                    )
+                };
+                outputs.push(values);
+            }
+            self.release_completed_staging();
+            Ok(outputs)
+        }
+
         pub fn copy_to_host(
             &mut self,
             out: &mut [f32],
@@ -812,6 +863,15 @@ mod platform {
         }
 
         pub fn copy_device_to_device(&mut self, _: u64, _: u64, _: usize) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn copy_f32_batch_to_host(
+            &mut self,
+            _: &[(u64, usize)],
+        ) -> Result<Vec<Vec<f32>>, GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))

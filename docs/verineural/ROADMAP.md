@@ -420,3 +420,29 @@ training wall time, tokens/s and per-window time. Device GPU benchmark
 does not measure AdamW or transfers; full train step timing includes
 those but excludes compilation. This new code has not undergone local
 Cargo/NVIDIA acceptance and exact kernel counts remain unmeasured.
+
+
+### Batched GPU I/O for generic Semantic IR programs (implementation, acceptance pending)
+
+`GpuExecution::update_input_subset` sends prevalidated unique source
+updates through pinned CUDA H2D staging and a single synchronization.
+`GpuExecution::read_outputs_selected` reads only explicitly selected
+F32 results, validates before enqueueing, retains output order and
+state snapshot behavior, and synchronizes once after a session-owned
+pinned D2H batch. Existing all-F32 `read_outputs` delegates to this
+batch reader. No legacy stream or standalone kernel path introduced.
+The EMA4 BPTT consumer now reads only supervised logits at the forward
+phase and gradients plus terminal states after backward; it batches
+input/seeds and 271 parameter + 68 recurrent-state updates. The
+training task now uses Cargo --release, and labels CPU/GPU wall-clock
+stage durations. All previous Semantic IR, autodiff and CUDA Graph
+kernels remain unchanged.
+
+Acceptance: `task verify-gpu-batch-transfers` (bitwise output parity,
+duplicate/source/shape rejection without partial mutation, selected
+reverse order, single input API compatibility). Then compare
+end-to-end windows and `holdout_reset_streaming_bpc` with the
+previous unfused-upload baseline on the same device. GPU time and
+speedup are **not** established by source changes. Durable training
+checkpoint + AdamW moment resume and faster GPU-side optimizer
+are separate future milestones, not claimed here.

@@ -209,8 +209,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mut params = trainable_initial;
     let mut optimizer = AdamW::new(0.002, 0.01)?;
-    let grad_begin = window_len;
-    let state_begin = grad_begin + names.len();
+    let mut backward_selected = gradients.clone();
+    backward_selected.extend(window.terminal_states().values().copied());
     println!(
         "BPTT={} trainable_tensors={} trainable_values={} vocab={} IR_nodes={} CUDA_graph_kernels={}",
         window_len,
@@ -224,14 +224,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     for iteration in 0..train_windows {
         let step_start = Instant::now();
         let start = iteration * window_len;
-        for t in 0..window_len {
-            let input = onehot(corpus.train[start + t], vocab)?;
-            gpu.update_input(window.inputs()[t]["token"], &input)?;
-            gpu.update_input(window.cotangents()[t], &blank_seeds[t])?;
+        let tokens = (0..window_len)
+            .map(|t| onehot(corpus.train[start + t], vocab))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut input_updates = Vec::with_capacity(window_len * 2);
+        for (t, tensor) in tokens.iter().enumerate() {
+            input_updates.push((window.inputs()[t]["token"], tensor));
         }
+        for (t, seed) in blank_seeds.iter().enumerate() {
+            input_updates.push((window.cotangents()[t], seed));
+        }
+        let timing = Instant::now();
+        gpu.update_input_subset(&input_updates)?;
+        let upload_inputs_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
         gpu.replay()?;
-        let forward = gpu.read_outputs()?;
+        let forward_replay_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
+        // Only logits are needed for CE; gradients and all 68 states are not
+        // downloaded during the seed-building forward pass.
+        let forward = gpu.read_outputs_selected(window.outputs())?;
+        let read_logits_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
         let mut total = 0f32;
+        let mut seed_tensors = Vec::with_capacity(window_len);
         for t in 0..window_len {
             let (loss, mut gradient) =
                 cross_entropy(forward[t].1.values(), corpus.train[start + t + 1])?;
@@ -239,34 +258,58 @@ fn main() -> Result<(), Box<dyn Error>> {
             for v in &mut gradient {
                 *v /= window_len as f32;
             }
-            let seed = Tensor::from_vec(vec![1, vocab], gradient)?;
-            gpu.update_input(window.cotangents()[t], &seed)?;
+            seed_tensors.push(Tensor::from_vec(vec![1, vocab], gradient)?);
         }
+        let ce_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
+        let seed_updates = window
+            .cotangents()
+            .iter()
+            .copied()
+            .zip(seed_tensors.iter())
+            .collect::<Vec<_>>();
+        gpu.update_input_subset(&seed_updates)?;
+        let upload_seed_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
         gpu.replay()?;
-        let backward = gpu.read_outputs()?;
+        let backward_replay_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
+        // Queue all gradient/state D2H copies and wait for them once, rather
+        // than synchronizing for each of 271 gradients and 68 states.
+        let backward = gpu.read_outputs_selected(&backward_selected)?;
+        let read_backward_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
         let derivative = names
             .iter()
             .enumerate()
-            .map(|(i, name)| (name.clone(), backward[grad_begin + i].1.clone()))
+            .map(|(i, name)| (name.clone(), backward[i].1.clone()))
             .collect::<BTreeMap<_, _>>();
-        // Snapshot ALL states before writing ANY initial-state address.
-        // This is explicit host staging across truncated windows, not
-        // unsafe overlapping CUDA D2D feedback.
+        // Host staging of all next states before the single H2D update batch
+        // preserves recurrent TBPTT semantics even with aliased GPU buffers.
         let next_states = window
             .terminal_states()
             .keys()
             .enumerate()
-            .map(|(i, name)| (name.clone(), backward[state_begin + i].1.clone()))
+            .map(|(i, name)| (name.clone(), backward[names.len() + i].1.clone()))
             .collect::<BTreeMap<_, _>>();
         optimizer.step(&mut params, &derivative)?;
+        let adam_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
+        let mut updates = Vec::with_capacity(named_parameter.len() + window.initial_states().len());
         for (name, &id) in named_parameter {
-            if let Some(updated) = params.get(name) {
-                gpu.update_input(id, updated)?;
-            }
+            updates.push((id, &params[name]));
         }
         for (name, &id) in window.initial_states() {
-            gpu.update_input(id, &next_states[name])?;
+            updates.push((id, &next_states[name]));
         }
+        gpu.update_input_subset(&updates)?;
+        let upload_parameters_states_ms = timing.elapsed().as_secs_f64() * 1000.;
+
         println!(
             "train_window={} ce_nats={:.6} train_bpc={:.6} optimizer_step={} end_to_end_step_ms={:.3}",
             iteration,
@@ -275,6 +318,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             optimizer.steps(),
             step_start.elapsed().as_secs_f64() * 1000.
         );
+        if iteration < 3 || (iteration + 1) % 128 == 0 {
+            println!(
+                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} forward_replay_ms={forward_replay_ms:.3} logits_d2h_ms={read_logits_ms:.3} ce_ms={ce_ms:.3} seed_h2d_ms={upload_seed_ms:.3} backward_replay_ms={backward_replay_ms:.3} gradients_states_d2h_ms={read_backward_ms:.3} host_adamw_ms={adam_ms:.3} parameters_states_h2d_ms={upload_parameters_states_ms:.3}",
+                iteration
+            );
+        }
     }
     let train_elapsed = train_start.elapsed().as_secs_f64();
     println!(

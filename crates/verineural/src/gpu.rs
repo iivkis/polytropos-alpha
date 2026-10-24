@@ -1631,6 +1631,55 @@ impl GpuExecution {
             .record_io(self.session.flush_input_copies())
     }
 
+    /// Update an arbitrary *subset* of reachable F32 source tensors.
+    /// All IDs, uniqueness, shapes and domains are checked before enqueueing
+    /// the first H2D copy. Pinned host staging is kept alive until a single
+    /// synchronization of the owned non-blocking stream. All other inputs
+    /// retain their previous device values.
+    pub fn update_input_subset(
+        &mut self,
+        inputs: &[(NodeId, &Tensor<f32>)],
+    ) -> Result<(), GpuError> {
+        self.execution_health.ensure_ready()?;
+        let mut seen = BTreeSet::new();
+        for &(id, value) in inputs {
+            if !seen.insert(id.index()) {
+                return Err(GpuError::InvalidInput {
+                    node: id.index(),
+                    reason: "duplicate partial input update",
+                });
+            }
+            if !self.program.source_inputs().contains(&id) {
+                return Err(GpuError::InvalidInput {
+                    node: id.index(),
+                    reason: "source is outside the compiled output slice",
+                });
+            }
+            let node = self.program.graph.node(id)?;
+            if value.shape() != &node.shape {
+                return Err(GpuError::InvalidGraph(NeuralError::ShapeMismatch {
+                    expected: node.shape.clone(),
+                    actual: value.shape().clone(),
+                }));
+            }
+            value.validate_domain(node.domain)?;
+        }
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        self.execution_health.invalidate_outputs();
+        self.preserved_output_valid = false;
+        for &(id, value) in inputs {
+            self.execution_health.record_io(
+                self.session.copy_to_device(
+                    self.input_addresses[&id.index()],
+                    value.values(),
+                ),
+            )?;
+        }
+        self.execution_health.record_io(self.session.flush_input_copies())
+    }
+
     /// Rebind one named source without uploading unchanged parameters or state.
     /// Metadata and domain are checked before touching GPU memory.
     pub fn update_input(&mut self, id: NodeId, value: &Tensor<f32>) -> Result<(), GpuError> {
@@ -1933,19 +1982,75 @@ impl GpuExecution {
         Ok(result)
     }
 
-    /// Backward-compatible all-F32 reader. Mixed/Index output sets fail closed.
-    pub fn read_outputs(&mut self) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
-        self.read_values()?
-            .into_iter()
-            .map(|(node, value)| match value {
-                TensorValue::F32(tensor) => Ok((node, tensor)),
-                TensorValue::Index(_) => Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
-                    operation: "read_outputs",
+    /// Read a requested subset of selected F32 outputs in caller order.
+    /// All source IDs, duplicate IDs and dtypes are prevalidated before DMA.
+    /// One stream barrier completes all queued D2H copies, with pinned staging
+    /// retained until then. Results aliasing preserved state snapshots use the
+    /// same snapshot selection as read_selected_value().
+    pub fn read_outputs_selected(
+        &mut self,
+        selected: &[NodeId],
+    ) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
+        self.execution_health.ensure_outputs_ready()?;
+        let mut seen = BTreeSet::new();
+        let mut sources = Vec::with_capacity(selected.len());
+        for &id in selected {
+            if !seen.insert(id.index()) {
+                return Err(GpuError::InvalidInput {
+                    node: id.index(),
+                    reason: "duplicate selected read output",
+                });
+            }
+            let (_, shape, original) = self
+                .output_addresses
+                .iter()
+                .find(|(node, _, _)| *node == id)
+                .ok_or(GpuError::InvalidInput {
+                    node: id.index(),
+                    reason: "requested output is not selected",
+                })?;
+            let node = self.program.graph.node(id)?;
+            if node.dtype != DType::F32 {
+                return Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
+                    operation: "read_outputs_selected",
                     expected: DType::F32,
-                    actual: DType::Index,
-                })),
+                    actual: node.dtype,
+                }));
+            }
+            let address = if self.preserved_output_valid {
+                self.preserved_output_addresses
+                    .get(&id.index())
+                    .copied()
+                    .unwrap_or(*original)
+            } else {
+                *original
+            };
+            sources.push((id, shape.clone(), address));
+        }
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        let buffers = sources
+            .iter()
+            .map(|(_, shape, address)| (*address, shape.element_count()))
+            .collect::<Vec<_>>();
+        let copied = self
+            .execution_health
+            .record_io(self.session.copy_f32_batch_to_host(&buffers))?;
+        sources
+            .into_iter()
+            .zip(copied)
+            .map(|((id, shape, _), values)| {
+                Ok((id, Tensor::new(shape, values)?))
             })
             .collect()
+    }
+
+    /// Backward-compatible all-F32 reader, now batched in declaration order.
+    /// Mixed/Index output sets fail closed.
+    pub fn read_outputs(&mut self) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
+        let selected = self.program.outputs().to_vec();
+        self.read_outputs_selected(&selected)
     }
 
     pub fn benchmark(

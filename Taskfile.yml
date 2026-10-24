@@ -489,11 +489,17 @@ tasks:
     cmds:
       - cargo test -p verineural --test temporal -- --ignored --nocapture
 
-  train-lab-torus16-ema4-bptt:
-    desc: Fused GPU BPTT with checked-in corpus and before-after CUDA kernel counts
+  verify-gpu-batch-transfers:
+    desc: NVIDIA acceptance for partial H2D updates, selective batched D2H and old API parity
     deps: [prepare]
     cmds:
-      - cargo run -p torus16-mix-lab --example ema4_bptt
+      - cargo test -p verineural --test gpu_batch_transfers -- --ignored --nocapture
+
+  train-lab-torus16-ema4-bptt:
+    desc: Release-optimized BPTT with batched transfers and per-stage wall-clock profiling
+    deps: [prepare]
+    cmds:
+      - cargo run --release -p torus16-mix-lab --example ema4_bptt
 
   autodiff-stage:
     desc: Validate architecture-neutral reverse-mode IR rules, finite difference checks and atomic AdamW
