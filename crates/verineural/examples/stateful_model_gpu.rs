@@ -8,7 +8,9 @@
 use std::error::Error;
 use std::path::Path;
 
-use verineural::{Domain, GpuEngine, GpuError, ModelBuilder, ModelExecution, ModelExecutionError, Tensor};
+use verineural::{
+    Domain, GpuEngine, GpuError, ModelBuilder, ModelExecution, ModelExecutionError, Tensor,
+};
 
 const WIDTH: usize = 4;
 
@@ -16,13 +18,12 @@ fn tensor(values: [f32; WIDTH]) -> Result<Tensor<f32>, Box<dyn Error>> {
     Ok(Tensor::from_vec([WIDTH], values.to_vec())?)
 }
 
-fn expect_bits(
-    phase: &str,
-    name: &str,
-    actual: &Tensor<f32>,
-    expected: [f32; WIDTH],
-) {
-    let actual_bits = actual.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+fn expect_bits(phase: &str, name: &str, actual: &Tensor<f32>, expected: [f32; WIDTH]) {
+    let actual_bits = actual
+        .values()
+        .iter()
+        .map(|v| v.to_bits())
+        .collect::<Vec<_>>();
     let expected_bits = expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
     assert_eq!(actual.shape().dims(), &[WIDTH], "{phase}: {name} shape");
     assert_eq!(actual_bits, expected_bits, "{phase}: {name} FP32 bits");
@@ -115,12 +116,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Invalid named roles, shapes and non-finite input values must not
     // mutate the previously bound state, token or parameter buffers.
     assert!(execution.set_input("gain", &tensor([1.0; WIDTH])?).is_err());
-    assert!(execution.set_parameter("token", &tensor([1.0; WIDTH])?).is_err());
+    assert!(
+        execution
+            .set_parameter("token", &tensor([1.0; WIDTH])?)
+            .is_err()
+    );
     assert!(execution.set_state("gain", &tensor([1.0; WIDTH])?).is_err());
-    assert!(execution.set_input("token", &Tensor::from_vec([2], vec![1.0, 2.0])?).is_err());
-    assert!(execution
-        .set_input("token", &tensor([1.0, f32::NAN, 1.0, 1.0])?)
-        .is_err());
+    assert!(
+        execution
+            .set_input("token", &Tensor::from_vec([2], vec![1.0, 2.0])?)
+            .is_err()
+    );
+    assert!(
+        execution
+            .set_input("token", &tensor([1.0, f32::NAN, 1.0, 1.0])?)
+            .is_err()
+    );
     expect_bits(
         "rejected writes",
         "state",
@@ -199,7 +210,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
 /// Regression: both states are replaced with token, so neither is needed
 /// for the pure computation. "hidden" is not a public output at all;
 /// "visible" is public both directly and through a zero-copy reshape.
@@ -272,7 +282,10 @@ fn check_replacement_and_aliased_outputs(gpu: &GpuEngine) -> Result<(), Box<dyn 
     let view = execution.output("previous_view")?;
     assert_eq!(view.shape().dims(), &[2, 2]);
     assert_eq!(
-        view.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        view.values()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<Vec<_>>(),
         [8.0f32, 9.0, 10.0, 11.0]
             .iter()
             .map(|v| v.to_bits())

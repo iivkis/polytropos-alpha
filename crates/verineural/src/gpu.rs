@@ -137,8 +137,14 @@ impl fmt::Display for GpuError {
                 "GPU benchmark needs at least one measured graph replay, got {iterations}"
             ),
             Self::NoKernelGraph => write!(f, "GPU benchmark requires at least one CUDA kernel"),
-            Self::ExecutionPoisoned => write!(f, "CUDA execution is poisoned; discard and prepare a new execution"),
-            Self::OutputNotReady => write!(f, "GPU outputs are not ready; run a successful CUDA Graph replay first"),
+            Self::ExecutionPoisoned => write!(
+                f,
+                "CUDA execution is poisoned; discard and prepare a new execution"
+            ),
+            Self::OutputNotReady => write!(
+                f,
+                "GPU outputs are not ready; run a successful CUDA Graph replay first"
+            ),
             Self::Io(err) => write!(f, "GPU I/O failure: {err}"),
             Self::LlvmFailed { diagnostics } => write!(f, "NVPTX lowering failed: {diagnostics}"),
             Self::Fp32PtxRejected { reason } => {
@@ -720,12 +726,14 @@ impl GpuExecution {
         self.execution_health.invalidate_outputs();
         self.preserved_output_valid = false;
         for id in self.program.source_inputs() {
-            self.execution_health.record_io(self.session.copy_to_device(
-                self.input_addresses[&id.index()],
-                given[&id.index()].values(),
-            ))?;
+            self.execution_health
+                .record_io(self.session.copy_to_device(
+                    self.input_addresses[&id.index()],
+                    given[&id.index()].values(),
+                ))?;
         }
-        self.execution_health.record_io(self.session.flush_input_copies())
+        self.execution_health
+            .record_io(self.session.flush_input_copies())
     }
 
     /// Rebind one named source without uploading unchanged parameters or state.
@@ -749,8 +757,10 @@ impl GpuExecution {
         let address = self.input_addresses[&id.index()];
         self.execution_health.invalidate_outputs();
         self.preserved_output_valid = false;
-        self.execution_health.record_io(self.session.copy_to_device(address, value.values()))?;
-        self.execution_health.record_io(self.session.flush_input_copies())
+        self.execution_health
+            .record_io(self.session.copy_to_device(address, value.values()))?;
+        self.execution_health
+            .record_io(self.session.flush_input_copies())
     }
 
     /// Establish the static state feedback memory contract before any replay.
@@ -778,10 +788,13 @@ impl GpuExecution {
                     reason: "public output is not in the compiled GPU program",
                 })?;
             if destinations.contains(&address)
-                && !self.preserved_output_addresses.contains_key(&output.index())
+                && !self
+                    .preserved_output_addresses
+                    .contains_key(&output.index())
             {
                 let snapshot = self.session.allocate(shape.element_count())?;
-                self.preserved_output_addresses.insert(output.index(), snapshot);
+                self.preserved_output_addresses
+                    .insert(output.index(), snapshot);
             }
         }
         Ok(())
@@ -798,12 +811,16 @@ impl GpuExecution {
                 .iter()
                 .find(|(node, _, _)| node.index() == index)
                 .expect("configured public output has a live buffer");
-            self.execution_health.record_io(
-                self.session.copy_device_to_device(snapshot, *source, shape.element_count())
-            )?;
+            self.execution_health
+                .record_io(self.session.copy_device_to_device(
+                    snapshot,
+                    *source,
+                    shape.element_count(),
+                ))?;
         }
         if !self.preserved_output_addresses.is_empty() {
-            self.execution_health.record_io(self.session.synchronize())?;
+            self.execution_health
+                .record_io(self.session.synchronize())?;
         }
         self.preserved_output_valid = true;
         Ok(())
@@ -829,12 +846,16 @@ impl GpuExecution {
             *live
         };
         let mut values = vec![0.0f32; shape.element_count()];
-        self.execution_health.record_io(self.session.copy_to_host(&mut values, address))?;
+        self.execution_health
+            .record_io(self.session.copy_to_host(&mut values, address))?;
         Ok(Tensor::new(shape.clone(), values)?)
     }
 
     /// Validate feedback shape, dtype, domain, liveness and alias order.
-    fn feedback_copy_plan(&self, links: &[(NodeId, NodeId)]) -> Result<Vec<(u64, u64, usize)>, GpuError> {
+    fn feedback_copy_plan(
+        &self,
+        links: &[(NodeId, NodeId)],
+    ) -> Result<Vec<(u64, u64, usize)>, GpuError> {
         let mut destinations = BTreeSet::new();
         let mut copies = Vec::with_capacity(links.len());
         for &(state, next) in links {
@@ -906,9 +927,8 @@ impl GpuExecution {
         let copies = self.feedback_copy_plan(links)?;
         for (dst, src, elements) in copies {
             if dst != src {
-                self.execution_health.record_io(
-                    self.session.copy_device_to_device(dst, src, elements)
-                )?;
+                self.execution_health
+                    .record_io(self.session.copy_device_to_device(dst, src, elements))?;
             }
         }
         self.execution_health.record_io(self.session.synchronize())
@@ -927,7 +947,8 @@ impl GpuExecution {
                     reason: "source is outside the compiled output slice",
                 })?;
         let mut values = vec![0.0f32; node.shape.element_count()];
-        self.execution_health.record_io(self.session.copy_to_host(&mut values, address))?;
+        self.execution_health
+            .record_io(self.session.copy_to_host(&mut values, address))?;
         Ok(Tensor::new(node.shape.clone(), values)?)
     }
 
@@ -935,9 +956,11 @@ impl GpuExecution {
         self.execution_health.ensure_ready()?;
         self.execution_health.invalidate_outputs();
         if self.has_graph {
-            self.execution_health.record_io(self.session.launch_graph())?;
+            self.execution_health
+                .record_io(self.session.launch_graph())?;
         }
-        self.execution_health.record_io(self.session.synchronize())?;
+        self.execution_health
+            .record_io(self.session.synchronize())?;
         self.execution_health.outputs_completed();
         Ok(())
     }
@@ -945,9 +968,8 @@ impl GpuExecution {
     pub fn read_output(&mut self) -> Result<Tensor<f32>, GpuError> {
         self.execution_health.ensure_outputs_ready()?;
         let mut values = vec![0.0f32; self.output_shape.element_count()];
-        self.execution_health.record_io(
-            self.session.copy_to_host(&mut values, self.output_address)
-        )?;
+        self.execution_health
+            .record_io(self.session.copy_to_host(&mut values, self.output_address))?;
         Ok(Tensor::new(self.output_shape.clone(), values)?)
     }
 
@@ -958,7 +980,8 @@ impl GpuExecution {
         let mut result = Vec::with_capacity(self.output_addresses.len());
         for (node, shape, pointer) in &self.output_addresses {
             let mut values = vec![0.0f32; shape.element_count()];
-            self.execution_health.record_io(self.session.copy_to_host(&mut values, *pointer))?;
+            self.execution_health
+                .record_io(self.session.copy_to_host(&mut values, *pointer))?;
             result.push((*node, Tensor::new(shape.clone(), values)?));
         }
         Ok(result)
@@ -978,7 +1001,8 @@ impl GpuExecution {
         }
         self.execution_health.invalidate_outputs();
         let milliseconds = self.execution_health.record_io(
-            self.session.benchmark_graph(warmup_launches, measured_launches)
+            self.session
+                .benchmark_graph(warmup_launches, measured_launches),
         )?;
         if !milliseconds.is_finite() || milliseconds < 0.0 {
             return Err(GpuError::Driver(
@@ -1615,25 +1639,32 @@ fn matmul_kernel_ir(index: usize, inner: usize, columns: usize) -> String {
     )
 }
 
-
 #[cfg(test)]
 mod execution_health_tests {
     use super::*;
 
-
     #[test]
     fn outputs_not_ready_until_successful_replay_and_invalidated_by_h2d() {
         let health = ExecutionHealth::default();
-        assert!(matches!(health.ensure_outputs_ready(), Err(GpuError::OutputNotReady)));
+        assert!(matches!(
+            health.ensure_outputs_ready(),
+            Err(GpuError::OutputNotReady)
+        ));
         health.outputs_completed();
         assert!(health.ensure_outputs_ready().is_ok());
         // A validated input update begins a new logical input epoch.
         health.invalidate_outputs();
         assert!(health.ensure_ready().is_ok());
-        assert!(matches!(health.ensure_outputs_ready(), Err(GpuError::OutputNotReady)));
+        assert!(matches!(
+            health.ensure_outputs_ready(),
+            Err(GpuError::OutputNotReady)
+        ));
         // An invalid input contract is rejected before any IO or invalidation.
         health.outputs_completed();
-        let _invalid = GpuError::InvalidInput { node: 0, reason: "shape mismatch" };
+        let _invalid = GpuError::InvalidInput {
+            node: 0,
+            reason: "shape mismatch",
+        };
         assert!(health.ensure_outputs_ready().is_ok());
     }
 
@@ -1651,10 +1682,19 @@ mod execution_health_tests {
                 code: 700,
             }));
             assert!(matches!(error, Err(GpuError::Cuda { .. })));
-            assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
-            assert!(matches!(health.ensure_outputs_ready(), Err(GpuError::ExecutionPoisoned)));
+            assert!(matches!(
+                health.ensure_ready(),
+                Err(GpuError::ExecutionPoisoned)
+            ));
+            assert!(matches!(
+                health.ensure_outputs_ready(),
+                Err(GpuError::ExecutionPoisoned)
+            ));
             health.outputs_completed();
-            assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
+            assert!(matches!(
+                health.ensure_ready(),
+                Err(GpuError::ExecutionPoisoned)
+            ));
         }
     }
 
@@ -1670,9 +1710,15 @@ mod execution_health_tests {
             code: 719,
         }));
         assert!(matches!(failure, Err(GpuError::Cuda { .. })));
-        assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
+        assert!(matches!(
+            health.ensure_ready(),
+            Err(GpuError::ExecutionPoisoned)
+        ));
         assert!(health.record_io(Ok(())).is_ok());
-        assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
+        assert!(matches!(
+            health.ensure_ready(),
+            Err(GpuError::ExecutionPoisoned)
+        ));
         assert!(ExecutionHealth::default().ensure_ready().is_ok());
     }
 
@@ -1690,6 +1736,9 @@ mod execution_health_tests {
             code: 700,
         }));
         assert!(matches!(failure, Err(GpuError::Cuda { .. })));
-        assert!(matches!(health.ensure_ready(), Err(GpuError::ExecutionPoisoned)));
+        assert!(matches!(
+            health.ensure_ready(),
+            Err(GpuError::ExecutionPoisoned)
+        ));
     }
 }

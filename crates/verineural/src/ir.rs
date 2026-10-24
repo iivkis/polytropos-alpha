@@ -1666,7 +1666,7 @@ impl NeuralGraph {
                 states,
                 outputs,
                 module_indices,
-        })
+            })
         })
     }
 
@@ -1834,7 +1834,6 @@ impl Default for NeuralGraph {
     }
 }
 
-
 #[cfg(test)]
 mod graph_append_transaction_tests {
     use super::*;
@@ -1845,20 +1844,22 @@ mod graph_append_transaction_tests {
         let x = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
         let unused = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
         let unrelated = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
-        let outputs = graph.compose_multi_inferred(
-            "branch",
-            "1",
-            &[("x", x), ("unused", unused)],
-            &["one", "two"],
-            |g, values| {
-                let one = g.relu(values[0])?;
-                let two = g.mul(one, values[0])?;
-                Ok(vec![one, two])
-            },
-        ).unwrap();
-        let outer = graph.compose_inferred("outer", "1", &[outputs[1]], |g, values| {
-            g.relu(values[0])
-        }).unwrap();
+        let outputs = graph
+            .compose_multi_inferred(
+                "branch",
+                "1",
+                &[("x", x), ("unused", unused)],
+                &["one", "two"],
+                |g, values| {
+                    let one = g.relu(values[0])?;
+                    let two = g.mul(one, values[0])?;
+                    Ok(vec![one, two])
+                },
+            )
+            .unwrap();
+        let outer = graph
+            .compose_inferred("outer", "1", &[outputs[1]], |g, values| g.relu(values[0]))
+            .unwrap();
         // The output of a declared module pulls *all* its named inputs,
         // even when its body doesn't use one of them.
         for &root in &[outputs[0], outputs[1], outer] {
@@ -1869,7 +1870,10 @@ mod graph_append_transaction_tests {
         }
         // Every selected root still validates its graph identity.
         let foreign = NeuralGraph::default().input(Shape::new(vec![2]).unwrap(), Domain::Finite);
-        assert!(matches!(graph.dependency_scope(&[foreign]), Err(NeuralError::InvalidNode)));
+        assert!(matches!(
+            graph.dependency_scope(&[foreign]),
+            Err(NeuralError::InvalidNode)
+        ));
     }
 
     #[test]
@@ -1879,17 +1883,19 @@ mod graph_append_transaction_tests {
         let b = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
         let mut head = a;
         for _ in 0..48 {
-            let ports = graph.compose_multi_inferred(
-                "pair",
-                "1",
-                &[("head", head), ("extra", b)],
-                &["next", "diagnostic"],
-                |g, xs| {
-                    let next = g.add(xs[0], xs[1])?;
-                    let diag = g.relu(next)?;
-                    Ok(vec![next, diag])
-                },
-            ).unwrap();
+            let ports = graph
+                .compose_multi_inferred(
+                    "pair",
+                    "1",
+                    &[("head", head), ("extra", b)],
+                    &["next", "diagnostic"],
+                    |g, xs| {
+                        let next = g.add(xs[0], xs[1])?;
+                        let diag = g.relu(next)?;
+                        Ok(vec![next, diag])
+                    },
+                )
+                .unwrap();
             head = ports[0];
         }
         let roots = [head];
