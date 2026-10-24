@@ -5,6 +5,7 @@
 
 use verineural::{
     Domain, GpuAssuranceStatus, GpuEngine, GpuLaunchConfig, GpuOptimizationKind, LeanProofEngine,
+    audit_fp32_ptx,
     NeuralGraph, ReluFusion, Shape, TranslationKind,
 };
 
@@ -29,6 +30,27 @@ fn fused_program() -> verineural::GpuProgram {
         .with_launch_config(GpuLaunchConfig::new(256, ReluFusion::Experimental).unwrap())
         .compile(&graph, output)
         .unwrap()
+}
+
+#[test]
+fn altered_ptx_fp32_policy_cannot_pass_numeric_opcode_audit() {
+    // A narrow independent mutation fixture: counts and opcodes are checked,
+    // but a successful audit does NOT prove operand-level semantics or SASS.
+    let llvm = "call float asm sideeffect \"add.rn.f32\"\ncall float asm sideeffect \"mul.rn.f32\"";
+    let ptx = "add.rn.f32 %f1, %f2, %f3;\nmul.rn.f32 %f4, %f5, %f6;";
+    let ok = audit_fp32_ptx(llvm, ptx).unwrap();
+    assert_eq!(ok.rounded_adds, 1);
+    assert_eq!(ok.rounded_muls, 1);
+
+    for corrupted in [
+        ptx.replace("add.rn.f32", "add.ftz.f32"),
+        ptx.replace("mul.rn.f32", "fma.rn.f32"),
+        ptx.replace("mul.rn.f32", "mul.approx.f32"),
+        ptx.replace("mul.rn.f32", "add.rn.f32"),
+    ] {
+        assert!(audit_fp32_ptx(llvm, &corrupted).is_err());
+    }
+    assert!(audit_fp32_ptx("fadd float %a, %b", ptx).is_err());
 }
 
 #[test]

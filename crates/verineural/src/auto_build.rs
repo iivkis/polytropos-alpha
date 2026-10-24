@@ -743,6 +743,10 @@ fn report_text(graph: &NeuralGraph, report: &AutoBuildReport) -> String {
              connectivity_assurance=Rust-structural-validation\n\
              fp32_machine_equivalence=not-proven\n\
              nvidia_jit_sass_equivalence=not-proven\n\
+             gpu_memory_address_contract=ideal-Int-Lean-kernel-checked-under-hypotheses\n\
+             gpu_llvm_ptx_translation=structurally-validated-not-semantically-proven\n\
+             fp32_numeric_error_bounds=separate-RNE-certificate-required\n\
+             cuda_graph_runtime=not-executed-by-certified-build\n\
              lean_version={}\n\
              nodes={}\ndata_edges={}\nmodule_ports={}\nmodule_instances={}\n\
              architecture_theorems={}\nsource_hypotheses={:?}\n",

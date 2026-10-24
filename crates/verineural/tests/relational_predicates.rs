@@ -169,6 +169,47 @@ fn composition_prover_does_not_claim_bound_without_nonnegative_sibling() {
     assert!(!source.contains("VeriNeural.pointwise_le_relu_add_of_nonnegative"));
 }
 
+/// Consumer-defined order claim crosses several independent branch merges;
+/// proof is constructed from reusable ideal-Int lemmas, not from a special
+/// architecture pattern or a single final ReLU.
+fn multi_step_case() -> (NeuralGraph, ProofGoal) {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![4]).unwrap();
+    let a = graph.input(shape.clone(), Domain::Finite);
+    let b = graph.input(shape.clone(), Domain::Finite);
+    let c = graph.input(shape, Domain::Finite);
+    let lower = graph.relu(a).unwrap();
+    let sibling_b = graph.relu(b).unwrap();
+    let sibling_c = graph.relu(c).unwrap();
+    let merged = graph.add(sibling_b, sibling_c).unwrap();
+    let intermediate = graph.add(lower, merged).unwrap();
+    let output = graph.relu(intermediate).unwrap();
+    let output = graph.relu(output).unwrap();
+    (
+        graph,
+        ProofGoal {
+            name: "reusable_transitive_branch_bound".into(),
+            output,
+            kind: ProofGoalKind::Predicate(Predicate::pointwise_le(
+                ValueRef::Node(lower),
+                ValueRef::Output,
+            )),
+        },
+    )
+}
+
+#[test]
+fn reusable_order_rules_prove_nested_branches_and_transitivity() {
+    let (graph, goal) = multi_step_case();
+    let program = LeanProofEngine::default()
+        .generate_goal(&graph, &goal)
+        .unwrap();
+    assert!(program.source().contains("VeriNeural.add_nonnegative"));
+    assert!(program.source().contains("VeriNeural.pointwise_le_trans"));
+    assert!(program.source().contains("VeriNeural.pointwise_le_relu_add_of_nonnegative"));
+    assert!(!program.source().contains("sorry"));
+}
+
 fn certify(graph: &NeuralGraph, goal: &ProofGoal, path: &Path) -> Result<(), ProofError> {
     let lean = LeanProofEngine::default();
     let generated = lean.generate_goal(graph, goal)?;
@@ -209,5 +250,12 @@ fn lean_accepts_true_relation_and_rejects_false_one() {
         ),
         Err(ProofError::LeanRejected { .. })
     ));
+    let (multi_graph, multi_goal) = multi_step_case();
+    certify(
+        &multi_graph,
+        &multi_goal,
+        &dir.join("multi_step_true.lean"),
+    )
+    .unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -2004,49 +2004,26 @@ impl LeanProofEngine {
                                 "  rfl".to_owned(),
                             ),
                             Predicate::PointwiseLe(_, _) => {
-                                // A compositional branch bound, not merely a
-                                // restatement of the final ReLU theorem:
-                                // lower <= relu(add(lower, relu(other))).
-                                let upper = graph.node(right)?;
-                                let composed = if matches!(upper.operation, Operation::Relu) {
-                                    let sum = graph.node(upper.inputs[0])?;
-                                    if matches!(sum.operation, Operation::Add)
-                                        && sum.inputs[0] == left
-                                    {
-                                        let other = sum.inputs[1];
-                                        let branch = graph.node(other)?;
-                                        if matches!(branch.operation, Operation::Relu) {
-                                            let pre_relu = branch.inputs[0];
-                                            Some(format!(
-                                                "  change VeriNeural.PointwiseLe {} (VeriNeural.relu (VeriNeural.add {} {}))\n  exact VeriNeural.pointwise_le_relu_add_of_nonnegative {} {} (VeriNeural.relu_nonnegative {})",
-                                                term(left),
-                                                term(left),
-                                                term(other),
-                                                term(left),
-                                                term(other),
-                                                term(pre_relu)
-                                            ))
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
+                                let derived = derived_pointwise_le(
+                                    graph,
+                                    left,
+                                    right,
+                                    &term,
+                                    used.len() + 1,
+                                );
                                 (
                                     format!(
                                         "VeriNeural.PointwiseLe {} {}",
                                         term(left),
                                         term(right)
                                     ),
-                                    composed.unwrap_or_else(|| {
-                                        format!(
-                                            "  exact VeriNeural.pointwise_le_relu {}",
+                                    format!(
+                                        "  exact {}",
+                                        derived.unwrap_or_else(|| format!(
+                                            "VeriNeural.pointwise_le_relu {}",
                                             term(left)
-                                        )
-                                    }),
+                                        ))
+                                    ),
                                 )
                             }
                             Predicate::Nonnegative(_) => unreachable!(),
@@ -2965,6 +2942,123 @@ fn normalized_module_nonnegative_proof(
     };
     cache.insert(index, proof.clone());
     Ok(proof)
+}
+
+// Constructively prove a narrow, architecture-neutral relational fragment:
+// nonnegative branches built from ReLU/Add/Mul, and transitive lower bounds
+// across arbitrary reachable Add/ReLU chains. Never assume a source's
+// runtime Domain is also a Lean theorem hypothesis.
+fn derived_nonnegative(
+    graph: &NeuralGraph,
+    node: NodeId,
+    term: &impl Fn(NodeId) -> String,
+    fuel: usize,
+) -> Option<String> {
+    if fuel == 0 {
+        return None;
+    }
+    let item = graph.node(node).ok()?;
+    match &item.operation {
+        Operation::Relu => Some(format!(
+            "(VeriNeural.relu_nonnegative {})",
+            term(item.inputs[0])
+        )),
+        Operation::Add | Operation::Mul => {
+            let left = item.inputs[0];
+            let right = item.inputs[1];
+            let hl = derived_nonnegative(graph, left, term, fuel - 1)?;
+            let hr = derived_nonnegative(graph, right, term, fuel - 1)?;
+            let lemma = if matches!(item.operation, Operation::Add) {
+                "VeriNeural.add_nonnegative"
+            } else {
+                "VeriNeural.mul_nonnegative"
+            };
+            Some(format!("({lemma} {} {} {hl} {hr})", term(left), term(right)))
+        }
+        _ => None,
+    }
+}
+
+fn derived_pointwise_le(
+    graph: &NeuralGraph,
+    lower: NodeId,
+    upper: NodeId,
+    term: &impl Fn(NodeId) -> String,
+    fuel: usize,
+) -> Option<String> {
+    if fuel == 0 {
+        return None;
+    }
+    if lower == upper {
+        return Some(format!("(VeriNeural.pointwise_le_refl {})", term(lower)));
+    }
+    let item = graph.node(upper).ok()?;
+    match &item.operation {
+        Operation::Relu => {
+            let inner = item.inputs[0];
+            // Direct bound permits a nonnegative sibling of arbitrary
+            // supported composition depth, not only a naked ReLU.
+            let source = graph.node(inner).ok()?;
+            if matches!(source.operation, Operation::Add) {
+                let left = source.inputs[0];
+                let right = source.inputs[1];
+                if lower == left {
+                    if let Some(hb) = derived_nonnegative(graph, right, term, fuel - 1) {
+                        return Some(format!(
+                            "(VeriNeural.pointwise_le_relu_add_of_nonnegative {} {} {hb})",
+                            term(left),
+                            term(right)
+                        ));
+                    }
+                }
+            }
+            let hnext = format!("(VeriNeural.pointwise_le_relu {})", term(inner));
+            if lower == inner {
+                return Some(hnext);
+            }
+            let previous = derived_pointwise_le(graph, lower, inner, term, fuel - 1)?;
+            Some(format!(
+                "(VeriNeural.pointwise_le_trans {} {} {} {previous} {hnext})",
+                term(lower),
+                term(inner),
+                term(upper)
+            ))
+        }
+        Operation::Add => {
+            let left = item.inputs[0];
+            let right = item.inputs[1];
+            // Either operand may provide the lower bound if the opposite
+            // branch is independently proven nonnegative.
+            for (base, other, lemma) in [
+                (left, right, "VeriNeural.pointwise_le_add_of_nonnegative"),
+                (right, left, "VeriNeural.pointwise_le_add_of_nonnegative_left"),
+            ] {
+                let Some(nonnegative) = derived_nonnegative(graph, other, term, fuel - 1) else {
+                    continue;
+                };
+                let step = format!(
+                    "({lemma} {} {} {nonnegative})",
+                    term(left),
+                    term(right)
+                );
+                if lower == base {
+                    return Some(step);
+                }
+                if let Some(previous) =
+                    derived_pointwise_le(graph, lower, base, term, fuel - 1)
+                {
+                    return Some(format!(
+                        "(VeriNeural.pointwise_le_trans {} {} {} {previous} {step})",
+                        term(lower),
+                        term(base),
+                        term(upper)
+                    ));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn collect_used_nodes(graph: &NeuralGraph, output: NodeId) -> Result<BTreeSet<usize>, ProofError> {

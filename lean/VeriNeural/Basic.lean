@@ -158,6 +158,30 @@ theorem pointwise_le_relu_add_of_nonnegative {n : Nat} (a b : Tensor n)
     (Int.le_add_of_nonneg_right (hb i))
     (Int.le_max_left (a i + b i) 0)
 
+/-- Reusable order algebra for consumer-owned multi-step DAG relations. -/
+theorem pointwise_le_refl {n : Nat} (a : Tensor n) :
+    PointwiseLe a a := by
+  intro i
+  exact le_refl _
+
+theorem pointwise_le_trans {n : Nat} (a b c : Tensor n)
+    (hab : PointwiseLe a b) (hbc : PointwiseLe b c) :
+    PointwiseLe a c := by
+  intro i
+  exact le_trans (hab i) (hbc i)
+
+theorem pointwise_le_add_of_nonnegative {n : Nat} (a b : Tensor n)
+    (hb : Nonnegative b) : PointwiseLe a (add a b) := by
+  intro i
+  exact Int.le_add_of_nonneg_right (hb i)
+
+theorem pointwise_le_add_of_nonnegative_left {n : Nat} (a b : Tensor n)
+    (ha : Nonnegative a) : PointwiseLe b (add a b) := by
+  intro i
+  calc
+    b i ≤ b i + a i := Int.le_add_of_nonneg_right (ha i)
+    _ = a i + b i := Int.add_comm _ _
+
 theorem add_pointwise {n : Nat} (a b : Tensor n) (i : Fin n) :
     add a b i = a i + b i := by
   rfl

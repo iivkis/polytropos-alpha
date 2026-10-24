@@ -141,32 +141,92 @@ pub(crate) fn preflight_root(root: &Path, identity: &str) -> Result<(), crate::A
     Ok(())
 }
 
-/// A stable set of relative links names one underlying bundle.
-/// For legacy lab roots, old files are backed up on first migration.
+/// A stable set of relative links names one underlying bundle. Root link
+/// changes cannot be one atomic filesystem operation, but an unsuccessful
+/// first migration must leave no partially installed links or moved files.
 #[cfg(unix)]
-pub(crate) fn publish_root(root: &Path, identity: &str) -> Result<(), crate::AutoBuildError> {
+fn publish_root_transaction(
+    root: &Path,
+    identity: &str,
+    // Test-only fault boundary: inject an error after a fixed number of edits.
+    interrupt_after: Option<usize>,
+) -> Result<(), crate::AutoBuildError> {
     use std::os::unix::fs::symlink;
+
     preflight_root(root, identity)?;
     let backup = root.join(".verineural-pre-stage10");
-    for (name, target) in ROOT_LINKS {
-        let path = root.join(name);
-        if let Ok(meta) = std::fs::symlink_metadata(&path) {
-            if meta.file_type().is_symlink() {
-                continue;
+    // (root name, whether an original regular file was moved, whether our
+    // symlink was installed). Only ever undo our own changes.
+    let mut updated: Vec<(&str, bool, bool)> = Vec::new();
+    let outcome = (|| -> Result<(), crate::AutoBuildError> {
+        for (name, target) in ROOT_LINKS {
+            let path = root.join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => continue,
+                Ok(meta) if meta.is_file() => {
+                    if interrupt_after == Some(updated.len()) {
+                        return Err(crate::AutoBuildError::Integrity(
+                            "interrupted root artifact migration".into(),
+                        ));
+                    }
+                    std::fs::create_dir_all(&backup)?;
+                    std::fs::rename(&path, backup.join(name))?;
+                    updated.push((name, true, false));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if interrupt_after == Some(updated.len()) {
+                        return Err(crate::AutoBuildError::Integrity(
+                            "interrupted root artifact migration".into(),
+                        ));
+                    }
+                    updated.push((name, false, false));
+                }
+                Ok(_) => {
+                    return Err(crate::AutoBuildError::Integrity(format!(
+                        "root artifact changed during publication: {}",
+                        path.display()
+                    )));
+                }
+                Err(error) => return Err(error.into()),
             }
-            std::fs::create_dir_all(&backup)?;
-            let destination = backup.join(name);
-            if destination.exists() {
-                return Err(crate::AutoBuildError::Integrity(format!(
-                    "cannot back up existing artifact: {}",
-                    destination.display()
-                )));
+            symlink(target, &path)?;
+            if let Some(last) = updated.last_mut() {
+                last.2 = true;
             }
-            std::fs::rename(&path, destination)?;
         }
-        symlink(target, path)?;
+        Ok(())
+    })();
+
+    if let Err(error) = outcome {
+        let mut rollback_error = None;
+        for (name, old_file, installed) in updated.into_iter().rev() {
+            let path = root.join(name);
+            if installed {
+                if let Err(err) = std::fs::remove_file(&path) {
+                    rollback_error.get_or_insert(err);
+                    continue;
+                }
+            }
+            if old_file {
+                if let Err(err) = std::fs::rename(backup.join(name), &path) {
+                    rollback_error.get_or_insert(err);
+                }
+            }
+        }
+        return if let Some(rollback_error) = rollback_error {
+            Err(crate::AutoBuildError::Integrity(format!(
+                "root publication failed ({error}); rollback also failed ({rollback_error})"
+            )))
+        } else {
+            Err(error)
+        };
     }
     Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn publish_root(root: &Path, identity: &str) -> Result<(), crate::AutoBuildError> {
+    publish_root_transaction(root, identity, None)
 }
 
 #[cfg(not(unix))]
@@ -316,6 +376,39 @@ mod root_tests {
             std::fs::read_to_string(root.join("architecture.png")).unwrap(),
             "original png"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_legacy_migration_restores_every_original_file() {
+        let root = test_root("rollback-legacy");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("architecture.identity"), "id=lab\nversion=1\n").unwrap();
+        std::fs::write(root.join("architecture.dot"), "old dot").unwrap();
+        std::fs::write(root.join("architecture.png"), "old png").unwrap();
+        let identity = "verineural-certified-model-v1\nid=lab\nversion=1\n";
+        assert!(publish_root_transaction(&root, identity, Some(2)).is_err());
+        assert_eq!(std::fs::read_to_string(root.join("architecture.dot")).unwrap(), "old dot");
+        assert_eq!(std::fs::read_to_string(root.join("architecture.png")).unwrap(), "old png");
+        assert!(!root.join("semantic.ir").exists());
+        assert!(!root.join(".verineural-pre-stage10/architecture.dot").exists());
+        publish_root(&root, identity).unwrap();
+        verify_root(&root, identity).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_fresh_publication_clears_all_new_links() {
+        let root = test_root("rollback-fresh");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let identity = "verineural-certified-model-v1\nid=lab\nversion=1\n";
+        assert!(publish_root_transaction(&root, identity, Some(3)).is_err());
+        for (name, _) in ROOT_LINKS {
+            assert!(std::fs::symlink_metadata(root.join(name)).is_err());
+        }
+        publish_root(&root, identity).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -344,6 +344,29 @@ tasks:
     cmds:
       - cargo test -p verineural-consumer-acceptance --all-targets -- --ignored
 
+  verify-stage10-proof-boundary:
+    desc: Stage 10 publication rollback, Lean relational composition, and GPU translation/memory fail-closed checks
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --lib interrupted_legacy_migration
+      - cargo test -p verineural --lib interrupted_fresh_publication
+      - cargo test -p verineural --test relational_predicates
+      - cargo test -p verineural --test relational_predicates -- --ignored
+      - task verify-gpu-capabilities
+      - task verify-certified-stage10
+
+  verify-all-acceptance:
+    desc: Developer-run combined Stage 1-4 regression, Lean, certified bundle and NVIDIA rotating acceptance
+    cmds:
+      - task check
+      - task test
+      - task clippy
+      - task verify-api-acceptance
+      - task verify-stage10-proof-boundary
+      - task gpu-state-replay
+      - task verify-lab-rotating-gpu
+      - task lab-rotating
+
   verify-api-acceptance:
     desc: Developer-run P0/P1/P2 API contracts, real Lean checks, and independent consumer cases
     cmds:
