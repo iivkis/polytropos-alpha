@@ -1,10 +1,1 @@
-architecture=xor-mlp
-version=0.1.0
-semantic_ir_sha256=c0d5c1e2aab3e2fe62a5aaa0f1168ebb9b6c9a81163c9077d6f15a5649a2b9fe
-global_property=architecture_global_nonnegative
-lean=ideal-Int-nonnegative-kernel-checked
-xor_truth_table=4-of-4-bitwise-gpu-tested
-fp32=concrete-small-integers-only
-translation=llvm-ptx-structurally-validated
-cuda_jit_sass=trusted-not-proven
-training=not-performed-fixed-parameters
+auto-build/report.txt
