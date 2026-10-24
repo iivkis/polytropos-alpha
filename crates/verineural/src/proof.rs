@@ -1977,7 +1977,20 @@ impl LeanProofEngine {
             next_state.index()
         ));
         program.source.push_str(&format!(
-            "theorem {theorem}\n                 (initial : VeriNeural.Tensor {state_count})\n                 (inputAt : Nat → VeriNeural.Tensor {input_count})\n                 (h_initial : VeriNeural.Nonnegative initial)\n                 (h_input : ∀ t, VeriNeural.Nonnegative (inputAt t)) :\n                 ∀ t, VeriNeural.Nonnegative ({definition} initial inputAt t) := by\n               intro t\n               induction t with\n               | zero =>\n      simpa [{definition}] using h_initial\n               | succ t ih =>\n      simp only [{definition}]\n                   exact {claim_name} {successor_args} {hypothesis_args}\n\n{end}"
+            "theorem {theorem}\n\
+             (initial : VeriNeural.Tensor {state_count})\n\
+             (inputAt : Nat → VeriNeural.Tensor {input_count})\n\
+             (h_initial : VeriNeural.Nonnegative initial)\n\
+             (h_input : ∀ t, VeriNeural.Nonnegative (inputAt t)) :\n\
+             ∀ t, VeriNeural.Nonnegative ({definition} initial inputAt t) := by\n\
+  intro t\n\
+  induction t with\n\
+  | zero =>\n\
+      simpa [{definition}] using h_initial\n\
+  | succ t ih =>\n\
+      simp only [{definition}]\n\
+      exact {claim_name} {successor_args} {hypothesis_args}\n\n\
+{end}"
         ));
         program.theorems.push(theorem);
         Ok(program)

@@ -87,6 +87,11 @@ fn induction_reuses_one_transition_claim_without_fixed_unroll() {
             .contains(&format!("multi_{module_index}_port_0_claim_0"))
     );
     assert!(program.source().contains("h_input : ∀ t"));
+    assert!(
+        program
+            .source()
+            .contains("  | succ t ih =>\n      simp only [scan_accumulator_state]\n      exact ")
+    );
     assert!(!program.source().contains("no arbitrary-horizon induction"));
     assert!(
         program
