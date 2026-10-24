@@ -115,9 +115,7 @@ fn one_definition_theorem_is_reused_by_two_concrete_instances() {
     assert!(shared.contains("p_0"));
     assert!(shared.contains("p_1"));
     assert!(shared.contains("VeriNeural.relu (VeriNeural.add (p_0) (p_1))"));
-    assert!(shared.contains(
-        "VeriNeural.relu_nonnegative (VeriNeural.add (p_0) (p_1))"
-    ));
+    assert!(shared.contains("VeriNeural.relu_nonnegative (VeriNeural.add (p_0) (p_1))"));
     assert!(!shared.contains("node_"));
     // The output ReLU is nonnegative unconditionally, but the reusable
     // interface still retains both declared NonNegativeFinite requires.

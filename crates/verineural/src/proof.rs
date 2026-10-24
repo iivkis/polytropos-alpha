@@ -2375,11 +2375,7 @@ fn normalized_module_nonnegative_proof(
                 ),
                 _ => unreachable!(),
             };
-            format!(
-                "{lemma} ({}) ({}) ({hl}) ({hr})",
-                term(left)?,
-                term(right)?
-            )
+            format!("{lemma} ({}) ({}) ({hl}) ({hr})", term(left)?, term(right)?)
         }
         Operation::Relu => {
             format!("VeriNeural.relu_nonnegative ({})", term(node.inputs[0])?)
