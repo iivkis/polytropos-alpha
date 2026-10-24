@@ -183,7 +183,8 @@ impl From<std::io::Error> for GpuError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpuMemoryContract {
     pub kernel_node: usize,
-    /// (source graph node, required readable FP32 elements).
+    /// (source graph node, required readable 32-bit logical elements).
+    /// F32 and Index are both 32-bit in the currently supported GPU profile.
     pub reads: Vec<(usize, usize)>,
     /// Output is written once per active lane, at [0, writes).
     pub writes: usize,
@@ -206,9 +207,11 @@ pub enum GpuMemoryPattern {
         columns: usize,
     },
     ReverseRows2D {
+        rows: usize,
         columns: usize,
     },
     ReverseColumns2D {
+        rows: usize,
         columns: usize,
     },
     ConcatAxis0 {
@@ -219,6 +222,7 @@ pub enum GpuMemoryPattern {
     },
     TakeAxis0 {
         lane: usize,
+        choices: usize,
     },
 }
 
@@ -444,9 +448,11 @@ impl GpuProgram {
                             }
                             match axis {
                                 0 => GpuMemoryPattern::ReverseRows2D {
+                                    rows: input.shape.dims()[0],
                                     columns: input.shape.dims()[1],
                                 },
                                 1 => GpuMemoryPattern::ReverseColumns2D {
+                                    rows: input.shape.dims()[0],
                                     columns: input.shape.dims()[1],
                                 },
                                 _ => {
@@ -478,7 +484,13 @@ impl GpuProgram {
                                 width: input.shape.dims()[1],
                             }
                         }
-                        Operation::Take { axis: 0 } => GpuMemoryPattern::TakeAxis0 { lane: writes },
+                        Operation::Take { axis: 0 } => {
+                            let data = &self.graph.nodes()[op_node.inputs[0].index()];
+                            GpuMemoryPattern::TakeAxis0 {
+                                lane: writes,
+                                choices: data.shape.dims()[0],
+                            }
+                        },
                         _ => GpuMemoryPattern::Pointwise,
                     };
                     (
@@ -523,9 +535,12 @@ impl GpuProgram {
                     }
                     vec![writes]
                 }
-                GpuMemoryPattern::ReverseRows2D { columns }
-                | GpuMemoryPattern::ReverseColumns2D { columns } => {
-                    if columns == 0 || writes % columns != 0 {
+                GpuMemoryPattern::ReverseRows2D { rows, columns }
+                | GpuMemoryPattern::ReverseColumns2D { rows, columns } => {
+                    if rows == 0
+                        || columns == 0
+                        || rows.checked_mul(columns) != Some(writes)
+                    {
                         return Err(GpuError::InvalidInput {
                             node: index,
                             reason: "reverse2d output extent mismatch",
@@ -551,8 +566,17 @@ impl GpuProgram {
                         .checked_mul(width)
                         .ok_or(GpuError::UnsupportedSize { elements: writes })?,
                 ],
-                GpuMemoryPattern::TakeAxis0 { .. } => {
+                GpuMemoryPattern::TakeAxis0 { lane, choices } => {
                     let data = &self.graph.nodes()[read_nodes[0]];
+                    if lane != writes
+                        || choices == 0
+                        || choices.checked_mul(lane) != Some(data.shape.element_count())
+                    {
+                        return Err(GpuError::InvalidInput {
+                            node: index,
+                            reason: "take_axis0 source extent mismatch",
+                        });
+                    }
                     vec![data.shape.element_count(), 1]
                 }
             };
@@ -687,8 +711,8 @@ impl GpuProgram {
                         }
                     },
                     Operation::ReverseAxis { axis: 0 } => match contract.pattern {
-                        GpuMemoryPattern::ReverseRows2D { columns } => {
-                            TranslationKind::ReverseRows2D { columns }
+                        GpuMemoryPattern::ReverseRows2D { rows, columns } => {
+                            TranslationKind::ReverseRows2D { rows, columns }
                         }
                         _ => {
                             return Err(GpuError::Fp32PtxRejected {
@@ -697,8 +721,8 @@ impl GpuProgram {
                         }
                     },
                     Operation::ReverseAxis { axis: 1 } => match contract.pattern {
-                        GpuMemoryPattern::ReverseColumns2D { columns } => {
-                            TranslationKind::ReverseColumns2D { columns }
+                        GpuMemoryPattern::ReverseColumns2D { rows, columns } => {
+                            TranslationKind::ReverseColumns2D { rows, columns }
                         }
                         _ => {
                             return Err(GpuError::Fp32PtxRejected {
@@ -723,7 +747,7 @@ impl GpuProgram {
                         }
                     },
                     Operation::Take { axis: 0 } => match contract.pattern {
-                        GpuMemoryPattern::TakeAxis0 { lane } => TranslationKind::TakeAxis0 { lane },
+                        GpuMemoryPattern::TakeAxis0 { lane, .. } => TranslationKind::TakeAxis0 { lane },
                         _ => {
                             return Err(GpuError::Fp32PtxRejected {
                                 reason: "Take(0) lacks memory contract".into(),
@@ -787,16 +811,37 @@ impl GpuProgram {
                         "example (index j : Nat) (active : index < {rows} * {columns}) (reduction : j < {inner}) :\n    (index / {columns}) * {inner} + j < {rows} * {inner} ∧\n    j * {columns} + index % {columns} < {inner} * {columns} :=\n  matmul_address_bounds (by decide) active reduction\n"
                     ));
                 }
-                GpuMemoryPattern::Transpose2D { .. }
-                | GpuMemoryPattern::ReverseRows2D { .. }
-                | GpuMemoryPattern::ReverseColumns2D { .. }
-                | GpuMemoryPattern::ConcatAxis0 { .. }
-                | GpuMemoryPattern::ArgMaxLast { .. }
-                | GpuMemoryPattern::TakeAxis0 { .. } => {
-                    return Err(GpuError::UnsupportedOperation {
-                        node: contract.kernel_node,
-                        operation: self.graph.nodes()[contract.kernel_node].operation.name(),
-                    });
+                GpuMemoryPattern::Transpose2D { rows, columns } => {
+                    source.push_str(&format!(
+                        "example (index : Nat) (active : index < {rows} * {columns}) :\n    (index % {rows}) * {columns} + index / {rows} < {rows} * {columns} :=\n  transpose2d_address_bound (by decide) active\n"
+                    ));
+                }
+                GpuMemoryPattern::ReverseRows2D { rows, columns } => {
+                    source.push_str(&format!(
+                        "example (index : Nat) (active : index < {rows} * {columns}) :\n    ({rows} - 1 - index / {columns}) * {columns} + index % {columns} < {rows} * {columns} :=\n  reverse_rows2d_address_bound (by decide) (by decide) active\n"
+                    ));
+                }
+                GpuMemoryPattern::ReverseColumns2D { rows, columns } => {
+                    source.push_str(&format!(
+                        "example (index : Nat) (active : index < {rows} * {columns}) :\n    (index / {columns}) * {columns} + ({columns} - 1 - index % {columns}) < {rows} * {columns} :=\n  reverse_columns2d_address_bound (by decide) active\n"
+                    ));
+                }
+                GpuMemoryPattern::ConcatAxis0 { left } => {
+                    let right = contract.reads[1].1;
+                    source.push_str(&format!(
+                        "example (index : Nat) (active : index < {left}) : index < {left} :=\n  pointwise_address_bound active\n\nexample (index : Nat) (branch : {left} ≤ index) (active : index < {left} + {right}) : index - {left} < {right} :=\n  concat_axis0_right_address_bound branch active\n"
+                    ));
+                }
+                GpuMemoryPattern::ArgMaxLast { width } => {
+                    let rows = contract.writes;
+                    source.push_str(&format!(
+                        "example (index : Nat) (active : index < {rows}) : index * {width} < {rows} * {width} :=\n  argmax_first_address_bound (by decide) active\n\nexample (index lane : Nat) (active : index < {rows}) (candidate : lane < {width}) : index * {width} + lane < {rows} * {width} :=\n  argmax_candidate_address_bound active candidate\n"
+                    ));
+                }
+                GpuMemoryPattern::TakeAxis0 { lane, choices } => {
+                    source.push_str(&format!(
+                        "example : 0 < 1 := by decide\n\nexample (selected index : Nat) (selectedBound : selected < {choices}) (active : index < {lane}) : selected * {lane} + index < {choices} * {lane} :=\n  take_axis0_address_bound selectedBound active\n"
+                    ));
                 }
             }
         }

@@ -3,8 +3,8 @@
 //! integer structure. GPU lowering supports the deliberately narrow routing
 //! profile exercised by rotating-matrices and fails closed outside it.
 use verineural::{
-    ArgMaxTieBreak, DType, Domain, GpuEngine, GpuError, LeanProofEngine, NeuralError, NeuralGraph,
-    Operation, ProofError, Shape, Tensor,
+    ArgMaxTieBreak, DType, Domain, GpuEngine, LeanProofEngine, NeuralError, NeuralGraph, Operation,
+    ProofError, Shape, Tensor,
 };
 
 #[test]
@@ -154,10 +154,28 @@ fn rotating_bank_slice_is_canonical_has_lean_structure_and_gpu_lowering() {
     assert!(plan.contains("concat_axis0"));
     assert!(plan.contains("argmax_last"));
     assert!(plan.contains("take_axis0"));
-    assert!(matches!(
-        program.memory_lean_source(),
-        Err(GpuError::UnsupportedOperation { .. })
-    ));
+    let memory = program.memory_lean_source().unwrap();
+    assert!(memory.contains("transpose2d_address_bound"));
+    assert!(memory.contains("reverse_columns2d_address_bound"));
+    assert!(memory.contains("concat_axis0_right_address_bound"));
+    assert!(memory.contains("argmax_candidate_address_bound"));
+    assert!(memory.contains("take_axis0_address_bound"));
+    assert!(!memory.contains("sorry"));
+
+    let mut reverse_rows_graph = NeuralGraph::default();
+    let matrix = reverse_rows_graph.input(
+        Shape::new(vec![2, 3]).unwrap(),
+        Domain::NonNegativeFinite,
+    );
+    let reversed = reverse_rows_graph.reverse_axis(matrix, 0).unwrap();
+    let reverse_rows = GpuEngine::default()
+        .compile(&reverse_rows_graph, reversed)
+        .unwrap();
+    let reverse_plan = reverse_rows.translation_plan().unwrap().to_text();
+    assert!(reverse_plan.contains("reverse_rows2d\t6\t0:6\t3\t2"));
+    let reverse_memory = reverse_rows.memory_lean_source().unwrap();
+    assert!(reverse_memory.contains("reverse_rows2d_address_bound"));
+    assert!(reverse_memory.contains("(2 - 1 - index / 3) * 3 + index % 3 < 2 * 3"));
 }
 
 #[test]

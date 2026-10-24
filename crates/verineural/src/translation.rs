@@ -16,8 +16,8 @@ pub enum TranslationKind {
     BiasAdd { columns: usize },
     MatMul { inner: usize, columns: usize },
     Transpose2D { rows: usize, columns: usize },
-    ReverseRows2D { columns: usize },
-    ReverseColumns2D { columns: usize },
+    ReverseRows2D { rows: usize, columns: usize },
+    ReverseColumns2D { rows: usize, columns: usize },
     ConcatAxis0 { left: usize },
     ArgMaxLast { width: usize },
     TakeAxis0 { lane: usize },
@@ -90,8 +90,8 @@ impl TranslationKind {
             | Self::MulBiasRelu { columns }
             | Self::MatMul { columns, .. }
             | Self::Transpose2D { columns, .. }
-            | Self::ReverseRows2D { columns }
-            | Self::ReverseColumns2D { columns } => columns,
+            | Self::ReverseRows2D { columns, .. }
+            | Self::ReverseColumns2D { columns, .. } => columns,
             _ => 0,
         }
     }
@@ -99,7 +99,9 @@ impl TranslationKind {
     fn inner(self) -> usize {
         match self {
             Self::MatMul { inner, .. } => inner,
-            Self::Transpose2D { rows, .. } => rows,
+            Self::Transpose2D { rows, .. }
+            | Self::ReverseRows2D { rows, .. }
+            | Self::ReverseColumns2D { rows, .. } => rows,
             Self::ConcatAxis0 { left } => left,
             Self::ArgMaxLast { width } => width,
             Self::TakeAxis0 { lane } => lane,
@@ -114,8 +116,14 @@ impl TranslationKind {
             "bias_add" => Self::BiasAdd { columns },
             "matmul" => Self::MatMul { inner, columns },
             "transpose2d" => Self::Transpose2D { rows: inner, columns },
-            "reverse_rows2d" => Self::ReverseRows2D { columns },
-            "reverse_columns2d" => Self::ReverseColumns2D { columns },
+            "reverse_rows2d" => Self::ReverseRows2D {
+                rows: inner,
+                columns,
+            },
+            "reverse_columns2d" => Self::ReverseColumns2D {
+                rows: inner,
+                columns,
+            },
             "concat_axis0" => Self::ConcatAxis0 { left: inner },
             "argmax_last" => Self::ArgMaxLast { width: inner },
             "take_axis0" => Self::TakeAxis0 { lane: inner },
@@ -258,10 +266,11 @@ impl TranslationPlan {
                         return Err(invalid("transpose2d source shape mismatch"));
                     }
                 }
-                TranslationKind::ReverseRows2D { columns }
-                | TranslationKind::ReverseColumns2D { columns } => {
-                    if columns == 0
-                        || kernel.writes % columns != 0
+                TranslationKind::ReverseRows2D { rows, columns }
+                | TranslationKind::ReverseColumns2D { rows, columns } => {
+                    if rows == 0
+                        || columns == 0
+                        || rows.saturating_mul(columns) != kernel.writes
                         || kernel.reads[0].1 != kernel.writes
                     {
                         return Err(invalid("reverse2d source shape mismatch"));
@@ -484,16 +493,18 @@ impl TranslationPlan {
                     "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
                     "store float %x, ptr addrspace(1) %op, align 4".into(),
                 ]),
-                TranslationKind::ReverseRows2D { columns } => Some(vec![
+                TranslationKind::ReverseRows2D { rows, columns } => Some(vec![
                     format!("udiv i32 %idx, {columns}"),
                     format!("urem i32 %idx, {columns}"),
+                    format!("%rows_minus_one = add i32 0, {}", rows - 1),
                     "%reversed_row = sub i32 %rows_minus_one, %row".into(),
                     "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
                     "store float %x, ptr addrspace(1) %op, align 4".into(),
                 ]),
-                TranslationKind::ReverseColumns2D { columns } => Some(vec![
+                TranslationKind::ReverseColumns2D { columns, .. } => Some(vec![
                     format!("udiv i32 %idx, {columns}"),
                     format!("urem i32 %idx, {columns}"),
+                    format!("%columns_minus_one = add i32 0, {}", columns - 1),
                     "%reversed_col = sub i32 %columns_minus_one, %col".into(),
                     "%ap = getelementptr float, ptr addrspace(1) %a, i32 %source_idx".into(),
                     "store float %x, ptr addrspace(1) %op, align 4".into(),
@@ -764,6 +775,23 @@ mod tests {
             }],
         };
         assert_eq!(TranslationPlan::from_text(&plan.to_text()).unwrap(), plan);
+
+        let reverse = TranslationPlan {
+            threads_per_block: 128,
+            kernels: vec![TranslationKernel {
+                node: 1,
+                kind: TranslationKind::ReverseRows2D {
+                    rows: 2,
+                    columns: 3,
+                },
+                reads: vec![(0, 6)],
+                writes: 6,
+            }],
+        };
+        let reverse_text = reverse.to_text();
+        assert!(reverse_text.contains("reverse_rows2d\t6\t0:6\t3\t2"));
+        assert_eq!(TranslationPlan::from_text(&reverse_text).unwrap(), reverse);
+
         for invalid_text in [
             plan.to_text()
                 .replace("vn-translation-plan-v1", "vn-translation-plan-v0"),
