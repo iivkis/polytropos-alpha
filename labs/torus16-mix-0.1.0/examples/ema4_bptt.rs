@@ -107,7 +107,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     )
-    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp().with_pointwise_fusion());
+    .with_launch_config(
+        GpuLaunchConfig::default()
+            .with_approximate_exp()
+            .with_pointwise_fusion(),
+    );
     // Before/after reports count actual CUDA Graph kernel nodes, not the
     // number of semantic IR nodes. Baseline is compiled but NOT executed.
     let old_kernels = {
@@ -126,10 +130,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if new_kernels > old_kernels {
         return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
     }
-    println!("cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} reduction_percent={:.2}",
-        old_kernels, new_kernels, old_kernels - new_kernels,
+    println!(
+        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} reduction_percent={:.2}",
+        old_kernels,
+        new_kernels,
+        old_kernels - new_kernels,
         program.fused_mul_adds().len(),
-        100. * (old_kernels - new_kernels) as f64 / old_kernels as f64);
+        100. * (old_kernels - new_kernels) as f64 / old_kernels as f64
+    );
 
     let all = weights.bindings(0)?;
     let base = all
@@ -159,8 +167,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // HtoD copies, host CE, AdamW and holdout scoring are excluded.
     if std::env::var_os("TORUS16_BENCH_FUSED").is_some() {
         let event = gpu.benchmark(3, 10)?;
-        println!("fused_cuda_graph_event_average_ms={:.5} measured_launches=10",
-            event.average().as_secs_f64() * 1000.);
+        println!(
+            "fused_cuda_graph_event_average_ms={:.5} measured_launches=10",
+            event.average().as_secs_f64() * 1000.
+        );
     }
     let mut params = trainable_initial;
     let mut optimizer = AdamW::new(0.002, 0.01)?;

@@ -617,8 +617,11 @@ impl GpuProgram {
                 if let Some(&(mul, slot)) = self.fused_mul_adds.get(&index) {
                     let producer = &self.graph.nodes()[mul];
                     (
-                        vec![producer.inputs[0].index(), producer.inputs[1].index(),
-                             node.inputs[1 - slot].index()],
+                        vec![
+                            producer.inputs[0].index(),
+                            producer.inputs[1].index(),
+                            node.inputs[1 - slot].index(),
+                        ],
                         GpuMemoryPattern::Pointwise,
                     )
                 } else if let Some(chain) = self.fused_pointwise_chains.get(&index) {
@@ -921,7 +924,9 @@ impl GpuProgram {
         for contract in self.memory_contracts()? {
             let node = &self.graph.nodes()[contract.kernel_node];
             let kind = if let Some(&(_, slot)) = self.fused_mul_adds.get(&contract.kernel_node) {
-                TranslationKind::MulAdd { multiply_on_right: slot == 1 }
+                TranslationKind::MulAdd {
+                    multiply_on_right: slot == 1,
+                }
             } else if let Some(chain) = self.fused_pointwise_chains.get(&contract.kernel_node) {
                 let inner = &self.graph.nodes()[chain[0]].operation;
                 let columns = match contract.pattern {
@@ -1246,10 +1251,11 @@ impl GpuProgram {
                 && matches!(producer.operation, Operation::Mul)
                 && root_node.inputs[slot].index() == mul
                 && root_node.shape == producer.shape
-                && producer.inputs.iter().all(|&id| {
-                    self.graph.nodes()[id.index()].shape == root_node.shape
-                })
-                && self.graph.nodes()[root_node.inputs[1-slot].index()].shape == root_node.shape
+                && producer
+                    .inputs
+                    .iter()
+                    .all(|&id| self.graph.nodes()[id.index()].shape == root_node.shape)
+                && self.graph.nodes()[root_node.inputs[1 - slot].index()].shape == root_node.shape
                 && !covered_removed.contains(&mul)
                 && !self.fused_relus.contains_key(&root)
                 && !self.fused_pointwise_chains.contains_key(&root);
@@ -2070,10 +2076,11 @@ impl GpuEngine {
                         || uses[producer.id.index()] != 1
                         || skipped.contains(&producer.id.index())
                         || producer.shape != node.shape
-                        || graph.node(node.inputs[1-slot])?.shape != node.shape
-                        || producer.inputs.iter().any(|&id| {
-                            graph.nodes()[id.index()].shape != node.shape
-                        })
+                        || graph.node(node.inputs[1 - slot])?.shape != node.shape
+                        || producer
+                            .inputs
+                            .iter()
+                            .any(|&id| graph.nodes()[id.index()].shape != node.shape)
                     {
                         continue;
                     }

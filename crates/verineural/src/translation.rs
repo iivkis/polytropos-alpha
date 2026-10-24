@@ -21,7 +21,9 @@ pub enum TranslationKind {
     Mul,
     /// Experimental two-instruction Mul -> Add, never contracted to FMA.
     /// Retains the original Add operand order.
-    MulAdd { multiply_on_right: bool },
+    MulAdd {
+        multiply_on_right: bool,
+    },
     /// IEEE binary32 subtraction with explicit round-to-nearest-even.
     Sub,
     /// IEEE binary32 division, round-to-nearest-even.
@@ -179,7 +181,9 @@ impl TranslationKind {
         let kind = match name {
             "add" => Self::Add,
             "mul" => Self::Mul,
-            "mul_add" => Self::MulAdd { multiply_on_right: inner == 1 },
+            "mul_add" => Self::MulAdd {
+                multiply_on_right: inner == 1,
+            },
             "sub_rn" => Self::Sub,
             "div_rn" => Self::DivRne,
             "exp_approx" => Self::ExpApprox,
@@ -322,7 +326,7 @@ impl TranslationPlan {
                 }
             }
             if let TranslationKind::MulAdd { .. } = kernel.kind {
-                if kernel.reads.iter().any(|&(_,size)| size != kernel.writes) {
+                if kernel.reads.iter().any(|&(_, size)| size != kernel.writes) {
                     return Err(invalid("mul-add source shape mismatch"));
                 }
             }
@@ -685,7 +689,9 @@ impl TranslationPlan {
                     "icmp ult i32 %idx, %length",
                     "store float %value, ptr addrspace(1) %op, align 4",
                 ];
-                let add = format!("%value = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"{operands}");
+                let add = format!(
+                    "%value = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"{operands}"
+                );
                 let mul_pos = ir.find(required[6]);
                 let add_pos = ir.find(&add);
                 if required.iter().any(|&value| !ir.contains(value))
@@ -694,10 +700,11 @@ impl TranslationPlan {
                     || ir.matches("fcmp ").count() != 0
                     || !ir.contains("br i1 %valid, label %compute, label %done")
                 {
-                    return Err(invalid(format!("mul-add FP32 template mismatch at node {node}")));
+                    return Err(invalid(format!(
+                        "mul-add FP32 template mismatch at node {node}"
+                    )));
                 }
-                audit_fp32_ptx(ir, asm)
-                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                audit_fp32_ptx(ir, asm).map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
                 report.rounded_adds += 1;
                 report.rounded_muls += 1;
                 report.details.push_str(&format!(
