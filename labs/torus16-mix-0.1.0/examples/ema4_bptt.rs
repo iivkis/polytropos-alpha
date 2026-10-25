@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 use torus16_mix_lab::corpus::CharCorpus;
-use torus16_mix_lab::ema4::{Ema4Weights, architecture_model};
+use torus16_mix_lab::ema4::{Ema4Weights, MatrixMode, architecture_model_for};
 use torus16_mix_lab::ema4_checkpoint::{Ema4Checkpoint, fingerprint};
 use verineural::{
     AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, NodeId, Shape, Tensor,
@@ -71,12 +71,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
     let corpus = CharCorpus::read(&corpus_path)?;
     let window_len = option_usize("TORUS16_BPTT", 2, 2, 8)?;
-    let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 4096)?;
+    let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 131072)?;
     let val_limit = option_usize("TORUS16_VAL_LIMIT", 64, 2, 100000)?;
+    let mode_name = std::env::var("TORUS16_MATRIX_MODE")
+        .unwrap_or_else(|_| "torus_shared".into());
+    let matrix_mode = MatrixMode::parse(&mode_name)
+        .ok_or("TORUS16_MATRIX_MODE must be independent or torus_shared")?;
     let checkpoint_every = option_usize("TORUS16_CHECKPOINT_EVERY", 128, 1, 4096)?;
     let checkpoint_path = std::env::var_os("TORUS16_CHECKPOINT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/torus16-ema4-bptt.ckpt"));
+        .unwrap_or_else(|| {
+            if matrix_mode == MatrixMode::TorusShared {
+                PathBuf::from("target/torus16-ema4-bptt.ckpt")
+            } else {
+                PathBuf::from("target/torus16-ema4-independent-bptt.ckpt")
+            }
+        });
     let fresh = std::env::var_os("TORUS16_FRESH").is_some();
     let corpus_hash = fingerprint(&fs::read(&corpus_path)?);
     if train_windows
@@ -89,9 +99,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let compile_clock = Instant::now();
     let vocab = corpus.alphabet.len();
     let weights = Ema4Weights::deterministic(vocab)?;
-    let model = architecture_model(vocab)?;
-    let trainable_initial = weights.trainable_parameters()?;
+    let model = architecture_model_for(vocab, matrix_mode)?;
+    let trainable_initial = weights.trainable_parameters_for(matrix_mode)?;
     let parameter_count: usize = trainable_initial.values().map(|v| v.values().len()).sum();
+    println!(
+        "experiment_matrix_mode={} projection_matrices={} matrix_values={} trainable_values={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={}",
+        matrix_mode.as_str(),
+        matrix_mode.matrix_count(),
+        matrix_mode.matrix_count() * torus16_mix_lab::WIDTH * torus16_mix_lab::WIDTH,
+        parameter_count,
+        corpus_hash,
+        window_len,
+        train_windows,
+        val_limit
+    );
     let window = unroll_model(&model, "logits", window_len)?;
     let named_parameter = window.parameters();
     let names = trainable_initial.keys().cloned().collect::<Vec<_>>();
@@ -166,7 +187,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("missing terminal state for {name}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let all = weights.bindings(0)?;
+    let all = weights.bindings_for(0, matrix_mode)?;
     let expected_states = window
         .initial_states()
         .keys()
@@ -452,6 +473,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         gpu_optimizer.is_some() && std::env::var_os("TORUS16_GPU_FEEDBACK_EVENTS").is_some();
     let mut feedback_checked_values = 0usize;
     let mut feedback_copied_values = 0usize;
+    // Training-only learning curve over fixed consecutive windows. The
+    // held-out BPC below is the generalization metric, not this moving mean.
+    let mut curve_bpc_sum = 0.0f64;
+    let mut curve_windows = 0usize;
     for iteration in first_window..train_windows {
         let step_start = Instant::now();
         let start = iteration * window_len;
@@ -623,6 +648,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             step_start.elapsed().as_secs_f64() * 1000.
         );
+        curve_bpc_sum += f64::from(total / (window_len as f32 * std::f32::consts::LN_2));
+        curve_windows += 1;
+        if curve_windows == 1024 || iteration + 1 == train_windows {
+            println!(
+                "train_curve_window={} train_bpc_mean={:.6} window_count={} matrix_mode={}",
+                iteration + 1,
+                curve_bpc_sum / curve_windows as f64,
+                curve_windows,
+                matrix_mode.as_str(),
+            );
+            curve_bpc_sum = 0.0;
+            curve_windows = 0;
+        }
         if iteration < 3 || (iteration + 1) % 128 == 0 {
             println!(
                 "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} graph_replay_ms={graph_replay_ms:.3} logits_gradients_d2h_ms={read_outputs_ms:.3} ce_ms={ce_ms:.3} host_adamw_ms={adam_ms:.3} feedback_total_ms={state_feedback_d2d_ms:.3} feedback_validation_d2h_ms={feedback_validation_ms:.3} feedback_snapshot_d2d_ms={feedback_snapshot_ms:.3} feedback_copy_sync_ms={:.3} feedback_plan_host_ms={feedback_plan_ms:.3} feedback_device_event_ms={feedback_device_ms:.3} feedback_events={gpu_feedback_events} checkpoint_state_d2h_ms={checkpoint_state_d2h_ms:.3} parameters_h2d_ms={upload_parameters_ms:.3}",
@@ -666,7 +704,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     // Real holdout: chronological final 10% only. One recurrent inference
     // step per symbol, with state reset to zero at the validation boundary.
-    let mut eval_bindings = weights.bindings(0)?;
+    let mut eval_bindings = weights.bindings_for(0, matrix_mode)?;
     for (name, value) in &mut eval_bindings {
         if let Some(updated) = params.get(name) {
             *value = updated.clone();
@@ -686,7 +724,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let bpc = val_ce / (count as f64 * std::f64::consts::LN_2);
     println!(
-        "holdout_reset_streaming_bpc={bpc:.6} scored_characters={count} validation_split=last_10pct eval_prepare_plus_stream_seconds={:.5}",
+        "holdout_reset_streaming_bpc={bpc:.6} matrix_mode={} scored_characters={count} validation_split=last_10pct eval_prepare_plus_stream_seconds={:.5}",
+        matrix_mode.as_str(),
         validation_start.elapsed().as_secs_f64()
     );
     println!(

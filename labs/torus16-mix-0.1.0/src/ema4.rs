@@ -14,6 +14,40 @@ pub const KERNEL: usize = 9;
 pub const HISTORY: usize = KERNEL - 1;
 pub const RESEARCH_VOCAB: usize = 104;
 
+/// Controlled Torus16-Mix weight tying experiment. Both variants keep the
+/// same role-specific rotations, gates, scales, biases and recurrent LM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatrixMode {
+    /// One independent 48x48 matrix for every role within each of four blocks.
+    Independent,
+    /// One 48x48 matrix shared by all eight roles in each block (Torus16-Mix).
+    TorusShared,
+}
+
+impl MatrixMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Independent => "independent",
+            Self::TorusShared => "torus_shared",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "independent" => Some(Self::Independent),
+            "torus_shared" => Some(Self::TorusShared),
+            _ => None,
+        }
+    }
+
+    pub const fn matrix_count(self) -> usize {
+        match self {
+            Self::Independent => LAYERS * ROLES,
+            Self::TorusShared => LAYERS,
+        }
+    }
+
+
 #[derive(Clone, Debug)]
 pub struct BlockWeights {
     pub operator: Parameters,
@@ -86,11 +120,25 @@ impl Ema4Weights {
             + 2 * WIDTH
     }
 
-    /// Physical trainable tensors only. Excludes one-hot input, fixed numerical
-    /// constants, Conv9 history and EMA memory. Derived from the same named
-    /// binding schema as inference, preserving tied embedding and shared W.
+    /// Matrix count is the only physical parameter-count difference.
+    pub const fn parameter_count_for(vocabulary: usize, mode: MatrixMode) -> usize {
+        Self::parameter_count(vocabulary) - LAYERS * WIDTH * WIDTH
+            + mode.matrix_count() * WIDTH * WIDTH
+    }
+
+    /// Preserve the existing shared-matrix consumer API.
     pub fn trainable_parameters(
         &self,
+    ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
+        self.trainable_parameters_for(MatrixMode::TorusShared)
+    }
+
+    /// Parameters for either ablation. All independent role matrices are
+    /// initialized from the same W as the shared model so that the initial
+    /// forward function is equal, including strict FP32 operation order.
+    pub fn trainable_parameters_for(
+        &self,
+        mode: MatrixMode,
     ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
         let fixed = [
             "ones_column",
@@ -106,7 +154,7 @@ impl Ema4Weights {
             "minus_up",
         ];
         let parameters = self
-            .bindings(0)?
+            .bindings_for(0, mode)?
             .into_iter()
             .filter(|(name, _)| {
                 name != "token"
@@ -116,7 +164,7 @@ impl Ema4Weights {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         let elements: usize = parameters.values().map(|t| t.values().len()).sum();
-        if elements != Self::parameter_count(self.vocabulary) {
+        if elements != Self::parameter_count_for(self.vocabulary, mode) {
             return Err(ModelError::Invalid(format!(
                 "trainable parameter inventory mismatch: {elements}"
             )));
@@ -127,6 +175,14 @@ impl Ema4Weights {
     /// Named weights, fixed numeric constants and the zero initial recurrent
     /// state. This is setup data, not a CPU implementation of the architecture.
     pub fn bindings(&self, token: usize) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
+        self.bindings_for(token, MatrixMode::TorusShared)
+    }
+
+    pub fn bindings_for(
+        &self,
+        token: usize,
+        mode: MatrixMode,
+    ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
         if token >= self.vocabulary || self.embedding.len() != self.vocabulary * WIDTH {
             return Err(ModelError::Invalid(
                 "token outside vocabulary or bad embedding".into(),
@@ -186,12 +242,23 @@ impl Ema4Weights {
             self.final_beta.to_vec(),
         )?;
         for (layer, b) in self.blocks.iter().enumerate() {
-            insert(
-                &mut result,
-                &format!("weight_{layer}"),
-                vec![WIDTH, WIDTH],
-                b.operator.weight.iter().flatten().copied().collect(),
-            )?;
+            for role_weight in 0..(if mode == MatrixMode::Independent {
+                ROLES
+            } else {
+                1
+            }) {
+                let name = if mode == MatrixMode::Independent {
+                    format!("weight_{layer}_{role_weight}")
+                } else {
+                    format!("weight_{layer}")
+                };
+                insert(
+                    &mut result,
+                    &name,
+                    vec![WIDTH, WIDTH],
+                    b.operator.weight.iter().flatten().copied().collect(),
+                )?;
+            }
             for role in 0..ROLES {
                 let p = &b.operator.roles[role];
                 for (label, values) in [
@@ -334,6 +401,8 @@ fn sigmoid(
 }
 
 struct RoleNodes {
+    weight: NodeId,
+    transposed: NodeId,
     row: NodeId,
     col: NodeId,
     bias: NodeId,
@@ -342,8 +411,6 @@ struct RoleNodes {
 }
 
 struct ProjectionPorts {
-    weight: NodeId,
-    transposed: NodeId,
     roles: Vec<RoleNodes>,
     ones_column: NodeId,
     one_scalar: NodeId,
@@ -359,9 +426,9 @@ fn project(
 ) -> Result<NodeId, ModelError> {
     let ports = &p.roles[role];
     let w = if role.is_multiple_of(2) {
-        p.transposed
+        ports.transposed
     } else {
-        p.weight
+        ports.weight
     };
     model.block(
         "torus16_mix_projection",
@@ -461,15 +528,36 @@ fn block_step(
         inv_sqrt,
         minus_scalar,
     }: BlockStepPorts,
+    mode: MatrixMode,
 ) -> Result<NodeId, ModelError> {
-    let weight = model.parameter(
-        format!("weight_{layer}"),
-        vec![WIDTH, WIDTH],
-        Domain::Finite,
-    )?;
-    let transposed = model.graph_mut().permute(weight, &[1, 0])?;
+    let shared_matrix = if mode == MatrixMode::TorusShared {
+        Some(model.parameter(
+            format!("weight_{layer}"),
+            vec![WIDTH, WIDTH],
+            Domain::Finite,
+        )?)
+    } else {
+        None
+    };
+    let shared_transposed = shared_matrix
+        .map(|weight| model.graph_mut().permute(weight, &[1, 0]))
+        .transpose()?;
     let mut roles = Vec::with_capacity(ROLES);
     for role in 0..ROLES {
+        let weight = if let Some(shared) = shared_matrix {
+            shared
+        } else {
+            model.parameter(
+                format!("weight_{layer}_{role}"),
+                vec![WIDTH, WIDTH],
+                Domain::Finite,
+            )?
+        };
+        let transposed = if let Some(tied) = shared_transposed {
+            tied
+        } else {
+            model.graph_mut().permute(weight, &[1, 0])?
+        };
         let row = model.parameter(
             format!("row_{layer}_{role}"),
             vec![1, WIDTH],
@@ -496,6 +584,8 @@ fn block_step(
             Domain::Finite,
         )?;
         roles.push(RoleNodes {
+            weight,
+            transposed,
             row,
             col,
             bias,
@@ -504,8 +594,6 @@ fn block_step(
         });
     }
     let p = ProjectionPorts {
-        weight,
-        transposed,
         roles,
         ones_column: norm.ones,
         one_scalar: norm.one,
@@ -589,10 +677,19 @@ fn block_step(
 
 /// All four blocks, tied embedding/head, Conv9 histories and EMA state.
 pub fn architecture_model(vocabulary: usize) -> Result<Model, ModelError> {
+    architecture_model_for(vocabulary, MatrixMode::TorusShared)
+}
+
+pub fn architecture_model_for(vocabulary: usize, mode: MatrixMode) -> Result<Model, ModelError> {
     if vocabulary == 0 || vocabulary > 4096 {
         return Err(ModelError::Invalid("vocabulary must be 1..=4096".into()));
     }
-    let mut model = ModelBuilder::new("torus16-mix-ema4-lm", "0.2.0");
+    let model_name = if mode == MatrixMode::Independent {
+        "torus16-mix-ema4-lm-independent"
+    } else {
+        "torus16-mix-ema4-lm"
+    };
+    let mut model = ModelBuilder::new(model_name, "0.2.0");
     let token = model.input("token", vec![1, vocabulary], Domain::NonNegativeFinite)?;
     let embedding = model.parameter("embedding", vec![vocabulary, WIDTH], Domain::Finite)?;
     let ones = model.parameter("ones_column", vec![WIDTH, 1], Domain::Finite)?;
@@ -624,7 +721,7 @@ pub fn architecture_model(vocabulary: usize) -> Result<Model, ModelError> {
         minus_scalar,
     };
     for layer in 0..LAYERS {
-        x = block_step(&mut model, x, layer, block_ports)?;
+        x = block_step(&mut model, x, layer, block_ports, mode)?;
     }
     let gamma = model.parameter("final_gamma", vec![1, WIDTH], Domain::Finite)?;
     let beta = model.parameter("final_beta", vec![1, WIDTH], Domain::Finite)?;

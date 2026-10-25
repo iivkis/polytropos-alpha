@@ -1,7 +1,10 @@
 //! EMA4-LM consumer acceptance: architecture shape, explicit state and
 //! numerical autoregressive GPU steps. No PyTorch is involved.
 use torus16_mix_lab::WIDTH;
-use torus16_mix_lab::ema4::{Ema4Weights, HISTORY, LAYERS, RESEARCH_VOCAB, architecture_model};
+use torus16_mix_lab::ema4::{
+    Ema4Weights, HISTORY, LAYERS, MatrixMode, RESEARCH_VOCAB, architecture_model,
+    architecture_model_for,
+};
 use torus16_mix_lab::ema4_reference::{Ema4State, reference_step};
 use verineural::{GpuEngine, GpuLaunchConfig, Model, Tensor, unroll_model};
 
@@ -41,6 +44,123 @@ fn validate_model(model: &Model, vocab: usize) {
                         }
                     ));
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_matrices_only_untie_torus16_role_weights() {
+    assert_eq!(MatrixMode::parse("independent"), Some(MatrixMode::Independent));
+    assert_eq!(MatrixMode::parse("torus_shared"), Some(MatrixMode::TorusShared));
+    assert_eq!(MatrixMode::parse("global_shared"), None);
+    assert_eq!(MatrixMode::Independent.matrix_count(), LAYERS * 8);
+    assert_eq!(MatrixMode::TorusShared.matrix_count(), LAYERS);
+    let weights = Ema4Weights::deterministic(RESEARCH_VOCAB).unwrap();
+    let shared = weights.trainable_parameters_for(MatrixMode::TorusShared).unwrap();
+    let independent = weights.trainable_parameters_for(MatrixMode::Independent).unwrap();
+    assert_eq!(shared.len() + LAYERS * 7, independent.len());
+    assert_eq!(
+        Ema4Weights::parameter_count_for(RESEARCH_VOCAB, MatrixMode::Independent),
+        24_908 + 28 * WIDTH * WIDTH
+    );
+    assert_eq!(shared.values().map(|w| w.values().len()).sum::<usize>(), 24_908);
+    assert_eq!(independent.values().map(|w| w.values().len()).sum::<usize>(), 89_420);
+    // Each independent role starts with exactly the same W as the shared
+    // candidate, including negative/subnormal FP32 bits.
+    for layer in 0..LAYERS {
+        let reference = &shared[&format!("weight_{layer}")];
+        for role in 0..8 {
+            let actual = &independent[&format!("weight_{layer}_{role}")];
+            assert_eq!(reference.shape(), actual.shape());
+            assert!(reference.values().iter().zip(actual.values()).all(|(a,b)| a.to_bits() == b.to_bits()));
+        }
+    }
+    for (name, expected) in &shared {
+        if name.starts_with("weight_") {
+            continue;
+        }
+        let actual = &independent[name];
+        assert_eq!(expected.shape(), actual.shape());
+        assert!(expected.values().iter().zip(actual.values()).all(|(a,b)| a.to_bits() == b.to_bits()), "{name}");
+    }
+    // Both variants use the same public VeriNeural Model API and recurrent
+    // transitions; invalid cross-mode bindings must be rejected.
+    let shared_model = architecture_model_for(RESEARCH_VOCAB, MatrixMode::TorusShared).unwrap();
+    let independent_model = architecture_model_for(RESEARCH_VOCAB, MatrixMode::Independent).unwrap();
+    assert_eq!(shared_model.state_links().len(), independent_model.state_links().len());
+    assert_eq!(shared_model.graph().modules().len(), independent_model.graph().modules().len());
+    assert_eq!(shared_model.graph().modules().len(), 10 * LAYERS);
+    for layer in 0..LAYERS {
+        assert!(shared_model.source(&format!("weight_{layer}")).is_some());
+        assert!(independent_model.source(&format!("weight_{layer}")).is_none());
+        for role in 0..8 {
+            assert!(independent_model.source(&format!("weight_{layer}_{role}")).is_some());
+        }
+    }
+    assert!(shared_model.bind(weights.bindings_for(0, MatrixMode::TorusShared).unwrap()).is_ok());
+    assert!(independent_model.bind(weights.bindings_for(0, MatrixMode::Independent).unwrap()).is_ok());
+    assert!(shared_model.bind(weights.bindings_for(0, MatrixMode::Independent).unwrap()).is_err());
+    assert!(independent_model.bind(weights.bindings_for(0, MatrixMode::TorusShared).unwrap()).is_err());
+}
+
+#[test]
+#[ignore = "requires NVIDIA CUDA Graph and LLVM NVPTX; compares initial independent/shared Torus16-Mix FP32 outputs bitwise"]
+fn torus_matrix_modes_initial_gpu_logits_and_state_match_bits() {
+    let vocabulary = 16;
+    let weights = Ema4Weights::deterministic(vocabulary).unwrap();
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    )
+    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    let root = std::env::temp_dir().join(format!("vn_torus_matrix_ablation_{}", std::process::id()));
+    let tokens = [3, 7, 2];
+    // Deliberately drop the baseline session before compiling independent
+    // weights, because both four-layer CUDA Graphs can be large.
+    let baseline = {
+        let model = architecture_model_for(vocabulary, MatrixMode::TorusShared).unwrap();
+        let mut execution = engine
+            .prepare_model(
+                &model,
+                weights.bindings_for(0, MatrixMode::TorusShared).unwrap(),
+                &root.join("shared"),
+            )
+            .unwrap();
+        let mut observed = Vec::new();
+        for &token in &tokens {
+            execution.set_input("token", &onehot(token, vocabulary)).unwrap();
+            execution.step().unwrap();
+            observed.push((
+                execution.output("logits").unwrap(),
+                execution.state("mem_0").unwrap(),
+            ));
+        }
+        observed
+    };
+    let model = architecture_model_for(vocabulary, MatrixMode::Independent).unwrap();
+    let mut execution = engine
+        .prepare_model(
+            &model,
+            weights.bindings_for(0, MatrixMode::Independent).unwrap(),
+            &root.join("independent"),
+        )
+        .unwrap();
+    for (step, &token) in tokens.iter().enumerate() {
+        execution.set_input("token", &onehot(token, vocabulary)).unwrap();
+        execution.step().unwrap();
+        let actual_logits = execution.output("logits").unwrap();
+        let actual_state = execution.state("mem_0").unwrap();
+        for (name, actual, expected) in [
+            ("logits", &actual_logits, &baseline[step].0),
+            ("EMA state", &actual_state, &baseline[step].1),
+        ] {
+            assert_eq!(actual.shape(), expected.shape());
+            for (lane, (&a, &b)) in actual.values().iter().zip(expected.values()).enumerate() {
+                assert_eq!(
+                    a.to_bits(), b.to_bits(),
+                    "step={step} {name} lane={lane} mismatched FP32 bits"
+                );
             }
         }
     }
