@@ -754,14 +754,42 @@ DONE:
             for &(dest, src, elements) in copies {
                 self.require_allocation(dest, elements)?;
                 self.require_allocation(src, elements)?;
-                elements
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .ok_or(GpuError::UnsupportedSize { elements })?;
+                if elements == 0 || elements > i32::MAX as usize {
+                    return Err(GpuError::UnsupportedSize { elements });
+                }
+            }
+            // A parallel copy requires each destination to be disjoint from
+            // all other destinations and all other sources. In particular,
+            // cycles must never silently acquire in-place ordering semantics.
+            for (i, &(destination, _, _)) in copies.iter().enumerate() {
+                for (j, &(other, source, _)) in copies.iter().enumerate() {
+                    if i != j && (destination == other || destination == source) {
+                        return Err(GpuError::InvalidInput {
+                            node: 0,
+                            reason: "grouped feedback destinations overlap another transfer",
+                        });
+                    }
+                }
             }
             let _context = self.enter_context()?;
+            if self.feedback_module.is_null() {
+                let source = CString::new(FEEDBACK_BATCH_PTX)
+                    .map_err(|_| GpuError::Driver("feedback kernel PTX contains NUL".into()))?;
+                check("cuModuleLoadData", unsafe {
+                    (self.functions.module_load)(
+                        &mut self.feedback_module,
+                        source.as_ptr().cast::<c_void>(),
+                    )
+                })?;
+                check("cuModuleGetFunction", unsafe {
+                    (self.functions.module_function)(
+                        &mut self.feedback_kernel,
+                        self.feedback_module,
+                        c"vn_feedback_batch".as_ptr(),
+                    )
+                })?;
+            }
             if self.feedback_plan.as_slice() != copies || self.feedback_graph_exec.is_null() {
-                // No executable graph may be destroyed while its launch is
-                // in flight. The feedback plan is validated by the caller.
                 self.synchronize()?;
                 if !self.feedback_graph_exec.is_null() {
                     check("cuGraphExecDestroy", unsafe {
@@ -776,19 +804,49 @@ DONE:
                     self.feedback_graph = ptr::null_mut();
                 }
                 self.feedback_plan.clear();
+                let (order, batches) = transfer_buckets(
+                    &copies.iter().map(|copy| copy.2).collect::<Vec<_>>(),
+                )?;
+                let entries = order.iter().map(|&index| {
+                    let (dest, source, elements) = copies[index];
+                    [dest, source, elements as u64]
+                }).collect::<Vec<_>>();
+                let bytes = descriptor_bytes(&entries);
+                let words = bytes.len() / std::mem::size_of::<f32>();
+                if words > self.feedback_descriptor_capacity {
+                    self.feedback_descriptors = self.allocate(words)?;
+                    self.feedback_descriptor_capacity = words;
+                }
+                self.upload_descriptor_bytes(self.feedback_descriptors, &bytes)?;
+                self.synchronize()?;
                 check("cuStreamBeginCapture_v2", unsafe {
                     (self.functions.stream_capture_begin)(
                         self.stream,
                         CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
                     )
                 })?;
-                // Retain the capture flag until the end call succeeds or the
-                // session is dropped. A failed capture never launches copies.
                 self.capturing = true;
-                for &(dest, src, elements) in copies {
-                    let bytes = elements * std::mem::size_of::<f32>();
-                    check("cuMemcpyDtoDAsync_v2", unsafe {
-                        (self.functions.device_to_device)(dest, src, bytes, self.stream)
+                for (start, count, grid) in batches {
+                    let mut descriptors = self.feedback_descriptors;
+                    let mut first = start;
+                    let mut args = [
+                        (&mut descriptors as *mut DevicePtr).cast::<c_void>(),
+                        (&mut first as *mut u32).cast::<c_void>(),
+                    ];
+                    check("cuLaunchKernel", unsafe {
+                        (self.functions.launch)(
+                            self.feedback_kernel,
+                            grid,
+                            count,
+                            1,
+                            256,
+                            1,
+                            1,
+                            0,
+                            self.stream,
+                            args.as_mut_ptr(),
+                            ptr::null_mut(),
+                        )
                     })?;
                 }
                 let mut graph = ptr::null_mut();
