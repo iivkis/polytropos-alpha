@@ -2408,14 +2408,13 @@ impl GpuExecution {
                 })?;
             copies.push((dest, src, old.shape.element_count()));
         }
-        // Serial D2D transfers are safe only if no earlier destination
-        // aliases a different source. Otherwise reject instead of silently
-        // changing the meaning of simultaneous multi-state assignment.
-        if copies.iter().any(|(dst, _, _)| {
-            copies
-                .iter()
-                .any(|(other_dst, src, _)| dst == src && dst != other_dst)
-        }) {
+        // Feedback is a parallel, simultaneous assignment. Reject duplicate
+        // storage roots and cross-transfer read/write aliasing in O(n log n)
+        // rather than comparing every pair of hundreds of optimizer tensors.
+        let destinations = copies.iter().map(|&(dest, _, _)| dest).collect::<BTreeSet<_>>();
+        if destinations.len() != copies.len()
+            || copies.iter().any(|&(dest, src, _)| dest != src && destinations.contains(&src))
+        {
             return Err(GpuError::InvalidInput {
                 node: 0,
                 reason: "overlapping state feedback sources require staging",
