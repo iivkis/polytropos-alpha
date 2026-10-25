@@ -616,7 +616,10 @@ mod tests {
             .unwrap();
         let resumed_decayed =
             AdamW::from_checkpoint(decayed.optimizer.clone(), &decayed.parameters).unwrap();
-        assert_eq!(resumed_decayed.learning_rate().to_bits(), 0.0004f32.to_bits());
+        assert_eq!(
+            resumed_decayed.learning_rate().to_bits(),
+            0.0004f32.to_bits()
+        );
         assert_eq!(resumed_decayed.steps(), optimizer.steps());
         assert_eq!(
             resumed_decayed.checkpoint().moments,

@@ -416,13 +416,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
     if lr_decay_5x && pending_checkpoint.is_none() {
-        return Err("TORUS16_LR_DECAY_5X requires a resumable checkpoint; fresh training is forbidden".into());
+        return Err(
+            "TORUS16_LR_DECAY_5X requires a resumable checkpoint; fresh training is forbidden"
+                .into(),
+        );
     }
     if let Some(saved) = pending_checkpoint.as_ref() {
         let saved_lr = saved.optimizer.learning_rate;
         let matches_requested = saved_lr.to_bits() == training_lr.to_bits();
-        let approved_transition =
-            lr_decay_5x && saved_lr.to_bits() == baseline_lr.to_bits();
+        let approved_transition = lr_decay_5x && saved_lr.to_bits() == baseline_lr.to_bits();
         if !matches_requested && !approved_transition {
             return Err(format!(
                 "AdamW learning rate mismatch: checkpoint={saved_lr} requested={training_lr}; only explicit 0.002 -> 0.0004 transition is supported"
@@ -489,18 +491,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     );
     if let Some(ckpt) = pending_checkpoint.as_ref() {
-        ckpt.validate_with_learning_rate(CheckpointRequirements {
-            bptt: window_len,
-            vocab,
-            corpus: corpus_hash,
-            architecture: model_fingerprint,
-            val_limit,
-            test_limit,
-            eval_every,
-            max_windows: train_windows,
-            params: &trainable_initial,
-            states: &expected_states,
-        }, ckpt.optimizer.learning_rate)?;
+        ckpt.validate_with_learning_rate(
+            CheckpointRequirements {
+                bptt: window_len,
+                vocab,
+                corpus: corpus_hash,
+                architecture: model_fingerprint,
+                val_limit,
+                test_limit,
+                eval_every,
+                max_windows: train_windows,
+                params: &trainable_initial,
+                states: &expected_states,
+            },
+            ckpt.optimizer.learning_rate,
+        )?;
         println!(
             "checkpoint_resumed={} completed_windows={}",
             checkpoint_path.display(),
@@ -509,7 +514,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!(
         "training_adamw_lr={training_lr:.8} checkpoint_lr_transition={} optimizer_moments=preserved",
-        if lr_decay_5x { "explicit_5x_decay" } else { "unchanged" }
+        if lr_decay_5x {
+            "explicit_5x_decay"
+        } else {
+            "unchanged"
+        }
     );
     println!(
         "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
@@ -1146,18 +1155,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("best checkpoint has an unexpected AdamW learning rate".into());
     }
-    best_snapshot.validate_with_learning_rate(CheckpointRequirements {
-        bptt: window_len,
-        vocab,
-        corpus: corpus_hash,
-        architecture: model_fingerprint,
-        val_limit,
-        test_limit,
-        eval_every,
-        max_windows: train_windows,
-        params: &trainable_initial,
-        states: &expected_states,
-    }, best_checkpoint_lr)?;
+    best_snapshot.validate_with_learning_rate(
+        CheckpointRequirements {
+            bptt: window_len,
+            vocab,
+            corpus: corpus_hash,
+            architecture: model_fingerprint,
+            val_limit,
+            test_limit,
+            eval_every,
+            max_windows: train_windows,
+            params: &trainable_initial,
+            states: &expected_states,
+        },
+        best_checkpoint_lr,
+    )?;
     let test_start = corpus.validation.len() - test_limit - 1;
     let (test_bpc, test_count) = score_holdout(
         &mut cached_holdout,
