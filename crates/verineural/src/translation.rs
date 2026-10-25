@@ -455,7 +455,10 @@ fn validate_dual_pointwise_ptx(
                     .ok_or_else(|| invalid("malformed DualPointwise PTX arithmetic operands"))?;
                 arithmetic.push((line_number, opcode, register));
             }
-            "st.global.f32" => {
+            // NVPTX may write the exact binary32 payload through either a
+            // typed F32 store or a raw 32-bit store. Both must consume the
+            // original RNE result register, checked below.
+            "st.global.f32" | "st.global.b32" => {
                 let (address, value) = arguments
                     .trim()
                     .trim_end_matches(';')

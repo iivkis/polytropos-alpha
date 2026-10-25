@@ -96,29 +96,29 @@ fn translation_checks_public_output_bindings_with_reordered_ptx_arithmetic() {
            st.global.f32 [%rd10], %f1;\n\
            st.global.f32 [%rd11], %f2;\n}}\n"
     );
-    plan.validate(program.llvm_ir(), &reordered).unwrap();
+    // Both scalar PTX store encodings must preserve the original binary32
+    // result bits. Reordering independent arithmetic is permitted.
+    for store_kind in ["st.global.f32", "st.global.b32"] {
+        let reordered = reordered.replace("st.global.f32", store_kind);
+        plan.validate(program.llvm_ir(), &reordered).unwrap();
 
-    let swapped = reordered
-        .replace(
-            "st.global.f32 [%rd10], %f1;\n",
-            "st.global.f32 [%rd10], %f2;\n",
-        )
-        .replace(
-            "st.global.f32 [%rd11], %f2;\n",
-            "st.global.f32 [%rd11], %f1;\n",
+        let swapped = reordered
+            .replace("[%rd10], %f1;", "[%rd10], %f2;")
+            .replace("[%rd11], %f2;", "[%rd11], %f1;");
+        assert_ne!(swapped, reordered);
+        assert!(
+            plan.validate(program.llvm_ir(), &swapped).is_err(),
+            "a correctly counted but incorrectly bound public output is not valid"
         );
-    assert_ne!(swapped, reordered);
-    assert!(
-        plan.validate(program.llvm_ir(), &swapped).is_err(),
-        "a correctly counted but incorrectly bound public output is not valid"
-    );
 
-    let duplicate = reordered.replace(
-        "st.global.f32 [%rd11], %f2;\n",
-        "st.global.f32 [%rd11], %f1;\n",
-    );
-    assert_ne!(duplicate, reordered);
-    assert!(plan.validate(program.llvm_ir(), &duplicate).is_err());
+        let duplicate = reordered.replace("[%rd11], %f2;", "[%rd11], %f1;");
+        assert_ne!(duplicate, reordered);
+        assert!(plan.validate(program.llvm_ir(), &duplicate).is_err());
+
+        let changed_width = reordered.replace(store_kind, "st.global.b64");
+        assert_ne!(changed_width, reordered);
+        assert!(plan.validate(program.llvm_ir(), &changed_width).is_err());
+    }
 }
 
 #[test]
