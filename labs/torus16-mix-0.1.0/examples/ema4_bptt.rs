@@ -249,7 +249,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
     }
     println!(
-        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} four_op_fusions={} diamond_fusions={} reduction_percent={:.2}",
+        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} four_op_fusions={} diamond_fusions={} dual_output_fusions={} reduction_percent={:.2}",
         old_kernels,
         new_kernels,
         old_kernels - new_kernels,
@@ -258,6 +258,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         program.fused_binary_pairs().len(),
         program.fused_mul_mul_add_divs().len(),
         program.fused_mul_diamond_adds().len(),
+        program.fused_dual_outputs().len(),
         100. * (old_kernels - new_kernels) as f64 / old_kernels as f64
     );
 
@@ -434,6 +435,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         program.kernel_count()?
     );
     let train_start = Instant::now();
+    // Aggregated wall times across the entire measured training loop, so a
+    // single slow checkpoint or CUDA synchronization cannot disappear among
+    // the three early-window samples.
+    let mut profile_totals = [0.0f64; 11];
+    let mut feedback_checked_values = 0usize;
+    let mut feedback_copied_values = 0usize;
     for iteration in first_window..train_windows {
         let step_start = Instant::now();
         let start = iteration * window_len;
@@ -497,12 +504,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         // All recurrent states and, in GPU mode, trainable weights and
         // AdamW moments move simultaneously on-device after the replay.
         let timing = Instant::now();
-        if gpu_optimizer.is_some() {
-            gpu.feedback_state_checked(&all_feedback)?;
+        let feedback_details = if gpu_optimizer.is_some() {
+            Some(gpu.feedback_state_checked_profiled(&all_feedback)?)
         } else {
             gpu.feedback_state(&all_feedback)?;
-        }
+            None
+        };
         let state_feedback_d2d_ms = timing.elapsed().as_secs_f64() * 1000.;
+        let feedback_validation_ms = feedback_details.map_or(0., |p| p.validation_d2h.as_secs_f64() * 1000.);
+        let feedback_snapshot_ms = feedback_details.map_or(0., |p| p.snapshot_d2d.as_secs_f64() * 1000.);
+        let feedback_copy_ms = feedback_details.map_or(0., |p| p.feedback_d2d.as_secs_f64() * 1000.);
+        let feedback_sync_ms = feedback_details.map_or(0., |p| p.stream_sync.as_secs_f64() * 1000.);
+        if let Some(p) = feedback_details {
+            feedback_checked_values += p.checked_values;
+            feedback_copied_values += p.feedback_values;
+        }
 
         let checkpoint_due =
             (iteration + 1) % checkpoint_every == 0 || iteration + 1 == train_windows;
@@ -556,6 +572,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             .write_atomic(&checkpoint_path)?;
         }
 
+        for (total, sample) in profile_totals.iter_mut().zip([
+            upload_inputs_ms, graph_replay_ms, read_outputs_ms, ce_ms,
+            adam_ms, state_feedback_d2d_ms, checkpoint_state_d2h_ms,
+            upload_parameters_ms, feedback_validation_ms, feedback_snapshot_ms,
+            feedback_copy_ms + feedback_sync_ms,
+        ]) {
+            *total += sample;
+        }
         println!(
             "train_window={} ce_nats={:.6} train_bpc={:.6} optimizer_step={} end_to_end_step_ms={:.3}",
             iteration,
@@ -570,11 +594,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         if iteration < 3 || (iteration + 1) % 128 == 0 {
             println!(
-                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} graph_replay_ms={graph_replay_ms:.3} logits_gradients_d2h_ms={read_outputs_ms:.3} ce_ms={ce_ms:.3} host_adamw_ms={adam_ms:.3} state_feedback_d2d_ms={state_feedback_d2d_ms:.3} checkpoint_state_d2h_ms={checkpoint_state_d2h_ms:.3} parameters_h2d_ms={upload_parameters_ms:.3}",
-                iteration
+                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} graph_replay_ms={graph_replay_ms:.3} logits_gradients_d2h_ms={read_outputs_ms:.3} ce_ms={ce_ms:.3} host_adamw_ms={adam_ms:.3} feedback_total_ms={state_feedback_d2d_ms:.3} feedback_validation_d2h_ms={feedback_validation_ms:.3} feedback_snapshot_d2d_ms={feedback_snapshot_ms:.3} feedback_copy_sync_ms={:.3} checkpoint_state_d2h_ms={checkpoint_state_d2h_ms:.3} parameters_h2d_ms={upload_parameters_ms:.3}",
+                iteration,
+                feedback_copy_ms + feedback_sync_ms,
             );
         }
     }
+    let profile_windows = train_windows - first_window;
+    println!(
+        "training_profile_avg_ms windows={} input_h2d={:.4} graph_replay={:.4} selected_d2h={:.4} host_ce={:.4} host_adamw={:.4} feedback_total={:.4} checkpoint_state_d2h={:.4} parameters_or_checkpoint_io={:.4} feedback_validation_d2h={:.4} feedback_snapshot_d2d={:.4} feedback_copy_sync={:.4} feedback_checked_values={} feedback_copied_values={} timing=host_wall_including_sync",
+        profile_windows,
+        profile_totals[0] / profile_windows as f64,
+        profile_totals[1] / profile_windows as f64,
+        profile_totals[2] / profile_windows as f64,
+        profile_totals[3] / profile_windows as f64,
+        profile_totals[4] / profile_windows as f64,
+        profile_totals[5] / profile_windows as f64,
+        profile_totals[6] / profile_windows as f64,
+        profile_totals[7] / profile_windows as f64,
+        profile_totals[8] / profile_windows as f64,
+        profile_totals[9] / profile_windows as f64,
+        profile_totals[10] / profile_windows as f64,
+        feedback_checked_values,
+        feedback_copied_values,
+    );
     let train_elapsed = train_start.elapsed().as_secs_f64();
     println!(
         "training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} scope=GPU_replay_plus_host_CE_AdamW_transfers optimizer_backend={}",

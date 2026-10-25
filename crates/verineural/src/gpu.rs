@@ -10,7 +10,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::translation::{LOG2_E_F32_LLVM, TranslationKernel, TranslationKind, TranslationPlan};
 use crate::{
@@ -226,6 +226,9 @@ pub struct GpuMemoryContract {
     pub reads: Vec<(usize, usize)>,
     /// Output is written once per active lane, at [0, writes).
     pub writes: usize,
+    /// Additional separately allocated, observable buffers written by a
+    /// bounded multi-output kernel; never masquerade as read-only arguments.
+    pub additional_writes: Vec<(usize, usize)>,
     pub pattern: GpuMemoryPattern,
 }
 
@@ -316,6 +319,7 @@ pub struct GpuKernelCapability {
     pub translation_kind: TranslationKind,
     pub reads: Vec<(usize, usize)>,
     pub writes: usize,
+    pub additional_writes: Vec<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,6 +332,7 @@ pub enum GpuOptimizationKind {
     SqrtAddDivFusion,
     MulMulAddDivFusion,
     MulDiamondAddFusion,
+    DualPointwiseOutputFusion,
 }
 
 impl GpuOptimizationKind {
@@ -341,6 +346,7 @@ impl GpuOptimizationKind {
             Self::SqrtAddDivFusion => "sqrt-add-div-fusion",
             Self::MulMulAddDivFusion => "mul-mul-add-div-fusion",
             Self::MulDiamondAddFusion => "mul-diamond-add-fusion",
+            Self::DualPointwiseOutputFusion => "dual-pointwise-output-fusion",
         }
     }
 }
@@ -381,13 +387,14 @@ impl GpuCapabilityPlan {
         ));
         for kernel in &self.kernels {
             text.push_str(&format!(
-                "kernel=node:{};op={};memory={:?};translation={};reads={:?};writes={}\n",
+                "kernel=node:{};op={};memory={:?};translation={};reads={:?};writes={};additional_writes={:?}\n",
                 kernel.node,
                 kernel.operation,
                 kernel.memory_pattern,
                 kernel.translation_kind.name(),
                 kernel.reads,
                 kernel.writes,
+                kernel.additional_writes,
             ));
         }
         for optimization in &self.optimizations {
@@ -572,6 +579,9 @@ pub struct GpuProgram {
     // Add root -> (left Mul, right-first Mul, right-second Mul,
     // reused first-input slot, right internal slot, Add left slot).
     fused_mul_diamond_adds: BTreeMap<usize, (usize, usize, usize, usize, usize, usize)>,
+    // Later selected Add/Mul root -> independent earlier selected Add/Mul
+    // root. Both outputs remain individually allocated and observable.
+    fused_dual_outputs: BTreeMap<usize, usize>,
 }
 
 impl GpuProgram {
@@ -646,6 +656,12 @@ impl GpuProgram {
         self.skipped_nodes().len()
     }
 
+    /// Bounded, multi-output, strict-RNE fusion of independent selected
+    /// pointwise roots. No change to user-facing IR or output identities.
+    pub fn fused_dual_outputs(&self) -> &BTreeMap<usize, usize> {
+        &self.fused_dual_outputs
+    }
+
     fn skipped_nodes(&self) -> BTreeSet<usize> {
         let mut skipped = self.fused_relus.values().copied().collect::<BTreeSet<_>>();
         for chain in self.fused_pointwise_chains.values() {
@@ -671,6 +687,7 @@ impl GpuProgram {
         for &(left, first, second, _, _, _) in self.fused_mul_diamond_adds.values() {
             skipped.extend([left, first, second]);
         }
+        skipped.extend(self.fused_dual_outputs.values().copied());
         skipped
     }
 
@@ -690,7 +707,13 @@ impl GpuProgram {
             }
             let writes = node.shape.element_count();
             let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) =
-                if let Some(&(left, first, _, _, _, _)) = self.fused_mul_diamond_adds.get(&index) {
+                if let Some(&earlier) = self.fused_dual_outputs.get(&index) {
+                    let first = &self.graph.nodes()[earlier];
+                    (
+                        first.inputs.iter().chain(&node.inputs).map(|id| id.index()).collect(),
+                        GpuMemoryPattern::Pointwise,
+                    )
+                } else if let Some(&(left, first, _, _, _, _)) = self.fused_mul_diamond_adds.get(&index) {
                     let lhs = &self.graph.nodes()[left];
                     let rhs = &self.graph.nodes()[first];
                     (
@@ -1045,6 +1068,7 @@ impl GpuProgram {
                 kernel_node: index,
                 reads,
                 writes,
+                additional_writes: self.fused_dual_outputs.get(&index).map_or_else(Vec::new, |&earlier| vec![(earlier, writes)]),
                 pattern,
             });
         }
@@ -1058,7 +1082,13 @@ impl GpuProgram {
         let mut kernels = Vec::new();
         for contract in self.memory_contracts()? {
             let node = &self.graph.nodes()[contract.kernel_node];
-            let kind = if let Some(&(_, _, _, reused, right_slot, left_slot)) =
+            let kind = if let Some(&earlier) = self.fused_dual_outputs.get(&contract.kernel_node) {
+                TranslationKind::DualPointwise {
+                    earlier,
+                    first_mul: matches!(self.graph.nodes()[earlier].operation, Operation::Mul),
+                    second_mul: matches!(node.operation, Operation::Mul),
+                }
+            } else if let Some(&(_, _, _, reused, right_slot, left_slot)) =
                 self.fused_mul_diamond_adds.get(&contract.kernel_node)
             {
                 TranslationKind::MulDiamondAdd {
@@ -1291,6 +1321,7 @@ impl GpuProgram {
             if contract.kernel_node != rule.node
                 || contract.reads != rule.reads
                 || contract.writes != rule.writes
+                || contract.additional_writes != rule.kind.extra_writes(contract.writes)
             {
                 return Err(GpuError::Fp32PtxRejected {
                     reason: format!(
@@ -1306,6 +1337,7 @@ impl GpuProgram {
                 translation_kind: rule.kind,
                 reads: contract.reads.clone(),
                 writes: contract.writes,
+                additional_writes: contract.additional_writes.clone(),
             });
         }
 
@@ -1692,6 +1724,39 @@ impl GpuProgram {
             });
         }
 
+        for (&root, &earlier) in &self.fused_dual_outputs {
+            let left = &self.graph.nodes()[earlier];
+            let right = &self.graph.nodes()[root];
+            let valid = earlier < root
+                && self.outputs.contains(&left.id)
+                && self.outputs.contains(&right.id)
+                && uses[earlier] == 1
+                && uses[root] == 1
+                && matches!(left.operation, Operation::Add | Operation::Mul)
+                && matches!(right.operation, Operation::Add | Operation::Mul)
+                && left.shape == right.shape
+                && left.dtype == DType::F32
+                && right.dtype == DType::F32
+                && left.inputs.iter().chain(&right.inputs).all(|id| {
+                    self.graph.nodes()[id.index()].shape == right.shape
+                        && self.graph.nodes()[id.index()].dtype == DType::F32
+                        && !skipped.contains(&id.index())
+                })
+                && !covered_removed.contains(&earlier);
+            if !valid {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid dual-output pointwise fusion at node {root}"),
+                });
+            }
+            covered_removed.insert(earlier);
+            optimizations.push(GpuOptimizationCapability {
+                root,
+                kind: GpuOptimizationKind::DualPointwiseOutputFusion,
+                removed_nodes: vec![earlier],
+                exclusive_reachable_use: true,
+                selected_outputs_preserved: true,
+            });
+        }
         if covered_removed != skipped {
             return Err(GpuError::Fp32PtxRejected {
                 reason: "capability plan does not explain every removed fusion kernel".into(),
@@ -1735,6 +1800,13 @@ impl GpuProgram {
                 contract.writes, contract.writes
             ));
             theorems.push(output_name);
+            for &(other, extent) in &contract.additional_writes {
+                let name = format!("memory_node_{}_additional_{}_output_bound", contract.kernel_node, other);
+                source.push_str(&format!(
+                    "theorem {name} (index : Nat) (active : index < {extent}) : index < {extent} := by\n  exact VeriNeural.pointwise_address_bound active\n\n"
+                ));
+                theorems.push(name);
+            }
             match contract.pattern {
                 GpuMemoryPattern::Pointwise => {}
                 GpuMemoryPattern::BiasAdd { columns } => {
@@ -1883,6 +1955,20 @@ impl GpuBenchmark {
     pub fn average(self) -> Duration {
         Duration::from_secs_f64(self.elapsed.as_secs_f64() / self.measured_launches as f64)
     }
+}
+
+/// Host wall-clock breakdown of checked GPU feedback. `validation_d2h`
+/// includes pinned D2H, stream synchronization, and host domain validation;
+/// `snapshot_d2d` and `feedback_d2d` include their host enqueue overhead.
+/// Values are observations, not a CUDA kernel-time or proof guarantee.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuFeedbackProfile {
+    pub validation_d2h: Duration,
+    pub snapshot_d2d: Duration,
+    pub feedback_d2d: Duration,
+    pub stream_sync: Duration,
+    pub checked_values: usize,
+    pub feedback_values: usize,
 }
 
 /// One session-wide fail-closed gate for GPU launches, copies and sync.
@@ -2302,7 +2388,7 @@ impl GpuExecution {
     /// Strict feedback for statically established source domains.
     /// Selected outputs aliasing state destinations are device-snapshotted.
     pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
-        self.feedback_state_impl(links, false)
+        self.feedback_state_impl(links, false).map(|_| ())
     }
 
     /// Experimental feedback for outputs with weaker *static* domain
@@ -2313,6 +2399,16 @@ impl GpuExecution {
     /// This retains D2H numerical validation cost; it avoids gradient D2H,
     /// host AdamW and parameter H2D on each training step.
     pub fn feedback_state_checked(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
+        self.feedback_state_checked_profiled(links).map(|_| ())
+    }
+
+    /// Checked feedback plus stage-separated host timings. Validation is
+    /// mandatory and happens before any state mutation, just as in the
+    /// unprofiled API. No extra device readback is performed for profiling.
+    pub fn feedback_state_checked_profiled(
+        &mut self,
+        links: &[(NodeId, NodeId)],
+    ) -> Result<GpuFeedbackProfile, GpuError> {
         self.feedback_state_impl(links, true)
     }
 
@@ -2320,11 +2416,13 @@ impl GpuExecution {
         &mut self,
         links: &[(NodeId, NodeId)],
         runtime_domains: bool,
-    ) -> Result<(), GpuError> {
+    ) -> Result<GpuFeedbackProfile, GpuError> {
         self.execution_health.ensure_outputs_ready()?;
         let copies = self.feedback_copy_plan(links, runtime_domains)?;
+        let mut profile = GpuFeedbackProfile::default();
+        profile.feedback_values = copies.iter().filter(|(dst, src, _)| dst != src).map(|(_, _, n)| n).sum();
         if copies.is_empty() {
-            return Ok(());
+            return Ok(profile);
         }
         if runtime_domains {
             let pending = links
@@ -2340,6 +2438,8 @@ impl GpuExecution {
                 })
                 .collect::<Vec<_>>();
             if !pending.is_empty() {
+                let validation_started = Instant::now();
+                profile.checked_values = pending.iter().map(|(_, _, _, shape)| shape.element_count()).sum();
                 let sources = pending
                     .iter()
                     .map(|&(_, next, _, ref shape)| {
@@ -2365,6 +2465,7 @@ impl GpuExecution {
                     let tensor = Tensor::new(shape.clone(), values)?;
                     tensor.validate_domain(*required)?;
                 }
+                profile.validation_d2h = validation_started.elapsed();
             }
         }
         if copies
@@ -2377,14 +2478,21 @@ impl GpuExecution {
                 .unwrap_or_else(|| self.program.outputs().to_vec());
             self.configure_feedback(&observable, links, runtime_domains)?;
         }
+        let snapshot_started = Instant::now();
         self.snapshot_outputs()?;
+        profile.snapshot_d2d = snapshot_started.elapsed();
+        let feedback_started = Instant::now();
         for (dst, src, elements) in copies {
             if dst != src {
                 self.execution_health
                     .record_io(self.session.copy_device_to_device(dst, src, elements))?;
             }
         }
-        self.execution_health.record_io(self.session.synchronize())
+        profile.feedback_d2d = feedback_started.elapsed();
+        let sync_started = Instant::now();
+        self.execution_health.record_io(self.session.synchronize())?;
+        profile.stream_sync = sync_started.elapsed();
+        Ok(profile)
     }
 
     /// Read a current source (for state inspection) without another replay.
@@ -2769,6 +2877,7 @@ impl GpuEngine {
         let mut fused_sqrt_add_divs = BTreeMap::new();
         let mut fused_mul_mul_add_divs = BTreeMap::new();
         let mut fused_mul_diamond_adds = BTreeMap::new();
+        let mut fused_dual_outputs = BTreeMap::new();
         if self.launch.relu_fusion == ReluFusion::Experimental {
             for &index in &live_nodes {
                 let node = &graph.nodes()[index];
@@ -3099,6 +3208,58 @@ impl GpuEngine {
                 }
             }
         }
+        // Two independent selected Add/Mul roots of the same F32 shape may
+        // share a kernel even though each remains a distinct public output.
+        // The first root has no reachable consumers, and all four operands
+        // must already be materialized. Do not reorder any FP32 arithmetic.
+        if self.launch.pointwise_fusion() {
+            let mut selected = outputs.iter().map(|id| id.index()).collect::<Vec<_>>();
+            selected.sort_unstable();
+            let mut reserved = BTreeSet::new();
+            for (later_pos, &later) in selected.iter().enumerate() {
+                let second = &graph.nodes()[later];
+                if !matches!(second.operation, Operation::Add | Operation::Mul)
+                    || uses[later] != 1
+                    || skipped.contains(&later)
+                    || reserved.contains(&later)
+                    || second.dtype != DType::F32
+                    || second.inputs.iter().any(|id| skipped.contains(&id.index()))
+                    || fused_mul_adds.contains_key(&later)
+                    || fused_binary_pairs.contains_key(&later)
+                    || fused_mul_add_muls.contains_key(&later)
+                    || fused_mul_mul_add_divs.contains_key(&later)
+                    || fused_mul_diamond_adds.contains_key(&later)
+                {
+                    continue;
+                }
+                for &earlier in &selected[..later_pos] {
+                    let first = &graph.nodes()[earlier];
+                    if reserved.contains(&earlier)
+                        || skipped.contains(&earlier)
+                        || uses[earlier] != 1
+                        || !matches!(first.operation, Operation::Add | Operation::Mul)
+                        || first.dtype != DType::F32
+                        || first.shape != second.shape
+                        || first.inputs.iter().chain(&second.inputs).any(|id| {
+                            skipped.contains(&id.index())
+                                || graph.nodes()[id.index()].dtype != DType::F32
+                                || graph.nodes()[id.index()].shape != second.shape
+                        })
+                        || fused_mul_adds.contains_key(&earlier)
+                        || fused_binary_pairs.contains_key(&earlier)
+                        || fused_mul_add_muls.contains_key(&earlier)
+                        || fused_mul_mul_add_divs.contains_key(&earlier)
+                        || fused_mul_diamond_adds.contains_key(&earlier)
+                    {
+                        continue;
+                    }
+                    fused_dual_outputs.insert(later, earlier);
+                    reserved.extend([earlier, later]);
+                    skipped.insert(earlier);
+                    break;
+                }
+            }
+        }
         let mut llvm_ir = String::from(
             "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n\
              target triple = \"nvptx64-nvidia-cuda\"\n\n\
@@ -3114,7 +3275,13 @@ impl GpuEngine {
             {
                 continue;
             }
-            if let Some(&(_, _, _, reused, right_slot, left_slot)) =
+            if let Some(&earlier) = fused_dual_outputs.get(&index) {
+                llvm_ir.push_str(&dual_pointwise_kernel_ir(
+                    index,
+                    matches!(graph.nodes()[earlier].operation, Operation::Mul),
+                    matches!(node.operation, Operation::Mul),
+                ));
+            } else if let Some(&(_, _, _, reused, right_slot, left_slot)) =
                 fused_mul_diamond_adds.get(&index)
             {
                 llvm_ir.push_str(&mul_diamond_add_kernel_ir(
@@ -3276,6 +3443,7 @@ impl GpuEngine {
             fused_sqrt_add_divs,
             fused_mul_mul_add_divs,
             fused_mul_diamond_adds,
+            fused_dual_outputs,
         };
         // Fail closed unless every launched kernel has matching memory and
         // translation evidence and every applied optimization has valid
@@ -3351,7 +3519,7 @@ impl GpuEngine {
         let skipped = program.skipped_nodes();
 
         for &index in &program.live_nodes {
-            if skipped.contains(&index) {
+            if skipped.contains(&index) && !program.fused_dual_outputs.values().any(|&n| n == index) {
                 continue;
             }
             let node = &program.graph.nodes()[index];
@@ -3399,6 +3567,16 @@ impl GpuEngine {
         for contract in &contracts {
             let output_ptr = buffers[&contract.kernel_node];
             session.require_allocation(output_ptr, contract.writes)?;
+            for &(other, elements) in &contract.additional_writes {
+                let ptr = buffers[&other];
+                session.require_allocation(ptr, elements)?;
+                if ptr == output_ptr || !written_buffers.insert(ptr) {
+                    return Err(GpuError::InvalidInput {
+                        node: contract.kernel_node,
+                        reason: "multi-output CUDA kernel has overlapping output allocations",
+                    });
+                }
+            }
             if !written_buffers.insert(output_ptr) {
                 return Err(GpuError::InvalidInput {
                     node: contract.kernel_node,
@@ -3408,7 +3586,7 @@ impl GpuEngine {
             for &(source, elements) in &contract.reads {
                 let input_ptr = buffers[&source];
                 session.require_allocation(input_ptr, elements)?;
-                if input_ptr == output_ptr {
+                if input_ptr == output_ptr || contract.additional_writes.iter().any(|&(other, _)| input_ptr == buffers[&other]) {
                     return Err(GpuError::InvalidInput {
                         node: contract.kernel_node,
                         reason: "in-place CUDA kernel write is not supported",
@@ -3431,7 +3609,18 @@ impl GpuEngine {
                     .iter()
                     .map(|&(node, _)| buffers[&node])
                     .collect::<Vec<_>>();
-                if inputs.len() == 4 {
+                if let Some(&(other, _)) = contract.additional_writes.first() {
+                    if contract.additional_writes.len() != 1 || inputs.len() != 4 {
+                        return Err(GpuError::InvalidInput { node: index, reason: "invalid dual-output kernel ABI" });
+                    }
+                    session.launch4_dual(
+                        &format!("vn_node_{index}"),
+                        [inputs[0], inputs[1], inputs[2], inputs[3]],
+                        [buffers[&other], buffers[&index]],
+                        contract.writes,
+                        program.launch.threads_per_block,
+                    )?;
+                } else if inputs.len() == 4 {
                     session.launch4(
                         &format!("vn_node_{index}"),
                         [inputs[0], inputs[1], inputs[2], inputs[3]],
@@ -3874,6 +4063,46 @@ done:
 
 /// Three-input pointwise chain with two explicit independent RN
 /// instructions, preserving both operand orders and intermediate rounding.
+/// One physical CUDA Graph kernel for two independent public F32 results.
+/// The four source pointers preserve the exact source operand order for both
+/// operations. No FMA, fast-math, reassociation or output aliasing is allowed.
+fn dual_pointwise_kernel_ir(index: usize, first_mul: bool, second_mul: bool) -> String {
+    let first = if first_mul { "mul.rn.f32" } else { "add.rn.f32" };
+    let second = if second_mul { "mul.rn.f32" } else { "add.rn.f32" };
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %c, ptr addrspace(1) %d, ptr addrspace(1) %extra, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %idx
+  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx
+  %cp = getelementptr float, ptr addrspace(1) %c, i32 %idx
+  %dp = getelementptr float, ptr addrspace(1) %d, i32 %idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %y = load float, ptr addrspace(1) %bp, align 4
+  %z = load float, ptr addrspace(1) %cp, align 4
+  %w = load float, ptr addrspace(1) %dp, align 4
+  %first = call float asm sideeffect "{first} $0, $1, $2;", "=f,f,f"(float %x, float %y)
+  %second = call float asm sideeffect "{second} $0, $1, $2;", "=f,f,f"(float %z, float %w)
+  %extra_ptr = getelementptr float, ptr addrspace(1) %extra, i32 %idx
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %first, ptr addrspace(1) %extra_ptr, align 4
+  store float %second, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
+}
+
 fn binary_chain_kernel_ir(
     index: usize,
     first_add: bool,

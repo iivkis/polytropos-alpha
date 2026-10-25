@@ -46,6 +46,13 @@ pub enum TranslationKind {
         right_mul_on_right: bool,
         left_mul_on_right: bool,
     },
+    /// Two selected independent Add/Mul outputs share a kernel. `earlier`
+    /// is an additional writable output, not a kernel input.
+    DualPointwise {
+        earlier: usize,
+        first_mul: bool,
+        second_mul: bool,
+    },
     MulAddMul {
         add_mul_on_right: bool,
         mul_add_on_right: bool,
@@ -115,6 +122,7 @@ impl TranslationKind {
             Self::SqrtAddDiv { .. } => "sqrt_add_div",
             Self::MulMulAddDiv { .. } => "mul_mul_add_div",
             Self::MulDiamondAdd { .. } => "mul_diamond_add",
+            Self::DualPointwise { .. } => "dual_pointwise",
             Self::MulAddMul { .. } => "mul_add_mul",
             Self::Sub => "sub_rn",
             Self::DivRne => "div_rn",
@@ -155,6 +163,10 @@ impl TranslationKind {
             Self::MulAddMul { .. } => (1, 2, 0),
             Self::MulMulAddDiv { .. } => (1, 2, 0),
             Self::MulDiamondAdd { .. } => (1, 3, 0),
+            Self::DualPointwise { first_mul, second_mul, .. } => {
+                let muls = usize::from(first_mul) + usize::from(second_mul);
+                (2 - muls, muls, 0)
+            }
             Self::SqrtAddDiv { .. } => (1, 0, 0),
             Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
@@ -192,7 +204,7 @@ impl TranslationKind {
             | Self::MulAddMul { .. }
             | Self::BinaryChain { .. }
             | Self::SqrtAddDiv { .. } => 3,
-            Self::MulMulAddDiv { .. } | Self::MulDiamondAdd { .. } => 4,
+            Self::MulMulAddDiv { .. } | Self::MulDiamondAdd { .. } | Self::DualPointwise { .. } => 4,
             _ => 2,
         }
     }
@@ -208,6 +220,7 @@ impl TranslationKind {
             | Self::ReverseRows2D { columns, .. }
             | Self::ReverseColumns2D { columns, .. } => columns,
             Self::SliceLastRow { source_width, .. } => source_width,
+            Self::DualPointwise { earlier, .. } => earlier,
             _ => 0,
         }
     }
@@ -242,6 +255,9 @@ impl TranslationKind {
                     + 2 * usize::from(multiply_on_right)
                     + 4 * usize::from(add_on_right)
             }
+            Self::DualPointwise { first_mul, second_mul, .. } => {
+                usize::from(first_mul) + 2 * usize::from(second_mul)
+            }
             Self::MulDiamondAdd {
                 reused_source,
                 right_mul_on_right,
@@ -264,6 +280,14 @@ impl TranslationKind {
         }
     }
 
+    pub(crate) fn extra_writes(self, elements: usize) -> Vec<(usize, usize)> {
+        if let Self::DualPointwise { earlier, .. } = self {
+            vec![(earlier, elements)]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn parse(name: &str, columns: usize, inner: usize) -> Result<Self, TranslationError> {
         let kind = match name {
             "add" => Self::Add,
@@ -283,6 +307,11 @@ impl TranslationKind {
                 reused_source: (inner & 1) as u8,
                 multiply_on_right: inner & 2 != 0,
                 add_on_right: inner & 4 != 0,
+            },
+            "dual_pointwise" if inner < 4 => Self::DualPointwise {
+                earlier: columns,
+                first_mul: inner & 1 != 0,
+                second_mul: inner & 2 != 0,
             },
             "mul_diamond_add" if inner < 8 => Self::MulDiamondAdd {
                 reused_source: (inner & 1) as u8,
@@ -403,6 +432,7 @@ impl TranslationPlan {
                 || kernel.reads.iter().any(|&(source, size)| {
                     source >= kernel.node || size == 0 || size > i32::MAX as usize
                 })
+                || matches!(kernel.kind, TranslationKind::DualPointwise { earlier, .. } if earlier >= kernel.node || earlier == 0)
             {
                 return Err(invalid(format!(
                     "invalid source/write extents for node {}",
@@ -419,6 +449,7 @@ impl TranslationPlan {
                     | TranslationKind::MatMul { .. }
             ) && columns == 0)
                 || (columns != 0
+                    && !matches!(kernel.kind, TranslationKind::DualPointwise { .. })
                     && (columns > i32::MAX as usize
                         || (!matches!(kernel.kind, TranslationKind::SliceLastRow { .. })
                             && kernel.writes % columns != 0)))
@@ -443,6 +474,7 @@ impl TranslationPlan {
                     | TranslationKind::SqrtAddDiv { .. }
                     | TranslationKind::MulMulAddDiv { .. }
                     | TranslationKind::MulDiamondAdd { .. }
+                    | TranslationKind::DualPointwise { .. }
             ) {
                 if kernel.reads.iter().any(|&(_, size)| size != kernel.writes) {
                     return Err(invalid("mul-add source shape mismatch"));
@@ -803,6 +835,59 @@ impl TranslationPlan {
                     "node={node} kind={} reads={reads} writes={} add.rn.f32=0 mul.rn.f32=0 relu=0 status=structural-pass\n",
                     kernel.kind.name(), kernel.writes
                 ));
+                continue;
+            }
+            if let TranslationKind::DualPointwise { earlier, first_mul, second_mul } = kernel.kind {
+                let first = if first_mul { "mul.rn.f32" } else { "add.rn.f32" };
+                let second = if second_mul { "mul.rn.f32" } else { "add.rn.f32" };
+                let required = [
+                    "ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %c, ptr addrspace(1) %d, ptr addrspace(1) %extra, ptr addrspace(1) %out, i32 %length",
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx",
+                    "%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx",
+                    "%cp = getelementptr float, ptr addrspace(1) %c, i32 %idx",
+                    "%dp = getelementptr float, ptr addrspace(1) %d, i32 %idx",
+                    "%x = load float, ptr addrspace(1) %ap, align 4",
+                    "%y = load float, ptr addrspace(1) %bp, align 4",
+                    "%z = load float, ptr addrspace(1) %cp, align 4",
+                    "%w = load float, ptr addrspace(1) %dp, align 4",
+                    "%extra_ptr = getelementptr float, ptr addrspace(1) %extra, i32 %idx",
+                    "%op = getelementptr float, ptr addrspace(1) %out, i32 %idx",
+                    "store float %first, ptr addrspace(1) %extra_ptr, align 4",
+                    "store float %second, ptr addrspace(1) %op, align 4",
+                    "icmp ult i32 %idx, %length",
+                ];
+                let first_instruction = format!(
+                    "%first = call float asm sideeffect \"{first} $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)"
+                );
+                let second_instruction = format!(
+                    "%second = call float asm sideeffect \"{second} $0, $1, $2;\", \"=f,f,f\"(float %z, float %w)"
+                );
+                if earlier >= node
+                    || required.iter().any(|text| !ir.contains(text))
+                    || !matches!((ir.find(&first_instruction), ir.find(&second_instruction)), (Some(a), Some(b)) if a < b)
+                    || ir.matches("call float asm sideeffect").count() != 2
+                    || ir.matches("store float ").count() != 2
+                    || ir.contains("fcmp ")
+                {
+                    return Err(invalid(format!("DualPointwise LLVM template mismatch at node {node}")));
+                }
+                audit_fp32_ptx(ir, asm)
+                    .map_err(|err| invalid(format!("PTX node {node}: {err}")))?;
+                // The PTX may select registers differently, but cannot
+                // contract/reorder FP32 arithmetic or omit either store.
+                let sequence = asm.lines().filter_map(|line| {
+                    let code = line.split("//").next().unwrap_or("");
+                    if code.contains("add.rn.f32") { Some("add.rn.f32") }
+                    else if code.contains("mul.rn.f32") { Some("mul.rn.f32") }
+                    else { None }
+                }).collect::<Vec<_>>();
+                if sequence != [first, second] || asm.matches("st.global.f32").count() != 2 {
+                    return Err(invalid(format!("DualPointwise PTX instruction/store order mismatch at node {node}")));
+                }
+                let (add, mul, _) = kernel.kind.counts();
+                report.rounded_adds += add;
+                report.rounded_muls += mul;
+                report.details.push_str(&format!("node={node} kind=dual_pointwise additional_output={earlier} reads={:?} writes={} status=structural-pass\n", kernel.reads, kernel.writes));
                 continue;
             }
             if let TranslationKind::MulDiamondAdd {
@@ -1456,6 +1541,7 @@ impl TranslationPlan {
                 | TranslationKind::SqrtAddDiv { .. }
                 | TranslationKind::MulMulAddDiv { .. }
                 | TranslationKind::MulDiamondAdd { .. }
+                | TranslationKind::DualPointwise { .. }
                 | TranslationKind::MulAdd { .. }
                 | TranslationKind::MulAddMul { .. } => None,
             };
