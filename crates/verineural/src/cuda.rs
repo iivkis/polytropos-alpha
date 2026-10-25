@@ -5,7 +5,7 @@
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::{CString, c_char, c_int, c_uint, c_void};
     use std::mem::transmute_copy;
     use std::ptr;
@@ -202,7 +202,8 @@ DONE:
                 .chunks_exact(8)
                 .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
                 .collect::<Vec<_>>();
-            assert_eq!(reconstructed, entries.concat());
+            let expected = entries.iter().flat_map(|e| e.iter().copied()).collect::<Vec<_>>();
+            assert_eq!(reconstructed, expected);
         }
     }
 
@@ -802,18 +803,16 @@ DONE:
                     return Err(GpuError::UnsupportedSize { elements });
                 }
             }
-            // A parallel copy requires each destination to be disjoint from
-            // all other destinations and all other sources. In particular,
-            // cycles must never silently acquire in-place ordering semantics.
-            for (i, &(destination, _, _)) in copies.iter().enumerate() {
-                for (j, &(other, source, _)) in copies.iter().enumerate() {
-                    if i != j && (destination == other || destination == source) {
-                        return Err(GpuError::InvalidInput {
-                            node: 0,
-                            reason: "grouped feedback destinations overlap another transfer",
-                        });
-                    }
-                }
+            // Independent bitwise kernels require disjoint destinations
+            // and no cross-transfer write/read dependency.
+            let destinations = copies.iter().map(|&(dst, _, _)| dst).collect::<BTreeSet<_>>();
+            if destinations.len() != copies.len()
+                || copies.iter().any(|&(dst, src, _)| dst != src && destinations.contains(&src))
+            {
+                return Err(GpuError::InvalidInput {
+                    node: 0,
+                    reason: "grouped feedback destinations overlap another transfer",
+                });
             }
             let _context = self.enter_context()?;
             if self.feedback_module.is_null() {
