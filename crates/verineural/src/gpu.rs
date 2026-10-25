@@ -317,6 +317,7 @@ pub enum GpuOptimizationKind {
     PointwiseBiasReluFusion,
     MulAddFusion,
     MulAddMulFusion,
+    BinaryPointwiseFusion,
 }
 
 impl GpuOptimizationKind {
@@ -326,6 +327,7 @@ impl GpuOptimizationKind {
             Self::PointwiseBiasReluFusion => "pointwise-bias-relu-fusion",
             Self::MulAddFusion => "mul-add-fusion",
             Self::MulAddMulFusion => "mul-add-mul-fusion",
+            Self::BinaryPointwiseFusion => "binary-pointwise-fusion",
         }
     }
 }
@@ -547,6 +549,8 @@ pub struct GpuProgram {
     // final Mul root -> (first Mul, intermediate Add, Add position,
     // outer Mul position, reused external source index 0..=2).
     fused_mul_add_muls: BTreeMap<usize, (usize, usize, usize, usize, usize)>,
+    // Binary Add/Mul root -> (exclusive Add/Mul producer, root operand slot).
+    fused_binary_pairs: BTreeMap<usize, (usize, usize)>,
 }
 
 impl GpuProgram {
@@ -594,6 +598,11 @@ impl GpuProgram {
         &self.fused_mul_add_muls
     }
 
+    /// Other strict-order binary pointwise pairs fused into one CUDA kernel.
+    pub fn fused_binary_pairs(&self) -> &BTreeMap<usize, (usize, usize)> {
+        &self.fused_binary_pairs
+    }
+
     pub fn removed_kernel_count(&self) -> usize {
         self.skipped_nodes().len()
     }
@@ -604,6 +613,7 @@ impl GpuProgram {
             skipped.extend(chain.iter().copied());
         }
         skipped.extend(self.fused_mul_adds.values().map(|&(mul, _)| mul));
+        skipped.extend(self.fused_binary_pairs.values().map(|&(producer, _)| producer));
         for &(mul, add, _, _, _) in self.fused_mul_add_muls.values() {
             skipped.insert(mul);
             skipped.insert(add);
@@ -644,6 +654,16 @@ impl GpuProgram {
                         vec![
                             producer.inputs[0].index(),
                             producer.inputs[1].index(),
+                            node.inputs[1 - slot].index(),
+                        ],
+                        GpuMemoryPattern::Pointwise,
+                    )
+                } else if let Some(&(producer, slot)) = self.fused_binary_pairs.get(&index) {
+                    let inner = &self.graph.nodes()[producer];
+                    (
+                        vec![
+                            inner.inputs[0].index(),
+                            inner.inputs[1].index(),
                             node.inputs[1 - slot].index(),
                         ],
                         GpuMemoryPattern::Pointwise,
@@ -958,6 +978,14 @@ impl GpuProgram {
             } else if let Some(&(_, slot)) = self.fused_mul_adds.get(&contract.kernel_node) {
                 TranslationKind::MulAdd {
                     multiply_on_right: slot == 1,
+                }
+            } else if let Some(&(producer, slot)) =
+                self.fused_binary_pairs.get(&contract.kernel_node)
+            {
+                TranslationKind::BinaryChain {
+                    first_add: matches!(self.graph.nodes()[producer].operation, Operation::Add),
+                    second_add: matches!(node.operation, Operation::Add),
+                    producer_on_right: slot == 1,
                 }
             } else if let Some(chain) = self.fused_pointwise_chains.get(&contract.kernel_node) {
                 let inner = &self.graph.nodes()[chain[0]].operation;
@@ -1353,6 +1381,45 @@ impl GpuProgram {
                 root,
                 kind: GpuOptimizationKind::MulAddFusion,
                 removed_nodes: vec![mul],
+                exclusive_reachable_use: true,
+                selected_outputs_preserved: true,
+            });
+        }
+
+        for (&root, &(producer, slot)) in &self.fused_binary_pairs {
+            let output = &self.graph.nodes()[root];
+            let inner = &self.graph.nodes()[producer];
+            let compatible = slot < 2
+                && matches!(output.operation, Operation::Add | Operation::Mul)
+                && matches!(inner.operation, Operation::Add | Operation::Mul)
+                && !(matches!(output.operation, Operation::Add)
+                    && matches!(inner.operation, Operation::Mul))
+                && output.inputs[slot].index() == producer
+                && output.shape == inner.shape
+                && inner
+                    .inputs
+                    .iter()
+                    .all(|id| self.graph.nodes()[id.index()].shape == output.shape)
+                && self.graph.nodes()[output.inputs[1 - slot].index()].shape == output.shape
+                && uses[producer] == 1
+                && !selected.contains(&producer)
+                && !covered_removed.contains(&producer)
+                && !self.fused_mul_adds.contains_key(&root)
+                && !self.fused_mul_add_muls.contains_key(&root)
+                && !self.fused_mul_adds.contains_key(&producer)
+                && !self.fused_mul_add_muls.contains_key(&producer)
+                && !self.fused_relus.contains_key(&root)
+                && !self.fused_pointwise_chains.contains_key(&root);
+            if !compatible {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid binary pointwise fusion at node {root}"),
+                });
+            }
+            covered_removed.insert(producer);
+            optimizations.push(GpuOptimizationCapability {
+                root,
+                kind: GpuOptimizationKind::BinaryPointwiseFusion,
+                removed_nodes: vec![producer],
                 exclusive_reachable_use: true,
                 selected_outputs_preserved: true,
             });
@@ -2217,6 +2284,7 @@ impl GpuEngine {
         let mut fused_pointwise_chains = BTreeMap::new();
         let mut fused_mul_adds = BTreeMap::new();
         let mut fused_mul_add_muls = BTreeMap::new();
+        let mut fused_binary_pairs = BTreeMap::new();
         if self.launch.relu_fusion == ReluFusion::Experimental {
             for &index in &live_nodes {
                 let node = &graph.nodes()[index];
@@ -2333,6 +2401,42 @@ impl GpuEngine {
                     break;
                 }
             }
+            // Extend strict-order pair fusion to Add→Add, Add→Mul and
+            // Mul→Mul. Existing Mul→Add has priority via fused_mul_adds.
+            // No shared/selected intermediate, no alias-driven shape
+            // broadcast, and no overlapping fusion roots.
+            for &index in live_nodes.iter().rev() {
+                let root = &graph.nodes()[index];
+                if !matches!(root.operation, Operation::Add | Operation::Mul)
+                    || skipped.contains(&index)
+                    || fused_mul_adds.contains_key(&index)
+                    || fused_mul_add_muls.contains_key(&index)
+                {
+                    continue;
+                }
+                for slot in 0..2 {
+                    let inner = graph.node(root.inputs[slot])?;
+                    if !matches!(inner.operation, Operation::Add | Operation::Mul)
+                        || (matches!(root.operation, Operation::Add)
+                            && matches!(inner.operation, Operation::Mul))
+                        || uses[inner.id.index()] != 1
+                        || skipped.contains(&inner.id.index())
+                        || fused_mul_adds.contains_key(&inner.id.index())
+                        || fused_mul_add_muls.contains_key(&inner.id.index())
+                        || root.shape != inner.shape
+                        || graph.nodes()[root.inputs[1 - slot].index()].shape != root.shape
+                        || inner
+                            .inputs
+                            .iter()
+                            .any(|&id| graph.nodes()[id.index()].shape != root.shape)
+                    {
+                        continue;
+                    }
+                    fused_binary_pairs.insert(index, (inner.id.index(), slot));
+                    skipped.insert(inner.id.index());
+                    break;
+                }
+            }
         }
         let mut llvm_ir = String::from(
             "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64\"\n\
@@ -2359,6 +2463,13 @@ impl GpuEngine {
             } else if let Some(&(mul, slot)) = fused_mul_adds.get(&index) {
                 debug_assert!(matches!(graph.nodes()[mul].operation, Operation::Mul));
                 llvm_ir.push_str(&mul_add_kernel_ir(index, slot == 1));
+            } else if let Some(&(producer, slot)) = fused_binary_pairs.get(&index) {
+                llvm_ir.push_str(&binary_chain_kernel_ir(
+                    index,
+                    matches!(graph.nodes()[producer].operation, Operation::Add),
+                    matches!(node.operation, Operation::Add),
+                    slot == 1,
+                ));
             } else if let Some(chain) = fused_pointwise_chains.get(&index) {
                 let inner = &graph.nodes()[chain[0]];
                 let bias_add = &graph.nodes()[chain[1]];
@@ -2478,6 +2589,7 @@ impl GpuEngine {
             fused_pointwise_chains,
             fused_mul_adds,
             fused_mul_add_muls,
+            fused_binary_pairs,
         };
         // Fail closed unless every launched kernel has matching memory and
         // translation evidence and every applied optimization has valid
@@ -2873,6 +2985,51 @@ compute:
   %product = call float asm sideeffect "mul.rn.f32 $0, $1, $2;", "=f,f,f"(float %x, float %y)
   %middle = call float asm sideeffect "add.rn.f32 $0, $1, $2;", "=f,f,f"{add_operands}
   %value = call float asm sideeffect "mul.rn.f32 $0, $1, $2;", "=f,f,f"{outer_operands}
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %value, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
+}
+
+/// Three-input pointwise chain with two explicit independent RN
+/// instructions, preserving both operand orders and intermediate rounding.
+fn binary_chain_kernel_ir(
+    index: usize,
+    first_add: bool,
+    second_add: bool,
+    producer_on_right: bool,
+) -> String {
+    let first = if first_add { "add.rn.f32" } else { "mul.rn.f32" };
+    let second = if second_add { "add.rn.f32" } else { "mul.rn.f32" };
+    let operands = if producer_on_right {
+        "(float %z, float %middle)"
+    } else {
+        "(float %middle, float %z)"
+    };
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %bias, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %idx
+  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx
+  %biasp = getelementptr float, ptr addrspace(1) %bias, i32 %idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %y = load float, ptr addrspace(1) %bp, align 4
+  %z = load float, ptr addrspace(1) %biasp, align 4
+  %middle = call float asm sideeffect "{first} $0, $1, $2;", "=f,f,f"(float %x, float %y)
+  %value = call float asm sideeffect "{second} $0, $1, $2;", "=f,f,f"{operands}
   %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
   store float %value, ptr addrspace(1) %op, align 4
   br label %done

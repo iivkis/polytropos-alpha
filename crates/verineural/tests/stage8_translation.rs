@@ -22,6 +22,14 @@ fn synthetic_ptx(plan: &TranslationPlan) -> String {
             | TranslationKind::MulBiasRelu { .. }
             | TranslationKind::MulAdd { .. } => (1, 1),
             TranslationKind::MulAddMul { .. } => (1, 2),
+            TranslationKind::BinaryChain {
+                first_add,
+                second_add,
+                ..
+            } => {
+                let adds = usize::from(first_add) + usize::from(second_add);
+                (adds, 2 - adds)
+            },
             TranslationKind::AddBiasRelu { .. } => (2, 0),
             TranslationKind::Relu
             | TranslationKind::Sub

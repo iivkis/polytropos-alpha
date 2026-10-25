@@ -24,6 +24,12 @@ pub enum TranslationKind {
     MulAdd {
         multiply_on_right: bool,
     },
+    /// Two independent Add/Mul RN instructions, without reassociation.
+    BinaryChain {
+        first_add: bool,
+        second_add: bool,
+        producer_on_right: bool,
+    },
     MulAddMul {
         add_mul_on_right: bool,
         mul_add_on_right: bool,
@@ -89,6 +95,7 @@ impl TranslationKind {
             Self::Add => "add",
             Self::Mul => "mul",
             Self::MulAdd { .. } => "mul_add",
+            Self::BinaryChain { .. } => "binary_chain",
             Self::MulAddMul { .. } => "mul_add_mul",
             Self::Sub => "sub_rn",
             Self::DivRne => "div_rn",
@@ -118,6 +125,14 @@ impl TranslationKind {
             Self::Add | Self::BiasAdd { .. } => (1, 0, 0),
             Self::Mul => (0, 1, 0),
             Self::MulAdd { .. } => (1, 1, 0),
+            Self::BinaryChain {
+                first_add,
+                second_add,
+                ..
+            } => {
+                let adds = usize::from(first_add) + usize::from(second_add);
+                (adds, 2 - adds, 0)
+            },
             Self::MulAddMul { .. } => (1, 2, 0),
             Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
@@ -152,7 +167,8 @@ impl TranslationKind {
             Self::AddBiasRelu { .. }
             | Self::MulBiasRelu { .. }
             | Self::MulAdd { .. }
-            | Self::MulAddMul { .. } => 3,
+            | Self::MulAddMul { .. }
+            | Self::BinaryChain { .. } => 3,
             _ => 2,
         }
     }
@@ -183,6 +199,15 @@ impl TranslationKind {
             Self::ArgMaxLast { width } => width,
             Self::TakeAxis0 { lane } => lane,
             Self::MulAdd { multiply_on_right } => usize::from(multiply_on_right),
+            Self::BinaryChain {
+                first_add,
+                second_add,
+                producer_on_right,
+            } => {
+                usize::from(first_add)
+                    + 2 * usize::from(second_add)
+                    + 4 * usize::from(producer_on_right)
+            },
             Self::MulAddMul {
                 add_mul_on_right,
                 mul_add_on_right,
@@ -202,6 +227,11 @@ impl TranslationKind {
             "mul" => Self::Mul,
             "mul_add" => Self::MulAdd {
                 multiply_on_right: inner == 1,
+            },
+            "binary_chain" if inner < 8 => Self::BinaryChain {
+                first_add: inner & 1 != 0,
+                second_add: inner & 2 != 0,
+                producer_on_right: inner & 4 != 0,
             },
             "mul_add_mul" if inner < 12 => Self::MulAddMul {
                 add_mul_on_right: inner & 1 != 0,
@@ -351,7 +381,9 @@ impl TranslationPlan {
             }
             if matches!(
                 kernel.kind,
-                TranslationKind::MulAdd { .. } | TranslationKind::MulAddMul { .. }
+                TranslationKind::MulAdd { .. }
+                    | TranslationKind::MulAddMul { .. }
+                    | TranslationKind::BinaryChain { .. }
             ) {
                 if kernel.reads.iter().any(|&(_, size)| size != kernel.writes) {
                     return Err(invalid("mul-add source shape mismatch"));
@@ -701,6 +733,74 @@ impl TranslationPlan {
                 report.details.push_str(&format!(
                     "node={node} kind={} reads={reads} writes={} add.rn.f32=0 mul.rn.f32=0 relu=0 status=structural-pass\n",
                     kernel.kind.name(), kernel.writes
+                ));
+                continue;
+            }
+            if let TranslationKind::BinaryChain {
+                first_add,
+                second_add,
+                producer_on_right,
+            } = kernel.kind
+            {
+                let first = if first_add { "add.rn.f32" } else { "mul.rn.f32" };
+                let second = if second_add { "add.rn.f32" } else { "mul.rn.f32" };
+                let operands = if producer_on_right {
+                    "(float %z, float %middle)"
+                } else {
+                    "(float %middle, float %z)"
+                };
+                let middle = format!(
+                    "%middle = call float asm sideeffect \"{first} $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)"
+                );
+                let value = format!(
+                    "%value = call float asm sideeffect \"{second} $0, $1, $2;\", \"=f,f,f\"{operands}"
+                );
+                let required = [
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx",
+                    "%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx",
+                    "%biasp = getelementptr float, ptr addrspace(1) %bias, i32 %idx",
+                    "%x = load float, ptr addrspace(1) %ap, align 4",
+                    "%y = load float, ptr addrspace(1) %bp, align 4",
+                    "%z = load float, ptr addrspace(1) %biasp, align 4",
+                    "icmp ult i32 %idx, %length",
+                    "br i1 %valid, label %compute, label %done",
+                    "store float %value, ptr addrspace(1) %op, align 4",
+                ];
+                if required.iter().any(|&x| !ir.contains(x))
+                    || !matches!((ir.find(&middle), ir.find(&value)),
+                        (Some(a), Some(b)) if a < b)
+                    || ir.matches("call float asm sideeffect").count() != 2
+                    || ir.matches("fcmp ").count() != 0
+                {
+                    return Err(invalid(format!(
+                        "binary pointwise LLVM template mismatch at node {node}"
+                    )));
+                }
+                audit_fp32_ptx(ir, asm)
+                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                let sequence = asm
+                    .lines()
+                    .map(|line| line.split("//").next().unwrap_or(""))
+                    .filter_map(|line| {
+                        if line.contains("mul.rn.f32") {
+                            Some("mul.rn.f32")
+                        } else if line.contains("add.rn.f32") {
+                            Some("add.rn.f32")
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if sequence != [first, second] {
+                    return Err(invalid(format!(
+                        "binary pointwise PTX instruction order mismatch at node {node}"
+                    )));
+                }
+                report.rounded_adds += usize::from(first_add) + usize::from(second_add);
+                report.rounded_muls += usize::from(!first_add) + usize::from(!second_add);
+                report.details.push_str(&format!(
+                    "node={node} kind=binary_chain reads={:?} writes={} hardware=trusted\n",
+                    kernel.reads, kernel.writes
                 ));
                 continue;
             }

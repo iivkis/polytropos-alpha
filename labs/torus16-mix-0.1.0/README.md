@@ -452,3 +452,15 @@ outputs. Checkpoints retain the same versioned state/optimizer schema. This is
 an experimental runtime optimization, not an FP32 proof or a guaranteed GPU
 utilization/speedup claim; compare checkpoint bytes for uninterrupted and
 resumed runs and benchmark sustained throughput on the target hardware.
+
+### Additional universal binary pointwise fusion (experimental)
+
+VeriNeural's opt-in pointwise fusion now also combines exclusive full-shaped
+`Add→Add`, `Add→Mul` and `Mul→Mul` pairs. Every fused kernel retains the
+original two separate `*.rn.f32` instructions and operand order; no FMA
+contraction, reassociation or overwrite of shared/selected intermediates is
+permitted. The binary-chain plan is checked against Semantic IR memory extents
+and per-kernel LLVM/PTX structural evidence. These checks are not a hardware
+FP32 proof. `cuda_graph_before/after` and `binary_pointwise_fusions` measure
+kernel-node reduction; actual GPU utilization and sustained tokens/sec must
+be measured separately on the target GPU.

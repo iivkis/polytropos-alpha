@@ -452,6 +452,18 @@ tasks:
     cmds:
       - cargo test -p torus16-mix-lab --test gpu_forward -- --ignored --nocapture
 
+  pointwise-binary-chain-fusion:
+    desc: Structural checks for generic two-operation Add/Mul CUDA fusion
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test binary_pointwise_fusion
+
+  verify-gpu-binary-chain-fusion:
+    desc: NVIDIA bitwise parity for opt-in two-operation Add/Mul fusion
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test binary_pointwise_fusion -- --ignored --nocapture
+
   pointwise-three-op-fusion:
     desc: Structural contracts for three-op strict FP32 pointwise CUDA fusion
     deps: [prepare]
