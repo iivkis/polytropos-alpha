@@ -448,8 +448,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut profile_totals = [0.0f64; 12];
     // Event profiling modifies synchronization and is intentionally off in
     // the authoritative end-to-end throughput benchmark.
-    let gpu_feedback_events = gpu_optimizer.is_some()
-        && std::env::var_os("TORUS16_GPU_FEEDBACK_EVENTS").is_some();
+    let gpu_feedback_events =
+        gpu_optimizer.is_some() && std::env::var_os("TORUS16_GPU_FEEDBACK_EVENTS").is_some();
     let mut feedback_checked_values = 0usize;
     let mut feedback_copied_values = 0usize;
     for iteration in first_window..train_windows {

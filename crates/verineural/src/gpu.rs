@@ -2574,9 +2574,10 @@ impl GpuExecution {
             .filter(|(dst, src, _)| dst != src)
             .collect::<Vec<_>>();
         if device_events {
-            profile.device_copy = Some(self.execution_health.record_io(
-                self.session.launch_feedback_copies_device_timed(&transfers),
-            )?);
+            profile.device_copy = Some(
+                self.execution_health
+                    .record_io(self.session.launch_feedback_copies_device_timed(&transfers))?,
+            );
         } else {
             self.execution_health
                 .record_io(self.session.launch_feedback_copies(&transfers))?;
