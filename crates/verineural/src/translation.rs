@@ -233,7 +233,7 @@ impl TranslationKind {
                 usize::from(reused_source)
                     + 2 * usize::from(multiply_on_right)
                     + 4 * usize::from(add_on_right)
-            },
+            }
             Self::MulAddMul {
                 add_mul_on_right,
                 mul_add_on_right,
@@ -830,8 +830,7 @@ impl TranslationPlan {
                         "MulMulAddDiv LLVM template mismatch at node {node}"
                     )));
                 }
-                audit_fp32_ptx(ir, asm)
-                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                audit_fp32_ptx(ir, asm).map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
                 let sequence = asm
                     .lines()
                     .map(|line| line.split("//").next().unwrap_or(""))

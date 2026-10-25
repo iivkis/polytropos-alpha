@@ -795,8 +795,17 @@ mod platform {
             ];
             check("cuLaunchKernel", unsafe {
                 (self.functions.launch)(
-                    function, grid, 1, 1, threads, 1, 1, 0, self.stream,
-                    args.as_mut_ptr(), ptr::null_mut(),
+                    function,
+                    grid,
+                    1,
+                    1,
+                    threads,
+                    1,
+                    1,
+                    0,
+                    self.stream,
+                    args.as_mut_ptr(),
+                    ptr::null_mut(),
                 )
             })
         }

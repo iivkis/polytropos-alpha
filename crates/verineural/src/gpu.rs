@@ -1031,201 +1031,201 @@ impl GpuProgram {
         let mut kernels = Vec::new();
         for contract in self.memory_contracts()? {
             let node = &self.graph.nodes()[contract.kernel_node];
-            let kind =
-                if let Some(&(_, _, _, reused, middle_slot, add_slot)) =
-                    self.fused_mul_mul_add_divs.get(&contract.kernel_node)
-                {
-                    TranslationKind::MulMulAddDiv {
-                        reused_source: reused as u8,
-                        multiply_on_right: middle_slot == 1,
-                        add_on_right: add_slot == 1,
-                    }
-                } else if let Some(&(_, _, slot)) = self.fused_sqrt_add_divs.get(&contract.kernel_node) {
-                    TranslationKind::SqrtAddDiv {
-                        sqrt_on_right: slot == 1,
-                    }
-                } else if let Some(&(_, _, add_slot, outer_slot, reuse)) =
-                    self.fused_mul_add_muls.get(&contract.kernel_node)
-                {
-                    TranslationKind::MulAddMul {
-                        add_mul_on_right: add_slot == 1,
-                        mul_add_on_right: outer_slot == 1,
-                        reused_source: reuse as u8,
-                    }
-                } else if let Some(&(_, slot)) = self.fused_mul_adds.get(&contract.kernel_node) {
-                    TranslationKind::MulAdd {
-                        multiply_on_right: slot == 1,
-                    }
-                } else if let Some(&(producer, slot)) =
-                    self.fused_binary_pairs.get(&contract.kernel_node)
-                {
-                    TranslationKind::BinaryChain {
-                        first_add: matches!(self.graph.nodes()[producer].operation, Operation::Add),
-                        second_add: matches!(node.operation, Operation::Add),
-                        producer_on_right: slot == 1,
-                    }
-                } else if let Some(chain) = self.fused_pointwise_chains.get(&contract.kernel_node) {
-                    let inner = &self.graph.nodes()[chain[0]].operation;
-                    let columns = match contract.pattern {
-                        GpuMemoryPattern::BiasAdd { columns } => columns,
-                        _ => {
-                            return Err(GpuError::Fp32PtxRejected {
-                                reason: "fused chain lacks BiasAdd memory contract".into(),
-                            });
-                        }
-                    };
-                    match inner {
-                        Operation::Add => TranslationKind::AddBiasRelu { columns },
-                        Operation::Mul => TranslationKind::MulBiasRelu { columns },
-                        _ => {
-                            return Err(GpuError::Fp32PtxRejected {
-                                reason: "unsupported fused inner operation".into(),
-                            });
-                        }
-                    }
-                } else if let Some(&producer) = self.fused_relus.get(&contract.kernel_node) {
-                    match self.graph.nodes()[producer].operation {
-                        Operation::Add => TranslationKind::AddRelu,
-                        Operation::Mul => TranslationKind::MulRelu,
-                        Operation::BiasAdd => {
-                            let columns = match contract.pattern {
-                                GpuMemoryPattern::BiasAdd { columns } => columns,
-                                _ => {
-                                    return Err(GpuError::Fp32PtxRejected {
-                                        reason: "fused bias lacks broadcast memory contract".into(),
-                                    });
-                                }
-                            };
-                            TranslationKind::BiasAddRelu { columns }
-                        }
-                        _ => {
-                            return Err(GpuError::Fp32PtxRejected {
-                                reason: "unsupported fused producer operation".into(),
-                            });
-                        }
-                    }
-                } else {
-                    match node.operation {
-                        Operation::Add => TranslationKind::Add,
-                        Operation::Mul => TranslationKind::Mul,
-                        Operation::Pointwise(ref spec) => {
-                            supported_pointwise(spec).ok_or(GpuError::UnsupportedOperation {
-                                node: contract.kernel_node,
-                                operation: node.operation.name(),
-                            })?
-                        }
-                        Operation::BiasAdd => {
-                            let columns = match contract.pattern {
-                                GpuMemoryPattern::BiasAdd { columns } => columns,
-                                _ => {
-                                    return Err(GpuError::Fp32PtxRejected {
-                                        reason: "bias lacks broadcast memory contract".into(),
-                                    });
-                                }
-                            };
-                            TranslationKind::BiasAdd { columns }
-                        }
-                        Operation::MatMul => {
-                            let (inner, columns) = match contract.pattern {
-                                GpuMemoryPattern::MatMul { inner, columns, .. } => (inner, columns),
-                                _ => {
-                                    return Err(GpuError::Fp32PtxRejected {
-                                        reason: "MatMul lacks reduction memory contract".into(),
-                                    });
-                                }
-                            };
-                            TranslationKind::MatMul { inner, columns }
-                        }
-                        Operation::Permute { .. } => match contract.pattern {
-                            GpuMemoryPattern::Transpose2D { rows, columns } => {
-                                TranslationKind::Transpose2D { rows, columns }
-                            }
-                            _ => {
-                                return Err(GpuError::Fp32PtxRejected {
-                                    reason: "Permute lacks transpose2d memory contract".into(),
-                                });
-                            }
-                        },
-                        Operation::ReverseAxis { axis: 0 } => match contract.pattern {
-                            GpuMemoryPattern::ReverseRows2D { rows, columns } => {
-                                TranslationKind::ReverseRows2D { rows, columns }
-                            }
-                            _ => {
-                                return Err(GpuError::Fp32PtxRejected {
-                                    reason: "ReverseAxis(0) lacks memory contract".into(),
-                                });
-                            }
-                        },
-                        Operation::ReverseAxis { axis: 1 } => match contract.pattern {
-                            GpuMemoryPattern::ReverseColumns2D { rows, columns } => {
-                                TranslationKind::ReverseColumns2D { rows, columns }
-                            }
-                            _ => {
-                                return Err(GpuError::Fp32PtxRejected {
-                                    reason: "ReverseAxis(1) lacks memory contract".into(),
-                                });
-                            }
-                        },
-                        Operation::BroadcastTo(_) => match contract.pattern {
-                            GpuMemoryPattern::BroadcastScalar => TranslationKind::BroadcastScalar,
-                            _ => {
-                                return Err(GpuError::Fp32PtxRejected {
-                                    reason: "BroadcastTo lacks scalar memory contract".into(),
-                                });
-                            }
-                        },
-                        Operation::SliceAxis { axis: 1, .. } => match contract.pattern {
-                            GpuMemoryPattern::SliceLastRow {
-                                start,
-                                source_width,
-                            } => TranslationKind::SliceLastRow {
-                                start,
-                                source_width,
-                            },
-                            _ => {
-                                return Err(GpuError::Fp32PtxRejected {
-                                    reason: "SliceAxis(1) lacks memory contract".into(),
-                                });
-                            }
-                        },
-                        Operation::Concat { .. } => match contract.pattern {
-                            GpuMemoryPattern::ConcatAxis0 { left } => {
-                                TranslationKind::ConcatAxis0 { left }
-                            }
-                            _ => {
-                                return Err(GpuError::Fp32PtxRejected {
-                                    reason: "Concat(0) lacks memory contract".into(),
-                                });
-                            }
-                        },
-                        Operation::ArgMax { axis: 1, .. } => match contract.pattern {
-                            GpuMemoryPattern::ArgMaxLast { width } => {
-                                TranslationKind::ArgMaxLast { width }
-                            }
-                            _ => {
-                                return Err(GpuError::Fp32PtxRejected {
-                                    reason: "ArgMax(last) lacks memory contract".into(),
-                                });
-                            }
-                        },
-                        Operation::Take { axis: 0 } => match contract.pattern {
-                            GpuMemoryPattern::TakeAxis0 { lane, .. } => {
-                                TranslationKind::TakeAxis0 { lane }
-                            }
-                            _ => {
-                                return Err(GpuError::Fp32PtxRejected {
-                                    reason: "Take(0) lacks memory contract".into(),
-                                });
-                            }
-                        },
-                        Operation::Relu => TranslationKind::Relu,
-                        _ => {
-                            return Err(GpuError::Fp32PtxRejected {
-                                reason: "unexpected operation in kernel translation plan".into(),
-                            });
-                        }
+            let kind = if let Some(&(_, _, _, reused, middle_slot, add_slot)) =
+                self.fused_mul_mul_add_divs.get(&contract.kernel_node)
+            {
+                TranslationKind::MulMulAddDiv {
+                    reused_source: reused as u8,
+                    multiply_on_right: middle_slot == 1,
+                    add_on_right: add_slot == 1,
+                }
+            } else if let Some(&(_, _, slot)) = self.fused_sqrt_add_divs.get(&contract.kernel_node)
+            {
+                TranslationKind::SqrtAddDiv {
+                    sqrt_on_right: slot == 1,
+                }
+            } else if let Some(&(_, _, add_slot, outer_slot, reuse)) =
+                self.fused_mul_add_muls.get(&contract.kernel_node)
+            {
+                TranslationKind::MulAddMul {
+                    add_mul_on_right: add_slot == 1,
+                    mul_add_on_right: outer_slot == 1,
+                    reused_source: reuse as u8,
+                }
+            } else if let Some(&(_, slot)) = self.fused_mul_adds.get(&contract.kernel_node) {
+                TranslationKind::MulAdd {
+                    multiply_on_right: slot == 1,
+                }
+            } else if let Some(&(producer, slot)) =
+                self.fused_binary_pairs.get(&contract.kernel_node)
+            {
+                TranslationKind::BinaryChain {
+                    first_add: matches!(self.graph.nodes()[producer].operation, Operation::Add),
+                    second_add: matches!(node.operation, Operation::Add),
+                    producer_on_right: slot == 1,
+                }
+            } else if let Some(chain) = self.fused_pointwise_chains.get(&contract.kernel_node) {
+                let inner = &self.graph.nodes()[chain[0]].operation;
+                let columns = match contract.pattern {
+                    GpuMemoryPattern::BiasAdd { columns } => columns,
+                    _ => {
+                        return Err(GpuError::Fp32PtxRejected {
+                            reason: "fused chain lacks BiasAdd memory contract".into(),
+                        });
                     }
                 };
+                match inner {
+                    Operation::Add => TranslationKind::AddBiasRelu { columns },
+                    Operation::Mul => TranslationKind::MulBiasRelu { columns },
+                    _ => {
+                        return Err(GpuError::Fp32PtxRejected {
+                            reason: "unsupported fused inner operation".into(),
+                        });
+                    }
+                }
+            } else if let Some(&producer) = self.fused_relus.get(&contract.kernel_node) {
+                match self.graph.nodes()[producer].operation {
+                    Operation::Add => TranslationKind::AddRelu,
+                    Operation::Mul => TranslationKind::MulRelu,
+                    Operation::BiasAdd => {
+                        let columns = match contract.pattern {
+                            GpuMemoryPattern::BiasAdd { columns } => columns,
+                            _ => {
+                                return Err(GpuError::Fp32PtxRejected {
+                                    reason: "fused bias lacks broadcast memory contract".into(),
+                                });
+                            }
+                        };
+                        TranslationKind::BiasAddRelu { columns }
+                    }
+                    _ => {
+                        return Err(GpuError::Fp32PtxRejected {
+                            reason: "unsupported fused producer operation".into(),
+                        });
+                    }
+                }
+            } else {
+                match node.operation {
+                    Operation::Add => TranslationKind::Add,
+                    Operation::Mul => TranslationKind::Mul,
+                    Operation::Pointwise(ref spec) => {
+                        supported_pointwise(spec).ok_or(GpuError::UnsupportedOperation {
+                            node: contract.kernel_node,
+                            operation: node.operation.name(),
+                        })?
+                    }
+                    Operation::BiasAdd => {
+                        let columns = match contract.pattern {
+                            GpuMemoryPattern::BiasAdd { columns } => columns,
+                            _ => {
+                                return Err(GpuError::Fp32PtxRejected {
+                                    reason: "bias lacks broadcast memory contract".into(),
+                                });
+                            }
+                        };
+                        TranslationKind::BiasAdd { columns }
+                    }
+                    Operation::MatMul => {
+                        let (inner, columns) = match contract.pattern {
+                            GpuMemoryPattern::MatMul { inner, columns, .. } => (inner, columns),
+                            _ => {
+                                return Err(GpuError::Fp32PtxRejected {
+                                    reason: "MatMul lacks reduction memory contract".into(),
+                                });
+                            }
+                        };
+                        TranslationKind::MatMul { inner, columns }
+                    }
+                    Operation::Permute { .. } => match contract.pattern {
+                        GpuMemoryPattern::Transpose2D { rows, columns } => {
+                            TranslationKind::Transpose2D { rows, columns }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "Permute lacks transpose2d memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::ReverseAxis { axis: 0 } => match contract.pattern {
+                        GpuMemoryPattern::ReverseRows2D { rows, columns } => {
+                            TranslationKind::ReverseRows2D { rows, columns }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "ReverseAxis(0) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::ReverseAxis { axis: 1 } => match contract.pattern {
+                        GpuMemoryPattern::ReverseColumns2D { rows, columns } => {
+                            TranslationKind::ReverseColumns2D { rows, columns }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "ReverseAxis(1) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::BroadcastTo(_) => match contract.pattern {
+                        GpuMemoryPattern::BroadcastScalar => TranslationKind::BroadcastScalar,
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "BroadcastTo lacks scalar memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::SliceAxis { axis: 1, .. } => match contract.pattern {
+                        GpuMemoryPattern::SliceLastRow {
+                            start,
+                            source_width,
+                        } => TranslationKind::SliceLastRow {
+                            start,
+                            source_width,
+                        },
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "SliceAxis(1) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::Concat { .. } => match contract.pattern {
+                        GpuMemoryPattern::ConcatAxis0 { left } => {
+                            TranslationKind::ConcatAxis0 { left }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "Concat(0) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::ArgMax { axis: 1, .. } => match contract.pattern {
+                        GpuMemoryPattern::ArgMaxLast { width } => {
+                            TranslationKind::ArgMaxLast { width }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "ArgMax(last) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::Take { axis: 0 } => match contract.pattern {
+                        GpuMemoryPattern::TakeAxis0 { lane, .. } => {
+                            TranslationKind::TakeAxis0 { lane }
+                        }
+                        _ => {
+                            return Err(GpuError::Fp32PtxRejected {
+                                reason: "Take(0) lacks memory contract".into(),
+                            });
+                        }
+                    },
+                    Operation::Relu => TranslationKind::Relu,
+                    _ => {
+                        return Err(GpuError::Fp32PtxRejected {
+                            reason: "unexpected operation in kernel translation plan".into(),
+                        });
+                    }
+                }
+            };
             kernels.push(TranslationKernel {
                 node: contract.kernel_node,
                 kind,
@@ -1494,10 +1494,14 @@ impl GpuProgram {
                 && output.shape == first.shape
                 && output.shape == second.shape
                 && output.shape == sum.shape
-                && sources.iter().all(|id| self.graph.nodes()[id.index()].shape == output.shape)
+                && sources
+                    .iter()
+                    .all(|id| self.graph.nodes()[id.index()].shape == output.shape)
                 && [inner, middle, add].iter().all(|&id| uses[id] == 1)
                 && [inner, middle, add].iter().all(|id| !selected.contains(id))
-                && [inner, middle, add].iter().all(|id| !covered_removed.contains(id))
+                && [inner, middle, add]
+                    .iter()
+                    .all(|id| !covered_removed.contains(id))
                 && !self.fused_mul_adds.contains_key(&add)
                 && !self.fused_binary_pairs.contains_key(&add);
             if !compatible {
@@ -2753,19 +2757,29 @@ impl GpuEngine {
                             sum.inputs[1 - add_slot],
                             root.inputs[1],
                         ];
-                        if externals.iter().any(|id| graph.nodes()[id.index()].shape != root.shape) {
+                        if externals
+                            .iter()
+                            .any(|id| graph.nodes()[id.index()].shape != root.shape)
+                        {
                             continue;
                         }
-                        if let Some(reused) = first.inputs.iter().position(
-                            |&id| id == second.inputs[1 - middle_slot]
-                        ) {
-                            fused_mul_mul_add_divs.insert(index, (
-                                first.id.index(), second.id.index(), sum.id.index(),
-                                reused, middle_slot, add_slot,
-                            ));
-                            skipped.extend([
-                                first.id.index(), second.id.index(), sum.id.index(),
-                            ]);
+                        if let Some(reused) = first
+                            .inputs
+                            .iter()
+                            .position(|&id| id == second.inputs[1 - middle_slot])
+                        {
+                            fused_mul_mul_add_divs.insert(
+                                index,
+                                (
+                                    first.id.index(),
+                                    second.id.index(),
+                                    sum.id.index(),
+                                    reused,
+                                    middle_slot,
+                                    add_slot,
+                                ),
+                            );
+                            skipped.extend([first.id.index(), second.id.index(), sum.id.index()]);
                             break 'candidate;
                         }
                     }
@@ -2947,7 +2961,10 @@ impl GpuEngine {
                 fused_mul_mul_add_divs.get(&index)
             {
                 llvm_ir.push_str(&mul_mul_add_div_kernel_ir(
-                    index, reused, middle_slot == 1, add_slot == 1,
+                    index,
+                    reused,
+                    middle_slot == 1,
+                    add_slot == 1,
                 ));
             } else if let Some(&(_, _, slot)) = fused_sqrt_add_divs.get(&index) {
                 llvm_ir.push_str(&sqrt_add_div_kernel_ir(index, slot == 1));

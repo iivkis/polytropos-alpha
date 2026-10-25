@@ -32,8 +32,8 @@ fn fixture(reused: usize, multiply_on_right: bool, add_on_right: bool) -> Fixtur
 
 #[test]
 fn four_op_fusion_is_structurally_audited_and_preserves_all_selected_values() {
-    let optimized = GpuEngine::default()
-        .with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
+    let optimized =
+        GpuEngine::default().with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
     let plain = GpuEngine::default();
     for reused in 0..2 {
         for multiply_on_right in [false, true] {
@@ -106,13 +106,11 @@ fn four_op_gpu_matches_unfused_bits() {
         [2., -3., 0.5, 1.25, 0., -0.0, 2., 4.],
         [1., 3., 0.25, 1e-8, 2., 0.5, -1., 0.75],
     ];
-    let dir = std::env::temp_dir()
-        .join(format!("vn_four_op_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("vn_four_op_{}", std::process::id()));
     for reused in 0..2 {
         for multiply_on_right in [false, true] {
             for add_on_right in [false, true] {
-                let (graph, inputs, _, root) =
-                    fixture(reused, multiply_on_right, add_on_right);
+                let (graph, inputs, _, root) = fixture(reused, multiply_on_right, add_on_right);
                 let bound = inputs
                     .iter()
                     .zip(&data)
@@ -131,25 +129,19 @@ fn four_op_gpu_matches_unfused_bits() {
                     // Fail closed even when PTX still contains the same
                     // number of arithmetic instructions with altered
                     // rounding. The plan is derived from Semantic IR.
-                    let pt_xpath = fused.lower(
-                        &optimized,
-                        &dir.join("ptx_audit"),
-                    ).unwrap();
+                    let pt_xpath = fused.lower(&optimized, &dir.join("ptx_audit")).unwrap();
                     let trusted_ptx = std::fs::read_to_string(pt_xpath).unwrap();
                     let changed = trusted_ptx.replacen("mul.rn.f32", "mul.f32", 1);
                     assert_ne!(trusted_ptx, changed);
                     assert!(
-                        optimized.translation_plan().unwrap()
+                        optimized
+                            .translation_plan()
+                            .unwrap()
                             .validate(optimized.llvm_ir(), &changed)
                             .is_err()
                     );
                 }
-                for (lane, (&x, &y)) in expected
-                    .values()
-                    .iter()
-                    .zip(actual.values())
-                    .enumerate()
-                {
+                for (lane, (&x, &y)) in expected.values().iter().zip(actual.values()).enumerate() {
                     assert_eq!(
                         x.to_bits(),
                         y.to_bits(),
