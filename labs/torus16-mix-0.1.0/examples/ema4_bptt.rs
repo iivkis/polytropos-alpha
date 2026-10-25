@@ -659,7 +659,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             train_output_count
         };
         let outputs = gpu.read_outputs_selected(&selected[..read_count])?;
-        if iteration == 0 && let Some(path) = &initial_probe_path {
+        if iteration == 0
+            && let Some(path) = &initial_probe_path
+        {
             let states_snapshot = gpu.read_outputs_selected(&terminal_outputs)?;
             let mut bytes = Vec::new();
             for (_, tensor) in outputs
