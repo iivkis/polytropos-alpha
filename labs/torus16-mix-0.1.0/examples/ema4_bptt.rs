@@ -138,10 +138,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let gpu_adamw_requested = std::env::var_os("TORUS16_GPU_ADAMW").is_some();
+    let verify_fusion = std::env::var_os("TORUS16_VERIFY_FUSION").is_some();
     let mut selected = window.outputs().to_vec();
-    // CPU AdamW reads gradients on the host. GPU AdamW consumes them as
-    // internal IR dependencies, so exporting them needlessly blocks fusion.
-    if !gpu_adamw_requested {
+    // CPU AdamW needs host gradients; the explicit fusion-parity oracle
+    // still observes them. Ordinary GPU training keeps them internal.
+    if !gpu_adamw_requested || verify_fusion {
         selected.extend(gradients.iter().copied());
     }
     let train_output_count = selected.len();
@@ -312,7 +313,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // identical parameters, recurrent state, training tokens and CE labels.
     // The baseline session is dropped before allocating the fused session to
     // avoid requiring two large CUDA graphs in GPU memory simultaneously.
-    let verify_fusion = std::env::var_os("TORUS16_VERIFY_FUSION").is_some();
     let compare_replay = std::env::var_os("TORUS16_BENCH_COMPARE").is_some();
     let verify_updates = if verify_fusion && first_window < train_windows {
         let mut updates = Vec::with_capacity(window_len * 2);
