@@ -26,17 +26,32 @@ pub fn fingerprint(bytes: &[u8]) -> u64 {
 /// or a proof of GPU/kernel correctness. Ignore transient graph NodeId IDs.
 /// Checkpoint identity of the actual training IR and evaluation protocol.
 /// This is a non-cryptographic compatibility checksum, not a formal GPU proof.
+/// Explicit, versioned identity inputs for one experiment. Grouping these
+/// prevents call sites from accidentally exchanging evaluation settings.
+pub struct FingerprintContext<'a> {
+    pub seed: u64,
+    pub role_init: &'a str,
+    pub initial: &'a [(String, Tensor<f32>)],
+    pub val_limit: usize,
+    pub test_limit: usize,
+    pub eval_every: usize,
+    pub optimizer_backend: &'a str,
+}
+
 pub fn architecture_fingerprint(
     model: &Model,
     training_graph: &NeuralGraph,
-    seed: u64,
-    role_init: &str,
-    initial: &[(String, Tensor<f32>)],
-    val_limit: usize,
-    test_limit: usize,
-    eval_every: usize,
-    optimizer_backend: &str,
+    context: FingerprintContext<'_>,
 ) -> u64 {
+    let FingerprintContext {
+        seed,
+        role_init,
+        initial,
+        val_limit,
+        test_limit,
+        eval_every,
+        optimizer_backend,
+    } = context;
     let mut description = format!(
         "ema4-training-graph-v3|seed={seed}|role_init={role_init}|validation={val_limit}|test={test_limit}|eval_every={eval_every}|optimizer={optimizer_backend}\n",
     );
@@ -218,20 +233,35 @@ pub struct Ema4Checkpoint {
     pub states: BTreeMap<String, Tensor<f32>>,
     pub optimizer: AdamWCheckpoint,
 }
+/// Exact conditions required to reuse a research checkpoint.
+/// Only `max_windows` may be extended on resume.
+pub struct CheckpointRequirements<'a> {
+    pub bptt: usize,
+    pub vocab: usize,
+    pub corpus: u64,
+    pub architecture: u64,
+    pub val_limit: usize,
+    pub test_limit: usize,
+    pub eval_every: usize,
+    pub max_windows: usize,
+    pub params: &'a BTreeMap<String, Tensor<f32>>,
+    pub states: &'a BTreeMap<String, Tensor<f32>>,
+}
+
 impl Ema4Checkpoint {
-    pub fn validate(
-        &self,
-        bptt: usize,
-        vocab: usize,
-        corpus: u64,
-        architecture: u64,
-        val_limit: usize,
-        test_limit: usize,
-        eval_every: usize,
-        max_windows: usize,
-        params: &BTreeMap<String, Tensor<f32>>,
-        states: &BTreeMap<String, Tensor<f32>>,
-    ) -> io::Result<()> {
+    pub fn validate(&self, requirements: CheckpointRequirements<'_>) -> io::Result<()> {
+        let CheckpointRequirements {
+            bptt,
+            vocab,
+            corpus,
+            architecture,
+            val_limit,
+            test_limit,
+            eval_every,
+            max_windows,
+            params,
+            states,
+        } = requirements;
         if self.bptt != bptt
             || self.vocab != vocab
             || self.corpus_fingerprint != corpus
@@ -453,18 +483,18 @@ mod tests {
             optimizer: optimizer.checkpoint(),
         };
         snapshot
-            .validate(
-                2,
-                104,
-                fingerprint(b"corpus"),
-                12345,
-                64,
-                64,
-                2,
-                4,
-                &expected,
-                &states,
-            )
+            .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 104,
+    corpus: fingerprint(b"corpus"),
+    architecture: 12345,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 4,
+    params: &expected,
+    states: &states,
+})
             .unwrap();
         let bytes = snapshot.encode().unwrap();
         let restored = Ema4Checkpoint::decode(&bytes).unwrap();
@@ -474,66 +504,66 @@ mod tests {
         assert_eq!(restored.optimizer, optimizer.checkpoint());
         assert!(
             restored
-                .validate(
-                    3,
-                    104,
-                    fingerprint(b"corpus"),
-                    12345,
-                    64,
-                    64,
-                    2,
-                    4,
-                    &expected,
-                    &states
-                )
+                .validate(CheckpointRequirements {
+    bptt: 3,
+    vocab: 104,
+    corpus: fingerprint(b"corpus"),
+    architecture: 12345,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 4,
+    params: &expected,
+    states: &states,
+})
                 .is_err()
         );
         assert!(
             restored
-                .validate(
-                    2,
-                    104,
-                    fingerprint(b"changed"),
-                    12345,
-                    64,
-                    64,
-                    2,
-                    4,
-                    &expected,
-                    &states
-                )
+                .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 104,
+    corpus: fingerprint(b"changed"),
+    architecture: 12345,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 4,
+    params: &expected,
+    states: &states,
+})
                 .is_err()
         );
         assert!(
             restored
-                .validate(
-                    2,
-                    104,
-                    fingerprint(b"corpus"),
-                    12345,
-                    64,
-                    64,
-                    2,
-                    0,
-                    &expected,
-                    &states
-                )
+                .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 104,
+    corpus: fingerprint(b"corpus"),
+    architecture: 12345,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 0,
+    params: &expected,
+    states: &states,
+})
                 .is_err()
         );
         assert!(
             restored
-                .validate(
-                    2,
-                    104,
-                    fingerprint(b"corpus"),
-                    12346,
-                    64,
-                    64,
-                    2,
-                    4,
-                    &expected,
-                    &states
-                )
+                .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 104,
+    corpus: fingerprint(b"corpus"),
+    architecture: 12346,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 4,
+    params: &expected,
+    states: &states,
+})
                 .is_err()
         );
         let mut bad = bytes.clone();
@@ -563,72 +593,62 @@ mod tests {
         let independent = architecture_model_for(16, MatrixMode::Independent).unwrap();
         let initial = w(MatrixMode::TorusShared, RoleInit::Matched);
         let model_graph = shared.graph();
-        let id = architecture_fingerprint(
-            &shared,
-            model_graph,
-            17,
-            "matched",
-            &initial,
-            64,
-            64,
-            2,
-            "GPU_IR",
-        );
+        let id = architecture_fingerprint(&shared, model_graph, FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &initial,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+});
         assert_eq!(
             id,
-            architecture_fingerprint(
-                &shared_again,
-                shared_again.graph(),
-                17,
-                "matched",
-                &initial,
-                64,
-                64,
-                2,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&shared_again, shared_again.graph(), FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &initial,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+})
         );
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &shared,
-                model_graph,
-                18,
-                "matched",
-                &initial,
-                64,
-                64,
-                2,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&shared, model_graph, FingerprintContext {
+    seed: 18,
+    role_init: "matched",
+    initial: &initial,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+})
         );
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &shared,
-                model_graph,
-                17,
-                "diverse",
-                &initial,
-                64,
-                64,
-                2,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&shared, model_graph, FingerprintContext {
+    seed: 17,
+    role_init: "diverse",
+    initial: &initial,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+})
         );
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &independent,
-                independent.graph(),
-                17,
-                "matched",
-                &w(MatrixMode::Independent, RoleInit::Matched),
-                64,
-                64,
-                2,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&independent, independent.graph(), FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &w(MatrixMode::Independent, RoleInit::Matched),
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+})
         );
         let mut altered = initial.clone();
         let i = altered
@@ -638,90 +658,78 @@ mod tests {
         altered[i].1 = scalar(0.5);
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &shared,
-                model_graph,
-                17,
-                "matched",
-                &altered,
-                64,
-                64,
-                2,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&shared, model_graph, FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &altered,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+})
         );
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &shared,
-                model_graph,
-                17,
-                "matched",
-                &initial,
-                32,
-                64,
-                2,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&shared, model_graph, FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &initial,
+    val_limit: 32,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+})
         );
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &shared,
-                model_graph,
-                17,
-                "matched",
-                &initial,
-                64,
-                32,
-                2,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&shared, model_graph, FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &initial,
+    val_limit: 64,
+    test_limit: 32,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+})
         );
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &shared,
-                model_graph,
-                17,
-                "matched",
-                &initial,
-                64,
-                64,
-                4,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&shared, model_graph, FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &initial,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 4,
+    optimizer_backend: "GPU_IR",
+})
         );
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &shared,
-                model_graph,
-                17,
-                "matched",
-                &initial,
-                64,
-                64,
-                2,
-                "HOST"
-            )
+            architecture_fingerprint(&shared, model_graph, FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &initial,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "HOST",
+})
         );
         let mut changed_training_graph = model_graph.clone();
         let source = shared.source("weight_0").unwrap().0;
         changed_training_graph.mul(source, source).unwrap();
         assert_ne!(
             id,
-            architecture_fingerprint(
-                &shared,
-                &changed_training_graph,
-                17,
-                "matched",
-                &initial,
-                64,
-                64,
-                2,
-                "GPU_IR"
-            )
+            architecture_fingerprint(&shared, &changed_training_graph, FingerprintContext {
+    seed: 17,
+    role_init: "matched",
+    initial: &initial,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+})
         );
     }
 
@@ -733,17 +741,15 @@ mod tests {
         let bindings = weights
             .bindings_with_init(0, MatrixMode::TorusShared, RoleInit::Matched)
             .unwrap();
-        let identity = architecture_fingerprint(
-            &model,
-            model.graph(),
-            0,
-            "matched",
-            &bindings,
-            64,
-            64,
-            2,
-            "GPU_IR",
-        );
+        let identity = architecture_fingerprint(&model, model.graph(), FingerprintContext {
+    seed: 0,
+    role_init: "matched",
+    initial: &bindings,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+});
         let params = weights
             .trainable_parameters_for(MatrixMode::TorusShared)
             .unwrap();
@@ -764,115 +770,113 @@ mod tests {
         let encoded = snapshot.encode().unwrap();
         let decoded = Ema4Checkpoint::decode(&encoded).unwrap();
         decoded
-            .validate(
-                2,
-                16,
-                fingerprint(b"corpus"),
-                identity,
-                64,
-                64,
-                2,
-                4,
-                &params,
-                &BTreeMap::new(),
-            )
+            .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 16,
+    corpus: fingerprint(b"corpus"),
+    architecture: identity,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 4,
+    params: &params,
+    states: &BTreeMap::new(),
+})
             .unwrap();
         assert!(
             decoded
-                .validate(
-                    2,
-                    16,
-                    fingerprint(b"corpus"),
-                    identity + 1,
-                    64,
-                    64,
-                    2,
-                    4,
-                    &params,
-                    &BTreeMap::new()
-                )
+                .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 16,
+    corpus: fingerprint(b"corpus"),
+    architecture: identity + 1,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 4,
+    params: &params,
+    states: &BTreeMap::new(),
+})
                 .is_err()
         );
         assert!(
             decoded
-                .validate(
-                    2,
-                    16,
-                    fingerprint(b"corpus"),
-                    identity,
-                    32,
-                    64,
-                    2,
-                    4,
-                    &params,
-                    &BTreeMap::new()
-                )
+                .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 16,
+    corpus: fingerprint(b"corpus"),
+    architecture: identity,
+    val_limit: 32,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 4,
+    params: &params,
+    states: &BTreeMap::new(),
+})
                 .is_err()
         );
         assert!(
             decoded
-                .validate(
-                    2,
-                    16,
-                    fingerprint(b"corpus"),
-                    identity,
-                    64,
-                    32,
-                    2,
-                    4,
-                    &params,
-                    &BTreeMap::new()
-                )
+                .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 16,
+    corpus: fingerprint(b"corpus"),
+    architecture: identity,
+    val_limit: 64,
+    test_limit: 32,
+    eval_every: 2,
+    max_windows: 4,
+    params: &params,
+    states: &BTreeMap::new(),
+})
                 .is_err()
         );
         assert!(
             decoded
-                .validate(
-                    2,
-                    16,
-                    fingerprint(b"corpus"),
-                    identity,
-                    64,
-                    64,
-                    4,
-                    4,
-                    &params,
-                    &BTreeMap::new()
-                )
+                .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 16,
+    corpus: fingerprint(b"corpus"),
+    architecture: identity,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 4,
+    max_windows: 4,
+    params: &params,
+    states: &BTreeMap::new(),
+})
                 .is_err()
         );
         let other = architecture_model_for(16, MatrixMode::Independent).unwrap();
         let other_initial = weights
             .bindings_with_init(0, MatrixMode::Independent, RoleInit::Matched)
             .unwrap();
-        let other_id = architecture_fingerprint(
-            &other,
-            other.graph(),
-            0,
-            "matched",
-            &other_initial,
-            64,
-            64,
-            2,
-            "GPU_IR",
-        );
+        let other_id = architecture_fingerprint(&other, other.graph(), FingerprintContext {
+    seed: 0,
+    role_init: "matched",
+    initial: &other_initial,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    optimizer_backend: "GPU_IR",
+});
         let other_params = weights
             .trainable_parameters_for(MatrixMode::Independent)
             .unwrap();
         assert!(
             decoded
-                .validate(
-                    2,
-                    16,
-                    fingerprint(b"corpus"),
-                    other_id,
-                    64,
-                    64,
-                    2,
-                    4,
-                    &other_params,
-                    &BTreeMap::new()
-                )
+                .validate(CheckpointRequirements {
+    bptt: 2,
+    vocab: 16,
+    corpus: fingerprint(b"corpus"),
+    architecture: other_id,
+    val_limit: 64,
+    test_limit: 64,
+    eval_every: 2,
+    max_windows: 4,
+    params: &other_params,
+    states: &BTreeMap::new(),
+})
                 .is_err()
         );
         let mut old_magic = encoded.clone();

@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 use torus16_mix_lab::corpus::CharCorpus;
 use torus16_mix_lab::ema4::{Ema4Weights, MatrixMode, RoleInit, architecture_model_for};
-use torus16_mix_lab::ema4_checkpoint::{Ema4Checkpoint, architecture_fingerprint, fingerprint};
+use torus16_mix_lab::ema4_checkpoint::{
+    CheckpointRequirements, Ema4Checkpoint, FingerprintContext, architecture_fingerprint,
+    fingerprint,
+};
 use verineural::{
     AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, Model, NodeId, Shape,
     Tensor, differentiate_with_seeds, unroll_model,
@@ -239,7 +242,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("missing terminal state for {name}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let all = initial_bindings;
+    // Retain the pristine named bindings for the compatibility fingerprint.
+    let all = initial_bindings.clone();
     let expected_states = window
         .initial_states()
         .keys()
@@ -269,8 +273,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             )
         } else {
             (
-                trainable_initial,
-                expected_states,
+                trainable_initial.clone(),
+                expected_states.clone(),
                 AdamW::new(0.002, 0.01)?,
                 0usize,
                 None,
@@ -300,31 +304,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     let model_fingerprint = architecture_fingerprint(
         &model,
         &execution_graph,
-        matrix_seed,
-        role_init.as_str(),
-        &initial_bindings,
-        val_limit,
-        test_limit,
-        eval_every,
-        if gpu_optimizer.is_some() {
-            "GPU_IR_ADAMW_V1"
-        } else {
-            "HOST_ADAMW_V1"
-        },
-    );
-    if let Some(ckpt) = pending_checkpoint.as_ref() {
-        ckpt.validate(
-            window_len,
-            vocab,
-            corpus_hash,
-            model_fingerprint,
+        FingerprintContext {
+            seed: matrix_seed,
+            role_init: role_init.as_str(),
+            initial: &initial_bindings,
             val_limit,
             test_limit,
             eval_every,
-            train_windows,
-            &trainable_initial,
-            &expected_states,
-        )?;
+            optimizer_backend: if gpu_optimizer.is_some() {
+                "GPU_IR_ADAMW_V1"
+            } else {
+                "HOST_ADAMW_V1"
+            },
+        },
+    );
+    if let Some(ckpt) = pending_checkpoint.as_ref() {
+        ckpt.validate(CheckpointRequirements {
+            bptt: window_len,
+            vocab,
+            corpus: corpus_hash,
+            architecture: model_fingerprint,
+            val_limit,
+            test_limit,
+            eval_every,
+            max_windows: train_windows,
+            params: &trainable_initial,
+            states: &expected_states,
+        })?;
         println!(
             "checkpoint_resumed={} completed_windows={}",
             checkpoint_path.display(),
@@ -922,18 +928,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     // No training, early stopping or best-checkpoint choice sees test data.
     let best_path = checkpoint_path.with_extension("best.ckpt");
     let best_snapshot = Ema4Checkpoint::read(&best_path)?;
-    best_snapshot.validate(
-        window_len,
+    best_snapshot.validate(CheckpointRequirements {
+        bptt: window_len,
         vocab,
-        corpus_hash,
-        model_fingerprint,
+        corpus: corpus_hash,
+        architecture: model_fingerprint,
         val_limit,
         test_limit,
         eval_every,
-        train_windows,
-        &trainable_initial,
-        &expected_states,
-    )?;
+        max_windows: train_windows,
+        params: &trainable_initial,
+        states: &expected_states,
+    })?;
     let test_start = corpus.validation.len() - test_limit - 1;
     let (test_bpc, test_count) = holdout_bpc(
         &engine,
