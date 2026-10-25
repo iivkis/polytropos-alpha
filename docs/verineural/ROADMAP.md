@@ -570,3 +570,18 @@ NVIDIA bitwise fused/unfused results. The generic GPU AdamW plan's unit
 test checks that this fusion reduces its denominator expression. All GPU
 and Cargo acceptance remain to be run by the developer. Full arbitrary
 pointwise-region fusion and runtime-domain predicates remain open.
+
+### P3 acceptance follow-up: rank-general scalar GPU broadcast (code, pending rerun)
+
+The GPU `BroadcastScalar` memory contract and lowering already read source
+index 0 and write one lane per output index. The former artificial target
+shape restriction `[1,N]` has been lifted for scalar sources with exactly
+one element, allowing zero-rank AdamW coefficients to broadcast to tensors
+of any supported shape, including rank-1, rank-2 and rank-3 parameters.
+General broadcasting of non-scalar sources remains GPU-unsupported and
+fails closed, even where the Semantic IR shape rule permits it. CPU structural
+and NVIDIA bit-pattern acceptance cases were added to `gpu_adamw`.
+The AdamW GPU parity test now uses checked-domain feedback, retains both
+checkpoint snapshots across restart, and specifies `f32` for floating
+bit-pattern expectations. Hardware acceptance and throughput are not yet
+established by these source repairs.

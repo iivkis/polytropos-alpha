@@ -66,6 +66,64 @@ fn optimizer_is_a_generic_ir_extension_and_excludes_other_sources() {
 }
 
 #[test]
+fn scalar_gpu_broadcast_accepts_vector_matrix_and_higher_ranks_only_for_singletons() {
+    let engine = GpuEngine::default();
+    for dims in [vec![4], vec![2, 3], vec![2, 1, 3]] {
+        let mut graph = NeuralGraph::default();
+        let scalar = graph.input(Shape::new(vec![]).unwrap(), Domain::Finite);
+        let copied = graph.broadcast_to(scalar, Shape::new(dims.clone()).unwrap()).unwrap();
+        let program = engine.compile(&graph, copied).unwrap();
+        assert_eq!(program.kernel_count().unwrap(), 1);
+        assert_eq!(program.memory_contracts().unwrap()[0].reads, vec![(scalar.index(), 1)]);
+        assert_eq!(
+            program.translation_plan().unwrap().kernels[0].kind,
+            verineural::TranslationKind::BroadcastScalar
+        );
+    }
+    // The IR can describe general rank expansion, but the bounded GPU
+    // implementation must not silently reinterpret a non-scalar source.
+    let mut graph = NeuralGraph::default();
+    let source = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
+    let expanded = graph.broadcast_to(source, Shape::new(vec![2, 2]).unwrap()).unwrap();
+    assert!(matches!(
+        engine.compile(&graph, expanded),
+        Err(verineural::GpuError::UnsupportedOperation {
+            operation: "broadcast_to",
+            ..
+        })
+    ));
+}
+
+#[test]
+#[ignore = "requires NVIDIA CUDA and LLVM NVPTX; scalar broadcasting preserves bit patterns across ranks"]
+fn scalar_broadcast_gpu_bits_match_source_across_ranks() {
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    );
+    let directory = std::env::temp_dir()
+        .join(format!("vn_scalar_broadcast_{}", std::process::id()));
+    for (i, dims) in [vec![4], vec![2, 3], vec![2, 1, 3]]
+        .into_iter().enumerate()
+    {
+        let mut graph = NeuralGraph::default();
+        let scalar = graph.input(Shape::new(vec![]).unwrap(), Domain::Finite);
+        let broadcast = graph.broadcast_to(scalar, Shape::new(dims.clone()).unwrap()).unwrap();
+        let program = engine.compile(&graph, broadcast).unwrap();
+        let initial = Tensor::from_slice(vec![], &[-0.0_f32]).unwrap();
+        let output = engine.execute(
+            &program,
+            &[(scalar, initial)],
+            &directory.join(format!("rank_{}", i + 1)),
+        ).unwrap();
+        assert_eq!(output.shape().dims(), dims);
+        for &value in output.values() {
+            assert_eq!(value.to_bits(), (-0.0_f32).to_bits());
+        }
+    }
+}
+
+#[test]
 fn failed_optimizer_extension_does_not_modify_consumer_graph() {
     let mut graph = NeuralGraph::default();
     let p = graph.input(Shape::new(vec![4]).unwrap(), Domain::Finite);
@@ -115,7 +173,7 @@ fn gpu_adamw_matches_host_and_resumes_bitwise() {
             ])
             .unwrap();
         device.replay().unwrap();
-        device.feedback_state(plan.feedback()).unwrap();
+        device.feedback_state_checked(plan.feedback()).unwrap();
         let (params, moments) = plan.checkpoint(&mut device, step as u64 + 1).unwrap();
         cpu_adam
             .step(
@@ -130,7 +188,7 @@ fn gpu_adamw_matches_host_and_resumes_bitwise() {
         );
         compare_checkpoints(&moments, &cpu_adam.checkpoint());
         if step == 1 {
-            snapshot = Some((params, moments));
+            snapshot = Some((params.clone(), moments.clone()));
         }
         if step == 2 {
             // A new execution reconstructed from the 2-step checkpoint must
@@ -156,7 +214,7 @@ fn gpu_adamw_matches_host_and_resumes_bitwise() {
                 ])
                 .unwrap();
             resumed.replay().unwrap();
-            resumed.feedback_state(restart_plan.feedback()).unwrap();
+            resumed.feedback_state_checked(restart_plan.feedback()).unwrap();
             let (after, after_opt) = restart_plan.checkpoint(&mut resumed, 3).unwrap();
             for (name, result) in after {
                 for (&a, &b) in result.values().iter().zip(params[&name].values()) {
@@ -202,7 +260,7 @@ fn checked_feedback_rejects_nonfinite_parameters_atomically() {
         .unwrap();
     gpu.replay().unwrap();
     assert!(gpu.feedback_state_checked(&[(parameter, next)]).is_err());
-    for (&original, &actual) in [1., 2., 3., 4.]
+    for (&original, &actual) in [1.0_f32, 2., 3., 4.]
         .iter()
         .zip(gpu.read_source(parameter).unwrap().values())
     {
@@ -212,7 +270,7 @@ fn checked_feedback_rejects_nonfinite_parameters_atomically() {
         .unwrap();
     gpu.replay().unwrap();
     gpu.feedback_state_checked(&[(parameter, next)]).unwrap();
-    for (&expected, &actual) in [0.5, 1., 1.5, 2.]
+    for (&expected, &actual) in [0.5_f32, 1., 1.5, 2.]
         .iter()
         .zip(gpu.read_source(parameter).unwrap().values())
     {

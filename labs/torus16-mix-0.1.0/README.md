@@ -562,3 +562,12 @@ values are not fused. Check with
 count, end-to-end tokens/s and GPU utilization must be measured on the
 target device after testing. Existing finite-domain parameter checks
 still require D2H until a separately verified on-device predicate exists.
+
+The first full P3 hardware attempt stopped on `UnsupportedOperation:
+broadcast_to` for non-`[1,N]` optimizer parameter shapes. The GPU scalar
+broadcast lowering now accepts any supported target rank when the source
+contains exactly one element. All general non-scalar broadcasting still
+fails closed. The `gpu_adamw` tests cover structural rank-1/2/3 acceptance,
+reject general broadcasting and compare NVIDIA scalar bit patterns.
+Correctness and performance of the full GPU optimizer still require a
+fresh run of `task verify-gpu-adamw` and `task benchmark-gpu-adamw`.

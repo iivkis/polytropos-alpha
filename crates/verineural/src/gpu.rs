@@ -812,10 +812,11 @@ impl GpuProgram {
                         }
                         Operation::BroadcastTo(_) => {
                             let input = &self.graph.nodes()[op_node.inputs[0].index()];
-                            if input.shape.element_count() != 1
-                                || node.shape.rank() != 2
-                                || node.shape.dims()[0] != 1
-                            {
+                            // Broadcasting a one-element tensor uses source
+                            // address zero for every output lane, independently
+                            // of output rank. General axis-wise broadcasting
+                            // still has no GPU lowering and must fail closed.
+                            if input.shape.element_count() != 1 {
                                 return Err(GpuError::UnsupportedOperation {
                                     node: index,
                                     operation: op_node.operation.name(),
