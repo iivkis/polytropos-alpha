@@ -2457,7 +2457,7 @@ impl GpuExecution {
         runtime_domains: bool,
     ) -> Result<Rc<PreparedFeedback>, GpuError> {
         if let Some(cached) = &self.prepared_feedback {
-            if cached.runtime_domains == runtime_domains && cached.links == links {
+            if cached.runtime_domains == runtime_domains && cached.links.as_slice() == links {
                 return Ok(Rc::clone(cached));
             }
         }
