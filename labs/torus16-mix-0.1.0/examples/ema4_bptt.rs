@@ -137,8 +137,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or("missing differentiated parameter")
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let gpu_adamw_requested = std::env::var_os("TORUS16_GPU_ADAMW").is_some();
     let mut selected = window.outputs().to_vec();
-    selected.extend(gradients.iter().copied());
+    // CPU AdamW reads gradients on the host. GPU AdamW consumes them as
+    // internal IR dependencies, so exporting them needlessly blocks fusion.
+    if !gpu_adamw_requested {
+        selected.extend(gradients.iter().copied());
+    }
     let train_output_count = selected.len();
     let terminal_outputs = window
         .terminal_states()
@@ -199,7 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Experimental architecture-neutral GPU optimizer; defaults to the
     // proven host path until parity and end-to-end throughput are checked.
     let mut execution_graph = reverse.graph().clone();
-    let gpu_optimizer = if std::env::var_os("TORUS16_GPU_ADAMW").is_some() {
+    let gpu_optimizer = if gpu_adamw_requested {
         let pairs = names
             .iter()
             .cloned()
