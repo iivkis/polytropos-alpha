@@ -1156,8 +1156,10 @@ impl TranslationPlan {
                 | TranslationKind::TakeAxis0 { .. }
                 | TranslationKind::AddBiasRelu { .. }
                 | TranslationKind::MulBiasRelu { .. }
-                // Validated above with its own three-source binding and
-                // early continue. Keep exhaustive matching fail-closed.
+                // These fusion templates were validated above, with
+                // explicit FP32 operand order and an early continue.
+                // Keep this match exhaustive without weakening validation.
+                | TranslationKind::BinaryChain { .. }
                 | TranslationKind::MulAdd { .. }
                 | TranslationKind::MulAddMul { .. } => None,
             };
