@@ -133,7 +133,7 @@ impl<'a> ReusedHoldout<'a> {
             .compile_outputs(context.model.graph(), &context.model.execution_roots())?
             .source_inputs()
             .iter()
-            .copied()
+            .map(|id| id.index())
             .collect::<BTreeSet<_>>();
         let mut reset_states = Vec::new();
         let mut initial_parameters = Vec::new();
@@ -141,7 +141,7 @@ impl<'a> ReusedHoldout<'a> {
             if let Some((node, role)) = context.model.source(name) {
                 match role {
                     SourceRole::State => reset_states.push((name.clone(), tensor.clone())),
-                    SourceRole::Parameter if active.contains(&node) => {
+                    SourceRole::Parameter if active.contains(&node.index()) => {
                         initial_parameters.push((name.clone(), tensor.clone()));
                     }
                     _ => {}
