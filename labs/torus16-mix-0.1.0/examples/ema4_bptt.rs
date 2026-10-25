@@ -131,10 +131,28 @@ impl<'a> ReusedHoldout<'a> {
         let initial = context
             .weights
             .bindings_with_init(0, context.mode, context.role_init)?;
-        // Restrict updates to materialized parameter sources in this graph.
+        // Reconstruct the execution slice through the public Model API.
+        // Include next-state roots and the writable state sources, even if a
+        // next-state computation does not read its previous value.
+        let mut roots = context.model.outputs().values().copied().collect::<Vec<_>>();
+        roots.extend(context.model.state_links().values().copied());
+        for name in context.model.state_links().keys() {
+            let (state, role) = context
+                .model
+                .source(name)
+                .ok_or_else(|| format!("unknown holdout state source: {name}"))?;
+            if role != SourceRole::State {
+                return Err(format!("holdout state {name} does not have state role").into());
+            }
+            roots.push(state);
+        }
+        let mut seen = BTreeSet::new();
+        roots.retain(|id| seen.insert(id.index()));
+        // Restrict updates to the source tensors actually materialized by
+        // ModelExecution, not every declared but potentially unused parameter.
         let active = context
             .engine
-            .compile_outputs(context.model.graph(), &context.model.execution_roots())?
+            .compile_outputs(context.model.graph(), &roots)?
             .source_inputs()
             .iter()
             .map(|id| id.index())
