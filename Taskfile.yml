@@ -658,8 +658,8 @@ tasks:
           grep '^training_total_s=' "$bench_dir/$mode.log"
           grep '^validation_window=' "$bench_dir/$mode.log"
         done
-        sed -n '/^train_window=/s/ end_to_end_step_ms=.*$//p; /^validation_window=/s/ elapsed_s=.*$//p; /^holdout_reset_streaming_bpc=/s/ eval_score_seconds=.*$//p; /^test_reset_streaming_bpc=/p' "$bench_dir/fresh.log" >"$bench_dir/fresh.metrics"
-        sed -n '/^train_window=/s/ end_to_end_step_ms=.*$//p; /^validation_window=/s/ elapsed_s=.*$//p; /^holdout_reset_streaming_bpc=/s/ eval_score_seconds=.*$//p; /^test_reset_streaming_bpc=/p' "$bench_dir/reused.log" >"$bench_dir/reused.metrics"
+        sed -n '/^train_window=/s/ end_to_end_step_ms=.*$//p; /^validation_window=/s/ elapsed_s=.*$//p; /^holdout_reset_streaming_bpc=/s/ eval_score_seconds=.*$//p; /^test_reset_streaming_bpc=/s/ checkpoint=.*$//p' "$bench_dir/fresh.log" >"$bench_dir/fresh.metrics"
+        sed -n '/^train_window=/s/ end_to_end_step_ms=.*$//p; /^validation_window=/s/ elapsed_s=.*$//p; /^holdout_reset_streaming_bpc=/s/ eval_score_seconds=.*$//p; /^test_reset_streaming_bpc=/s/ checkpoint=.*$//p' "$bench_dir/reused.log" >"$bench_dir/reused.metrics"
         diff -u "$bench_dir/fresh.metrics" "$bench_dir/reused.metrics"
         cmp "$bench_dir/fresh.ckpt" "$bench_dir/reused.ckpt"
         cmp "$bench_dir/fresh.best.ckpt" "$bench_dir/reused.best.ckpt"
