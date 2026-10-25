@@ -1594,6 +1594,15 @@ mod platform {
             ))
         }
 
+        pub fn launch_feedback_copies_device_timed(
+            &mut self,
+            _: &[(u64, u64, usize)],
+        ) -> Result<std::time::Duration, GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
         pub fn validate_output_domains(
             &mut self,
             _: &[(u64, usize, bool)],
