@@ -44,6 +44,7 @@ pub struct GpuLaunchConfig {
     relu_fusion: ReluFusion,
     approximate_exp: bool,
     pointwise_fusion: bool,
+    internal_pointwise_fusion: bool,
 }
 
 impl GpuLaunchConfig {
@@ -57,6 +58,7 @@ impl GpuLaunchConfig {
             relu_fusion,
             approximate_exp: false,
             pointwise_fusion: false,
+            internal_pointwise_fusion: false,
         })
     }
 
@@ -89,6 +91,18 @@ impl GpuLaunchConfig {
     pub const fn pointwise_fusion(self) -> bool {
         self.pointwise_fusion
     }
+
+    /// Experimental horizontal fusion for internal, non-public Add/Mul
+    /// results with later consumers. Opt in separately from basic fusion.
+    pub const fn with_internal_pointwise_fusion(mut self) -> Self {
+        self.pointwise_fusion = true;
+        self.internal_pointwise_fusion = true;
+        self
+    }
+
+    pub const fn internal_pointwise_fusion(self) -> bool {
+        self.internal_pointwise_fusion
+    }
 }
 
 impl Default for GpuLaunchConfig {
@@ -98,6 +112,7 @@ impl Default for GpuLaunchConfig {
             relu_fusion: ReluFusion::Disabled,
             approximate_exp: false,
             pointwise_fusion: false,
+            internal_pointwise_fusion: false,
         }
     }
 }
@@ -3276,9 +3291,15 @@ impl GpuEngine {
         // A bounded lookback avoids quadratic compilation on large BPTT DAGs.
         // FP32 operation order and all observable values are preserved.
         if self.launch.pointwise_fusion() {
-            let candidates = live_nodes.iter().copied().filter(|&index| {
-                matches!(graph.nodes()[index].operation, Operation::Add | Operation::Mul)
-            }).collect::<Vec<_>>();
+            let candidates = if self.launch.internal_pointwise_fusion() {
+                live_nodes.iter().copied().filter(|&index| {
+                    matches!(graph.nodes()[index].operation, Operation::Add | Operation::Mul)
+                }).collect::<Vec<_>>()
+            } else {
+                let mut selected = outputs.iter().map(|id| id.index()).collect::<Vec<_>>();
+                selected.sort_unstable();
+                selected
+            };
             let mut reserved = BTreeSet::new();
             for (later_pos, &later) in candidates.iter().enumerate() {
                 let second = &graph.nodes()[later];
