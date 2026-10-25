@@ -1,8 +1,6 @@
 //! Device-side feedback invariants for raw GpuExecution: readiness,
 //! preflight-only rejection, and observable state/reshape aliases.
-use verineural::{
-    Domain, GpuEngine, GpuError, NeuralGraph, Shape, Tensor, TensorValue,
-};
+use verineural::{Domain, GpuEngine, GpuError, NeuralGraph, Shape, Tensor, TensorValue};
 
 fn tensor(data: &[f32; 4]) -> Tensor<f32> {
     Tensor::from_slice(vec![4], data).unwrap()
@@ -10,7 +8,11 @@ fn tensor(data: &[f32; 4]) -> Tensor<f32> {
 
 fn expect_bits(actual: &Tensor<f32>, expected: &[f32; 4]) {
     assert_eq!(
-        actual.values().iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+        actual
+            .values()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
         expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
     );
 }
@@ -43,12 +45,14 @@ fn direct_feedback_requires_fresh_outputs_and_preserves_selected_aliases() {
         .unwrap();
     let state_initial = [3., 5., 7., 9.];
     let token_initial = [1., 2., 3., 4.];
-    let workdir = std::env::temp_dir()
-        .join(format!("vn_feedback_guard_{}", std::process::id()));
+    let workdir = std::env::temp_dir().join(format!("vn_feedback_guard_{}", std::process::id()));
     let mut gpu = engine
         .prepare(
             &program,
-            &[(state, tensor(&state_initial)), (token, tensor(&token_initial))],
+            &[
+                (state, tensor(&state_initial)),
+                (token, tensor(&token_initial)),
+            ],
             &workdir,
         )
         .unwrap();
@@ -132,8 +136,12 @@ fn device_feedback_matches_host_staged_state_bitwise() {
         (token, tensor(&[0., 1., 2., 3.])),
     ];
     let dir = std::env::temp_dir().join(format!("vn_feedback_parity_{}", std::process::id()));
-    let mut device = engine.prepare(&program, &sources, &dir.join("device")).unwrap();
-    let mut host = engine.prepare(&program, &sources, &dir.join("host")).unwrap();
+    let mut device = engine
+        .prepare(&program, &sources, &dir.join("device"))
+        .unwrap();
+    let mut host = engine
+        .prepare(&program, &sources, &dir.join("host"))
+        .unwrap();
 
     // Different tokens and two independent recurrent states exercise more
     // than a one-step identity feedback. Both sessions execute the same DAG;
@@ -171,11 +179,8 @@ fn device_feedback_matches_host_staged_state_bitwise() {
         // State updates happen after comparing the pure DAG output.
         device.feedback_state(&links).unwrap();
         let staged = host.read_outputs_selected(&[next_a, next_b]).unwrap();
-        host.update_input_subset(&[
-            (state_a, &staged[0].1),
-            (state_b, &staged[1].1),
-        ])
-        .unwrap();
+        host.update_input_subset(&[(state_a, &staged[0].1), (state_b, &staged[1].1)])
+            .unwrap();
         for &state in &[state_a, state_b] {
             let new = device.read_source(state).unwrap();
             let old = host.read_source(state).unwrap();

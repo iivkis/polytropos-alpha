@@ -132,7 +132,7 @@ impl TranslationKind {
             } => {
                 let adds = usize::from(first_add) + usize::from(second_add);
                 (adds, 2 - adds, 0)
-            },
+            }
             Self::MulAddMul { .. } => (1, 2, 0),
             Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
@@ -207,7 +207,7 @@ impl TranslationKind {
                 usize::from(first_add)
                     + 2 * usize::from(second_add)
                     + 4 * usize::from(producer_on_right)
-            },
+            }
             Self::MulAddMul {
                 add_mul_on_right,
                 mul_add_on_right,
@@ -742,8 +742,16 @@ impl TranslationPlan {
                 producer_on_right,
             } = kernel.kind
             {
-                let first = if first_add { "add.rn.f32" } else { "mul.rn.f32" };
-                let second = if second_add { "add.rn.f32" } else { "mul.rn.f32" };
+                let first = if first_add {
+                    "add.rn.f32"
+                } else {
+                    "mul.rn.f32"
+                };
+                let second = if second_add {
+                    "add.rn.f32"
+                } else {
+                    "mul.rn.f32"
+                };
                 let operands = if producer_on_right {
                     "(float %z, float %middle)"
                 } else {
@@ -776,8 +784,7 @@ impl TranslationPlan {
                         "binary pointwise LLVM template mismatch at node {node}"
                     )));
                 }
-                audit_fp32_ptx(ir, asm)
-                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                audit_fp32_ptx(ir, asm).map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
                 let sequence = asm
                     .lines()
                     .map(|line| line.split("//").next().unwrap_or(""))

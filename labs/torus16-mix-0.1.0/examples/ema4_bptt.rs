@@ -140,7 +140,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut selected = window.outputs().to_vec();
     selected.extend(gradients.iter().copied());
     let train_output_count = selected.len();
-    let terminal_outputs = window.terminal_states().values().copied().collect::<Vec<_>>();
+    let terminal_outputs = window
+        .terminal_states()
+        .values()
+        .copied()
+        .collect::<Vec<_>>();
     // Next states are selected for device-to-device feedback, not for
     // readback on every training window.
     selected.extend(terminal_outputs.iter().copied());
@@ -205,32 +209,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("missing initial recurrent state: {name}"))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let (mut params, states, mut optimizer, first_window) =
-        if !fresh && checkpoint_path.exists() {
-            let ckpt = Ema4Checkpoint::read(&checkpoint_path)?;
-            ckpt.validate(
-                window_len,
-                vocab,
-                corpus_hash,
-                train_windows,
-                &trainable_initial,
-                &expected_states,
-            )?;
-            let opt = AdamW::from_checkpoint(ckpt.optimizer, &ckpt.parameters)?;
-            println!(
-                "checkpoint_resumed={} completed_windows={}",
-                checkpoint_path.display(),
-                ckpt.completed_windows
-            );
-            (ckpt.parameters, ckpt.states, opt, ckpt.completed_windows)
-        } else {
-            (
-                trainable_initial,
-                expected_states,
-                AdamW::new(0.002, 0.01)?,
-                0usize,
-            )
-        };
+    let (mut params, states, mut optimizer, first_window) = if !fresh && checkpoint_path.exists() {
+        let ckpt = Ema4Checkpoint::read(&checkpoint_path)?;
+        ckpt.validate(
+            window_len,
+            vocab,
+            corpus_hash,
+            train_windows,
+            &trainable_initial,
+            &expected_states,
+        )?;
+        let opt = AdamW::from_checkpoint(ckpt.optimizer, &ckpt.parameters)?;
+        println!(
+            "checkpoint_resumed={} completed_windows={}",
+            checkpoint_path.display(),
+            ckpt.completed_windows
+        );
+        (ckpt.parameters, ckpt.states, opt, ckpt.completed_windows)
+    } else {
+        (
+            trainable_initial,
+            expected_states,
+            AdamW::new(0.002, 0.01)?,
+            0usize,
+        )
+    };
     let base = all
         .into_iter()
         .filter(|(name, _)| name != "token")
@@ -310,7 +313,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             None
         };
         let outputs = if let Some(updates) = &verify_updates {
-            let borrowed = updates.iter().map(|(id, tensor)| (*id, tensor)).collect::<Vec<_>>();
+            let borrowed = updates
+                .iter()
+                .map(|(id, tensor)| (*id, tensor))
+                .collect::<Vec<_>>();
             execution.update_input_subset(&borrowed)?;
             execution.replay()?;
             Some(execution.read_outputs_selected(&selected)?)
@@ -323,8 +329,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let mut gpu = engine.prepare(&program, &supplied, &artifact)?;
     if let Some(reference) = baseline_outputs {
-        let updates = verify_updates.as_ref().ok_or("missing fused parity input bindings")?;
-        let borrowed = updates.iter().map(|(id, tensor)| (*id, tensor)).collect::<Vec<_>>();
+        let updates = verify_updates
+            .as_ref()
+            .ok_or("missing fused parity input bindings")?;
+        let borrowed = updates
+            .iter()
+            .map(|(id, tensor)| (*id, tensor))
+            .collect::<Vec<_>>();
         gpu.update_input_subset(&borrowed)?;
         gpu.replay()?;
         let actual = gpu.read_outputs_selected(&selected)?;
@@ -336,8 +347,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             if expected_id != actual_id || expected.shape() != found.shape() {
                 return Err("fused/unfused GPU node or shape mismatch".into());
             }
-            for (lane, (&left, &right)) in
-                expected.values().iter().zip(found.values()).enumerate()
+            for (lane, (&left, &right)) in expected.values().iter().zip(found.values()).enumerate()
             {
                 if left.to_bits() != right.to_bits() {
                     return Err(format!(

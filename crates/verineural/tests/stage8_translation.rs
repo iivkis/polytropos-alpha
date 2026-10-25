@@ -29,7 +29,7 @@ fn synthetic_ptx(plan: &TranslationPlan) -> String {
             } => {
                 let adds = usize::from(first_add) + usize::from(second_add);
                 (adds, 2 - adds)
-            },
+            }
             TranslationKind::AddBiasRelu { .. } => (2, 0),
             TranslationKind::Relu
             | TranslationKind::Sub

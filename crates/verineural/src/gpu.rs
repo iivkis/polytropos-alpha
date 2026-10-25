@@ -613,7 +613,11 @@ impl GpuProgram {
             skipped.extend(chain.iter().copied());
         }
         skipped.extend(self.fused_mul_adds.values().map(|&(mul, _)| mul));
-        skipped.extend(self.fused_binary_pairs.values().map(|&(producer, _)| producer));
+        skipped.extend(
+            self.fused_binary_pairs
+                .values()
+                .map(|&(producer, _)| producer),
+        );
         for &(mul, add, _, _, _) in self.fused_mul_add_muls.values() {
             skipped.insert(mul);
             skipped.insert(add);
@@ -3061,8 +3065,16 @@ fn binary_chain_kernel_ir(
     second_add: bool,
     producer_on_right: bool,
 ) -> String {
-    let first = if first_add { "add.rn.f32" } else { "mul.rn.f32" };
-    let second = if second_add { "add.rn.f32" } else { "mul.rn.f32" };
+    let first = if first_add {
+        "add.rn.f32"
+    } else {
+        "mul.rn.f32"
+    };
+    let second = if second_add {
+        "add.rn.f32"
+    } else {
+        "mul.rn.f32"
+    };
     let operands = if producer_on_right {
         "(float %z, float %middle)"
     } else {

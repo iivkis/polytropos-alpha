@@ -44,8 +44,10 @@ fn binary_pointwise_fusion_preserves_order_and_selected_intermediates() {
                 .unwrap();
             assert_eq!(ordinary.kernel_count().unwrap(), 2);
             assert_eq!(optimized.kernel_count().unwrap(), 1);
-            assert_eq!(optimized.fused_binary_pairs()[&root.index()],
-                (producer.index(), usize::from(producer_on_right)));
+            assert_eq!(
+                optimized.fused_binary_pairs()[&root.index()],
+                (producer.index(), usize::from(producer_on_right))
+            );
             let plan = optimized.translation_plan().unwrap();
             assert_eq!(
                 plan.kernels[0].kind,
@@ -58,7 +60,13 @@ fn binary_pointwise_fusion_preserves_order_and_selected_intermediates() {
             assert_eq!(TranslationPlan::from_text(&plan.to_text()).unwrap(), plan);
             assert_eq!(optimized.capability_plan().unwrap().optimizations.len(), 1);
             assert!(!optimized.llvm_ir().contains("fma.rn.f32"));
-            assert_eq!(optimized.llvm_ir().matches("call float asm sideeffect").count(), 2);
+            assert_eq!(
+                optimized
+                    .llvm_ir()
+                    .matches("call float asm sideeffect")
+                    .count(),
+                2
+            );
 
             let selected = GpuEngine::default()
                 .with_launch_config(config)
@@ -80,8 +88,10 @@ fn binary_pointwise_fusion_preserves_order_and_selected_intermediates() {
 #[ignore = "requires LLVM NVPTX and NVIDIA CUDA; compares fused/unfused FP32 bits"]
 fn binary_pointwise_gpu_matches_unfused_bitwise() {
     let config = GpuLaunchConfig::default().with_pointwise_fusion();
-    let engine = GpuEngine::new("llc",
-        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()));
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    );
     let optimized_engine = engine.clone().with_launch_config(config);
     let data = [
         [0., -0., 1.5, -0.5, 1000., -13., 0.25, -12.5],
@@ -91,23 +101,28 @@ fn binary_pointwise_gpu_matches_unfused_bitwise() {
     let dir = std::env::temp_dir().join(format!("vn_binary_chain_{}", std::process::id()));
     for (first_add, second_add) in [(true, true), (true, false), (false, false)] {
         for producer_on_right in [false, true] {
-            let (graph, ids, _, root) =
-                fixture(first_add, second_add, producer_on_right);
+            let (graph, ids, _, root) = fixture(first_add, second_add, producer_on_right);
             let bindings = ids
                 .iter()
                 .zip(&data)
-                .map(|(&id, values)| (id,
-                    Tensor::from_slice(vec![1, 8], values).unwrap()))
+                .map(|(&id, values)| (id, Tensor::from_slice(vec![1, 8], values).unwrap()))
                 .collect::<Vec<_>>();
             let ordinary = engine.compile(&graph, root).unwrap();
             let fused = optimized_engine.compile(&graph, root).unwrap();
             let key = format!("{first_add}_{second_add}_{producer_on_right}");
-            let reference = engine.execute(&ordinary, &bindings, &dir.join(format!("{key}_plain")))
+            let reference = engine
+                .execute(&ordinary, &bindings, &dir.join(format!("{key}_plain")))
                 .unwrap();
-            let actual = optimized_engine.execute(&fused, &bindings, &dir.join(format!("{key}_fused")))
+            let actual = optimized_engine
+                .execute(&fused, &bindings, &dir.join(format!("{key}_fused")))
                 .unwrap();
-            for (lane, (&want, &got)) in reference.values().iter().zip(actual.values()).enumerate() {
-                assert_eq!(want.to_bits(), got.to_bits(), "{key} lane={lane}: {want} vs {got}");
+            for (lane, (&want, &got)) in reference.values().iter().zip(actual.values()).enumerate()
+            {
+                assert_eq!(
+                    want.to_bits(),
+                    got.to_bits(),
+                    "{key} lane={lane}: {want} vs {got}"
+                );
             }
         }
     }
