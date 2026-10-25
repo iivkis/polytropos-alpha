@@ -46,7 +46,7 @@ impl MatrixMode {
             Self::TorusShared => LAYERS,
         }
     }
-
+}
 
 #[derive(Clone, Debug)]
 pub struct BlockWeights {
