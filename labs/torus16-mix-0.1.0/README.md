@@ -571,3 +571,16 @@ fails closed. The `gpu_adamw` tests cover structural rank-1/2/3 acceptance,
 reject general broadcasting and compare NVIDIA scalar bit patterns.
 Correctness and performance of the full GPU optimizer still require a
 fresh run of `task verify-gpu-adamw` and `task benchmark-gpu-adamw`.
+
+### GPU AdamW hardware result (256 windows, one developer run)
+
+`task verify-gpu-adamw` passed the finite-domain, host-oracle and bitwise
+restart checks, including 2+2 versus uninterrupted 4 EMA4 training windows.
+However, the first direct throughput comparison showed **CPU AdamW 132.83
+training tokens/s** with 6,892 post-fusion kernels, while GPU IR AdamW
+managed **61.17 tokens/s** with 9,638 kernels on the tested GPU. GPU AdamW
+was **2.17 times slower**. These results are for BPTT=2 and 256 windows,
+not general performance guarantees. Keep `TORUS16_GPU_ADAMW` unset for
+production-length EMA4 training; it is an experimental comparison mode.
+A structural negative broadcast test was updated for the expanded scalar
+CUDA profile. The revised sources still need a test rerun.

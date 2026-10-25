@@ -74,12 +74,28 @@ fn unsupported_nonflat_shapes_still_fail_closed() {
             ..
         })
     ));
+    // The GPU now supports one-element scalar broadcasting to any
+    // valid target rank, including a 2x6 tensor. Keep a positive
+    // regression so the old overly restrictive shape check cannot return.
     let scalar = g.input(Shape::new(vec![1, 1]).unwrap(), Domain::Finite);
     let broadcast = g
         .broadcast_to(scalar, Shape::new(vec![2, 6]).unwrap())
         .unwrap();
+    let scalar_program = GpuEngine::default().compile(&g, broadcast).unwrap();
+    assert_eq!(scalar_program.kernel_count().unwrap(), 1);
     assert!(matches!(
-        GpuEngine::default().compile(&g, broadcast),
+        scalar_program.translation_plan().unwrap().kernels[0].kind,
+        TranslationKind::BroadcastScalar
+    ));
+
+    // General axis-wise broadcasting still has no CUDA lowering:
+    // two independent input values may not be treated as one scalar.
+    let non_scalar = g.input(Shape::new(vec![2, 1]).unwrap(), Domain::Finite);
+    let broadcast_rows = g
+        .broadcast_to(non_scalar, Shape::new(vec![2, 6]).unwrap())
+        .unwrap();
+    assert!(matches!(
+        GpuEngine::default().compile(&g, broadcast_rows),
         Err(GpuError::UnsupportedOperation {
             operation: "broadcast_to",
             ..

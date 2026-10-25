@@ -585,3 +585,27 @@ The AdamW GPU parity test now uses checked-domain feedback, retains both
 checkpoint snapshots across restart, and specifies `f32` for floating
 bit-pattern expectations. Hardware acceptance and throughput are not yet
 established by these source repairs.
+
+### P3 GPU AdamW hardware acceptance and measured throughput (developer-run)
+
+On the tested NVIDIA system, `task verify-gpu-adamw` passed CUDA checks for
+FP32 tolerance against the CPU AdamW oracle, GPU optimizer bitwise restart,
+and finite-domain feedback validation. The four-window EMA4 checkpoint/resume
+versus continuous training check passed byte-for-byte. `task check` and strict
+`task clippy` passed; `task test` exposed a stale negative scalar
+broadcast test in `structural_last_row.rs`, updated to accept scalar target
+shape `[2,6]` while rejecting genuine axis-wise non-scalar broadcasting.
+
+The first 256-window end-to-end benchmark on that system found **host AdamW
+132.83 tokens/s** (3.854478 s, 6,892 post-fusion CUDA kernels per replay),
+versus **GPU IR AdamW 61.17 tokens/s** (8.369581 s, 9,638 post-fusion
+kernels). GPU AdamW was **2.17x slower** for this BPTT=2, width-48 model;
+2,746 additional tiny kernels per replay are consistent with high GPU
+scheduling overhead. This is not a profiler-proven breakdown. CPU AdamW
+remains the default; GPU AdamW is experimental. Independent CUDA Graph
+scheduling speedup is a separate benchmark, not single-sequence EMA4 speedup.
+
+**Next performance acceptance criterion:** generic region/multi-output
+pointwise fusion or true shared-parameter minibatch training must improve
+wall-clock training throughput; a lower kernel count alone is insufficient.
+Preserve FP32 order/rounding, memory contracts and hardware parity tests.
