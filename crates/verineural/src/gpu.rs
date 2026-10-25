@@ -1740,8 +1740,15 @@ impl GpuProgram {
             let valid = earlier < root
                 && self.outputs.contains(&left.id)
                 && self.outputs.contains(&right.id)
-                && uses[earlier] == 1
-                && uses[root] == 1
+                && uses[earlier] >= 1
+                && uses[root] >= 1
+                && self.live_nodes.iter().all(|&consumer| {
+                    consumer > root
+                        || self.graph.nodes()[consumer]
+                            .inputs
+                            .iter()
+                            .all(|input| input.index() != earlier)
+                })
                 && matches!(left.operation, Operation::Add | Operation::Mul)
                 && matches!(right.operation, Operation::Add | Operation::Mul)
                 && left.shape == right.shape
@@ -1763,7 +1770,9 @@ impl GpuProgram {
                 root,
                 kind: GpuOptimizationKind::DualPointwiseOutputFusion,
                 removed_nodes: vec![earlier],
-                exclusive_reachable_use: true,
+                // The standalone kernel is removed, not the materialized
+                // value. Downstream fanout is permitted after this root.
+                exclusive_reachable_use: uses[earlier] == 1,
                 selected_outputs_preserved: true,
             });
         }
@@ -1971,7 +1980,8 @@ impl GpuBenchmark {
 }
 
 /// Host wall-clock breakdown of checked GPU feedback. `validation_d2h`
-/// includes pinned D2H, stream synchronization, and host domain validation;
+/// includes a CUDA Graph domain guard, one 32-bit pinned D2H status read,
+/// synchronization, and exceptional host revalidation when necessary;
 /// `snapshot_d2d` and `feedback_d2d` include their host enqueue overhead.
 /// Values are observations, not a CUDA kernel-time or proof guarantee.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2405,12 +2415,11 @@ impl GpuExecution {
     }
 
     /// Experimental feedback for outputs with weaker *static* domain
-    /// contracts. Reads only the affected output tensors in a single pinned
-    /// D2H batch, validates the actual values against destination domains,
-    /// and copies **no** state before the entire batch passes. No assumption
-    /// that arbitrary FP32 arithmetic remains finite is smuggled into IR.
-    /// This retains D2H numerical validation cost; it avoids gradient D2H,
-    /// host AdamW and parameter H2D on each training step.
+    /// contracts. A separate CUDA Graph checks their FP32 bit patterns and
+    /// returns one 32-bit failure flag before **any** state copy. On rejection,
+    /// full tensors are read solely to report the exact host-domain error.
+    /// No assumption that arbitrary FP32 arithmetic remains finite is
+    /// smuggled into IR. The guard is runtime hardware validation, not proof.
     pub fn feedback_state_checked(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
         self.feedback_state_checked_profiled(links).map(|_| ())
     }
@@ -2464,28 +2473,48 @@ impl GpuExecution {
                     .sum();
                 let sources = pending
                     .iter()
-                    .map(|&(_, next, _, ref shape)| {
+                    .map(|&(state, next, required, ref shape)| {
+                        if self.program.graph.node(state)?.dtype != DType::F32 {
+                            return Err(GpuError::InvalidInput {
+                                node: state.index(),
+                                reason: "runtime feedback domain check requires F32",
+                            });
+                        }
                         let address = self
                             .output_addresses
                             .iter()
                             .find(|(node, _, _)| *node == next)
                             .expect("feedback plan already validated source")
                             .2;
-                        (address, shape.element_count())
+                        Ok((
+                            address,
+                            shape.element_count(),
+                            required == Domain::NonNegativeFinite,
+                        ))
                     })
-                    .collect::<Vec<_>>();
-                let copied = self
+                    .collect::<Result<Vec<_>, GpuError>>()?;
+                // The GPU guard uses integer FP32 bit classification and
+                // transfers only a 32-bit failure flag in the success path.
+                // No state is modified until this check has completed.
+                let domains_valid = self
                     .execution_health
-                    .record_io(self.session.copy_f32_batch_to_host(&sources))?;
-                for ((state, _, required, shape), values) in pending.iter().zip(copied) {
-                    if self.program.graph.node(*state)?.dtype != DType::F32 {
-                        return Err(GpuError::InvalidInput {
-                            node: state.index(),
-                            reason: "runtime feedback domain check requires F32",
-                        });
+                    .record_io(self.session.validate_output_domains(&sources))?;
+                if !domains_valid {
+                    // Exceptional path only: recover the original, precise
+                    // per-lane host-domain error without mutating state.
+                    let buffers = sources
+                        .iter()
+                        .map(|&(address, size, _)| (address, size))
+                        .collect::<Vec<_>>();
+                    let copied = self
+                        .execution_health
+                        .record_io(self.session.copy_f32_batch_to_host(&buffers))?;
+                    for ((_, _, required, shape), values) in pending.iter().zip(copied) {
+                        Tensor::new(shape.clone(), values)?.validate_domain(*required)?;
                     }
-                    let tensor = Tensor::new(shape.clone(), values)?;
-                    tensor.validate_domain(*required)?;
+                    return Err(GpuError::Driver(
+                        "GPU domain guard rejected outputs not rejected by the host oracle".into(),
+                    ));
                 }
                 profile.validation_d2h = validation_started.elapsed();
             }
@@ -2504,12 +2533,12 @@ impl GpuExecution {
         self.snapshot_outputs()?;
         profile.snapshot_d2d = snapshot_started.elapsed();
         let feedback_started = Instant::now();
-        for (dst, src, elements) in copies {
-            if dst != src {
-                self.execution_health
-                    .record_io(self.session.copy_device_to_device(dst, src, elements))?;
-            }
-        }
+        let transfers = copies
+            .into_iter()
+            .filter(|(dst, src, _)| dst != src)
+            .collect::<Vec<_>>();
+        self.execution_health
+            .record_io(self.session.launch_feedback_copies(&transfers))?;
         profile.feedback_d2d = feedback_started.elapsed();
         let sync_started = Instant::now();
         self.execution_health
@@ -2892,6 +2921,15 @@ impl GpuEngine {
         for &selected in outputs {
             uses[selected.index()] += 1;
         }
+        // A materialized additional output may have later DAG consumers.
+        // It can move to a later kernel only if no live consumer executes
+        // before that kernel. This is independent of output observability.
+        let mut earliest_consumer = vec![usize::MAX; graph.nodes().len()];
+        for &index in &live_nodes {
+            for id in &graph.nodes()[index].inputs {
+                earliest_consumer[id.index()] = earliest_consumer[id.index()].min(index);
+            }
+        }
         let mut fused_relus = BTreeMap::new();
         let mut fused_pointwise_chains = BTreeMap::new();
         let mut fused_mul_adds = BTreeMap::new();
@@ -3233,8 +3271,9 @@ impl GpuEngine {
         }
         // Two independent selected Add/Mul roots of the same F32 shape may
         // share a kernel even though each remains a distinct public output.
-        // The first root has no reachable consumers, and all four operands
-        // must already be materialized. Do not reorder any FP32 arithmetic.
+        // Earlier roots can also have *later* consumers as long as none
+        // execute before the fused kernel. All four operands are materialized
+        // first. Do not reorder any FP32 arithmetic or feedback dependencies.
         if self.launch.pointwise_fusion() {
             let mut selected = outputs.iter().map(|id| id.index()).collect::<Vec<_>>();
             selected.sort_unstable();
@@ -3242,7 +3281,7 @@ impl GpuEngine {
             for (later_pos, &later) in selected.iter().enumerate() {
                 let second = &graph.nodes()[later];
                 if !matches!(second.operation, Operation::Add | Operation::Mul)
-                    || uses[later] != 1
+                    || uses[later] == 0
                     || skipped.contains(&later)
                     || reserved.contains(&later)
                     || second.dtype != DType::F32
@@ -3259,7 +3298,8 @@ impl GpuEngine {
                     let first = &graph.nodes()[earlier];
                     if reserved.contains(&earlier)
                         || skipped.contains(&earlier)
-                        || uses[earlier] != 1
+                        || uses[earlier] == 0
+                        || earliest_consumer[earlier] <= later
                         || !matches!(first.operation, Operation::Add | Operation::Mul)
                         || first.dtype != DType::F32
                         || first.shape != second.shape

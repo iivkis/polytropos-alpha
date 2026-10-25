@@ -24,6 +24,55 @@ mod platform {
     const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
     const CU_EVENT_DEFAULT: c_uint = 0;
 
+    // Runtime-only binary32 domain check; never advertised as a Lean proof.
+    // Integer bit tests avoid FTZ and preserve the host's signed-zero rule.
+    // The kernel launches exclusively during capture into a CUDA Graph.
+    const DOMAIN_GUARD_PTX: &str = r#"
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry vn_domain_guard(
+    .param .u64 input,
+    .param .u64 flag,
+    .param .u32 length,
+    .param .u32 check_nonnegative
+)
+{
+    .reg .pred %p<10>;
+    .reg .b32 %r<14>;
+    .reg .b64 %rd<5>;
+    ld.param.u64 %rd1, [input];
+    ld.param.u64 %rd2, [flag];
+    ld.param.u32 %r11, [length];
+    ld.param.u32 %r12, [check_nonnegative];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.u32 %r4, %r2, %r3, %r1;
+    setp.ge.u32 %p1, %r4, %r11;
+    @%p1 bra DONE;
+    mul.wide.u32 %rd3, %r4, 4;
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.u32 %r5, [%rd4];
+    and.b32 %r6, %r5, 0x7f800000;
+    setp.eq.u32 %p2, %r6, 0x7f800000;
+    and.b32 %r7, %r5, 0x80000000;
+    and.b32 %r8, %r5, 0x7fffffff;
+    setp.ne.u32 %p3, %r7, 0;
+    setp.ne.u32 %p4, %r8, 0;
+    and.pred %p5, %p3, %p4;
+    setp.ne.u32 %p6, %r12, 0;
+    and.pred %p7, %p5, %p6;
+    or.pred %p8, %p2, %p7;
+    mov.u32 %r10, 1;
+    @%p8 atom.global.or.b32 %r9, [%rd2], %r10;
+DONE:
+    ret;
+}
+"#;
+
+
     struct Library(*mut c_void);
 
     impl Library {
@@ -90,6 +139,7 @@ mod platform {
         host_to_device: unsafe extern "C" fn(DevicePtr, *const c_void, usize, Handle) -> ResultCode,
         device_to_host: unsafe extern "C" fn(*mut c_void, DevicePtr, usize, Handle) -> ResultCode,
         device_to_device: unsafe extern "C" fn(DevicePtr, DevicePtr, usize, Handle) -> ResultCode,
+        device_memset_u32: unsafe extern "C" fn(DevicePtr, c_uint, usize, Handle) -> ResultCode,
         stream_create: unsafe extern "C" fn(*mut Handle, c_uint) -> ResultCode,
         stream_destroy: unsafe extern "C" fn(Handle) -> ResultCode,
         stream_sync: unsafe extern "C" fn(Handle) -> ResultCode,
@@ -138,6 +188,7 @@ mod platform {
                 host_to_device: lib.function("cuMemcpyHtoDAsync_v2")?,
                 device_to_host: lib.function("cuMemcpyDtoHAsync_v2")?,
                 device_to_device: lib.function("cuMemcpyDtoDAsync_v2")?,
+                device_memset_u32: lib.function("cuMemsetD32Async")?,
                 stream_create: lib.function("cuStreamCreate")?,
                 stream_destroy: lib.function("cuStreamDestroy_v2")?,
                 stream_sync: lib.function("cuStreamSynchronize")?,
@@ -204,6 +255,19 @@ mod platform {
         stream: Handle,
         graph: Handle,
         graph_exec: Handle,
+        // Reusable CUDA Graph for stable feedback D2D copies, independent
+        // from the main compute graph. No default stream or host staging.
+        feedback_graph: Handle,
+        feedback_graph_exec: Handle,
+        feedback_plan: Vec<(DevicePtr, DevicePtr, usize)>,
+        // A separate, reusable guard Graph checks all runtime-domain
+        // obligations before any state-feedback copies are launched.
+        guard_module: Handle,
+        guard_kernel: Handle,
+        guard_flag: DevicePtr,
+        guard_graph: Handle,
+        guard_graph_exec: Handle,
+        guard_plan: Vec<(DevicePtr, usize, bool)>,
         capturing: bool,
         _library: Library,
     }
@@ -269,6 +333,15 @@ mod platform {
                 stream: ptr::null_mut(),
                 graph: ptr::null_mut(),
                 graph_exec: ptr::null_mut(),
+                feedback_graph: ptr::null_mut(),
+                feedback_graph_exec: ptr::null_mut(),
+                feedback_plan: Vec::new(),
+                guard_module: ptr::null_mut(),
+                guard_kernel: ptr::null_mut(),
+                guard_flag: 0,
+                guard_graph: ptr::null_mut(),
+                guard_graph_exec: ptr::null_mut(),
+                guard_plan: Vec::new(),
                 capturing: false,
                 _library: library,
             };
@@ -405,6 +478,210 @@ mod platform {
             let _context = self.enter_context()?;
             check("cuMemcpyDtoDAsync_v2", unsafe {
                 (self.functions.device_to_device)(destination, source, bytes, self.stream)
+            })
+        }
+
+        /// Check actual output domains on GPU and read only one status word.
+        /// False means at least one FP32 NaN, Infinity, or (if requested)
+        /// strictly negative nonzero value. Negative zero is accepted.
+        /// The status is initialized before *every* replay. This is a
+        /// runtime hardware check, not a static proof or semantic-IR kernel.
+        pub fn validate_output_domains(
+            &mut self,
+            sources: &[(DevicePtr, usize, bool)],
+        ) -> Result<bool, GpuError> {
+            if sources.is_empty() {
+                return Ok(true);
+            }
+            if self.capturing {
+                return Err(GpuError::Driver(
+                    "cannot validate feedback while CUDA Graph capture is active".into(),
+                ));
+            }
+            for &(address, elements, _) in sources {
+                self.require_allocation(address, elements)?;
+                if elements == 0 || elements > i32::MAX as usize {
+                    return Err(GpuError::UnsupportedSize { elements });
+                }
+            }
+            let _context = self.enter_context()?;
+            if self.guard_module.is_null() {
+                let source = CString::new(DOMAIN_GUARD_PTX)
+                    .map_err(|_| GpuError::Driver("domain guard PTX contains NUL".into()))?;
+                check("cuModuleLoadData", unsafe {
+                    (self.functions.module_load)(
+                        &mut self.guard_module,
+                        source.as_ptr().cast::<c_void>(),
+                    )
+                })?;
+                check("cuModuleGetFunction", unsafe {
+                    (self.functions.module_function)(
+                        &mut self.guard_kernel,
+                        self.guard_module,
+                        c"vn_domain_guard".as_ptr(),
+                    )
+                })?;
+                self.guard_flag = self.allocate(1)?;
+            }
+            if self.guard_plan.as_slice() != sources || self.guard_graph_exec.is_null() {
+                self.synchronize()?;
+                if !self.guard_graph_exec.is_null() {
+                    check("cuGraphExecDestroy", unsafe {
+                        (self.functions.graph_exec_destroy)(self.guard_graph_exec)
+                    })?;
+                    self.guard_graph_exec = ptr::null_mut();
+                }
+                if !self.guard_graph.is_null() {
+                    check("cuGraphDestroy", unsafe {
+                        (self.functions.graph_destroy)(self.guard_graph)
+                    })?;
+                    self.guard_graph = ptr::null_mut();
+                }
+                self.guard_plan.clear();
+                check("cuStreamBeginCapture_v2", unsafe {
+                    (self.functions.stream_capture_begin)(
+                        self.stream,
+                        CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+                    )
+                })?;
+                self.capturing = true;
+                for &(source, elements, nonnegative) in sources {
+                    let mut input = source;
+                    let mut flag = self.guard_flag;
+                    let mut n = elements as u32;
+                    let mut mode = u32::from(nonnegative);
+                    let mut args = [
+                        (&mut input as *mut DevicePtr).cast::<c_void>(),
+                        (&mut flag as *mut DevicePtr).cast::<c_void>(),
+                        (&mut n as *mut u32).cast::<c_void>(),
+                        (&mut mode as *mut u32).cast::<c_void>(),
+                    ];
+                    let threads = 256u32;
+                    let grid = u32::try_from(elements.div_ceil(threads as usize))
+                        .map_err(|_| GpuError::UnsupportedSize { elements })?;
+                    check("cuLaunchKernel", unsafe {
+                        (self.functions.launch)(
+                            self.guard_kernel,
+                            grid, 1, 1,
+                            threads, 1, 1,
+                            0,
+                            self.stream,
+                            args.as_mut_ptr(),
+                            ptr::null_mut(),
+                        )
+                    })?;
+                }
+                let mut graph = ptr::null_mut();
+                let ended = check("cuStreamEndCapture", unsafe {
+                    (self.functions.stream_capture_end)(self.stream, &mut graph)
+                });
+                self.capturing = false;
+                self.guard_graph = graph;
+                ended?;
+                if self.guard_graph.is_null() {
+                    return Err(GpuError::Driver(
+                        "domain guard CUDA Graph capture returned null".into(),
+                    ));
+                }
+                check("cuGraphInstantiateWithFlags", unsafe {
+                    (self.functions.graph_instantiate)(
+                        &mut self.guard_graph_exec,
+                        self.guard_graph,
+                        0,
+                    )
+                })?;
+                self.guard_plan.extend_from_slice(sources);
+            }
+            check("cuMemsetD32Async", unsafe {
+                (self.functions.device_memset_u32)(self.guard_flag, 0, 1, self.stream)
+            })?;
+            check("cuGraphLaunch", unsafe {
+                (self.functions.graph_launch)(self.guard_graph_exec, self.stream)
+            })?;
+            let mut result = [0i32; 1];
+            self.copy_indices_to_host(&mut result, self.guard_flag)?;
+            Ok(result[0] == 0)
+        }
+
+        /// Capture the checked stable device-feedback copy plan once and
+        /// replay it on the explicit non-blocking stream. A change in bindings
+        /// invalidates the cache and is recaptured after synchronization.
+        /// This is a *transfer* graph, not a bypass around the domain gate.
+        pub fn launch_feedback_copies(
+            &mut self,
+            copies: &[(DevicePtr, DevicePtr, usize)],
+        ) -> Result<(), GpuError> {
+            if copies.is_empty() {
+                return Ok(());
+            }
+            if self.capturing {
+                return Err(GpuError::Driver(
+                    "feedback is forbidden during CUDA Graph capture".into(),
+                ));
+            }
+            for &(dest, src, elements) in copies {
+                self.require_allocation(dest, elements)?;
+                self.require_allocation(src, elements)?;
+                elements
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or(GpuError::UnsupportedSize { elements })?;
+            }
+            let _context = self.enter_context()?;
+            if self.feedback_plan.as_slice() != copies || self.feedback_graph_exec.is_null() {
+                // No executable graph may be destroyed while its launch is
+                // in flight. The feedback plan is validated by the caller.
+                self.synchronize()?;
+                if !self.feedback_graph_exec.is_null() {
+                    check("cuGraphExecDestroy", unsafe {
+                        (self.functions.graph_exec_destroy)(self.feedback_graph_exec)
+                    })?;
+                    self.feedback_graph_exec = ptr::null_mut();
+                }
+                if !self.feedback_graph.is_null() {
+                    check("cuGraphDestroy", unsafe {
+                        (self.functions.graph_destroy)(self.feedback_graph)
+                    })?;
+                    self.feedback_graph = ptr::null_mut();
+                }
+                self.feedback_plan.clear();
+                check("cuStreamBeginCapture_v2", unsafe {
+                    (self.functions.stream_capture_begin)(
+                        self.stream,
+                        CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+                    )
+                })?;
+                // Retain the capture flag until the end call succeeds or the
+                // session is dropped. A failed capture never launches copies.
+                self.capturing = true;
+                for &(dest, src, elements) in copies {
+                    let bytes = elements * std::mem::size_of::<f32>();
+                    check("cuMemcpyDtoDAsync_v2", unsafe {
+                        (self.functions.device_to_device)(dest, src, bytes, self.stream)
+                    })?;
+                }
+                let mut graph = ptr::null_mut();
+                let ended = check("cuStreamEndCapture", unsafe {
+                    (self.functions.stream_capture_end)(self.stream, &mut graph)
+                });
+                self.capturing = false;
+                self.feedback_graph = graph;
+                ended?;
+                if self.feedback_graph.is_null() {
+                    return Err(GpuError::Driver(
+                        "feedback CUDA Graph capture returned null".into(),
+                    ));
+                }
+                check("cuGraphInstantiateWithFlags", unsafe {
+                    (self.functions.graph_instantiate)(
+                        &mut self.feedback_graph_exec,
+                        self.feedback_graph,
+                        0,
+                    )
+                })?;
+                self.feedback_plan.extend_from_slice(copies);
+            }
+            check("cuGraphLaunch", unsafe {
+                (self.functions.graph_launch)(self.feedback_graph_exec, self.stream)
             })
         }
 
@@ -895,6 +1172,18 @@ mod platform {
                 // SAFETY: session owns this stream.
                 unsafe { (self.functions.stream_sync)(self.stream) };
             }
+            if !self.guard_graph_exec.is_null() {
+                unsafe { (self.functions.graph_exec_destroy)(self.guard_graph_exec) };
+            }
+            if !self.guard_graph.is_null() {
+                unsafe { (self.functions.graph_destroy)(self.guard_graph) };
+            }
+            if !self.feedback_graph_exec.is_null() {
+                unsafe { (self.functions.graph_exec_destroy)(self.feedback_graph_exec) };
+            }
+            if !self.feedback_graph.is_null() {
+                unsafe { (self.functions.graph_destroy)(self.feedback_graph) };
+            }
             if !self.graph_exec.is_null() {
                 // SAFETY: the executable graph is owned by this session.
                 unsafe { (self.functions.graph_exec_destroy)(self.graph_exec) };
@@ -911,6 +1200,9 @@ mod platform {
                 .chain(self.staging_available.drain(..))
             {
                 unsafe { (self.functions.pinned_free)(host.address) };
+            }
+            if !self.guard_module.is_null() {
+                unsafe { (self.functions.module_unload)(self.guard_module) };
             }
             if !self.module.is_null() {
                 unsafe { (self.functions.module_unload)(self.module) };
@@ -968,6 +1260,24 @@ mod platform {
                 "CUDA Driver backend requires Linux".into(),
             ))
         }
+        pub fn launch_feedback_copies(
+            &mut self,
+            _: &[(u64, u64, usize)],
+        ) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn validate_output_domains(
+            &mut self,
+            _: &[(u64, usize, bool)],
+        ) -> Result<bool, GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
 
         pub fn copy_f32_batch_to_host(
             &mut self,

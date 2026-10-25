@@ -294,3 +294,47 @@ fn checked_feedback_rejects_nonfinite_parameters_atomically() {
         assert_eq!(expected.to_bits(), actual.to_bits());
     }
 }
+
+
+#[test]
+#[ignore = "requires NVIDIA CUDA Graph; runtime domain guard must reject negative finite values before any feedback writes"]
+fn checked_feedback_gpu_guard_rejects_negative_and_recovers() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![4]).unwrap();
+    let state = graph.input(shape.clone(), Domain::NonNegativeFinite);
+    let delta = graph.input(shape, Domain::Finite);
+    let next = graph.add(state, delta).unwrap();
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    );
+    let program = engine.compile_outputs(&graph, &[next]).unwrap();
+    let mut gpu = engine
+        .prepare(
+            &program,
+            &[
+                (state, tensor(&[0., 1., 2., 3.])),
+                (delta, tensor(&[-1., 0., 0., 0.])),
+            ],
+            &std::env::temp_dir()
+                .join(format!("vn_feedback_nonnegative_{}", std::process::id())),
+        )
+        .unwrap();
+    gpu.replay().unwrap();
+    assert!(gpu.feedback_state_checked(&[(state, next)]).is_err());
+    for (&expected, &actual) in [0f32, 1., 2., 3.]
+        .iter()
+        .zip(gpu.read_source(state).unwrap().values())
+    {
+        assert_eq!(expected.to_bits(), actual.to_bits());
+    }
+    // A domain failure is recoverable. Negative zero is permitted by the
+    // host oracle, and the GPU guard must not classify it as negative.
+    gpu.update_input(delta, &tensor(&[-0., 0., 0., 0.]))
+        .unwrap();
+    gpu.replay().unwrap();
+    gpu.feedback_state_checked(&[(state, next)]).unwrap();
+    for &value in gpu.read_source(state).unwrap().values() {
+        assert!(value.is_finite() && value >= 0.);
+    }
+}
