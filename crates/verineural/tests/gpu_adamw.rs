@@ -71,10 +71,15 @@ fn scalar_gpu_broadcast_accepts_vector_matrix_and_higher_ranks_only_for_singleto
     for dims in [vec![4], vec![2, 3], vec![2, 1, 3]] {
         let mut graph = NeuralGraph::default();
         let scalar = graph.input(Shape::new(vec![]).unwrap(), Domain::Finite);
-        let copied = graph.broadcast_to(scalar, Shape::new(dims.clone()).unwrap()).unwrap();
+        let copied = graph
+            .broadcast_to(scalar, Shape::new(dims.clone()).unwrap())
+            .unwrap();
         let program = engine.compile(&graph, copied).unwrap();
         assert_eq!(program.kernel_count().unwrap(), 1);
-        assert_eq!(program.memory_contracts().unwrap()[0].reads, vec![(scalar.index(), 1)]);
+        assert_eq!(
+            program.memory_contracts().unwrap()[0].reads,
+            vec![(scalar.index(), 1)]
+        );
         assert_eq!(
             program.translation_plan().unwrap().kernels[0].kind,
             verineural::TranslationKind::BroadcastScalar
@@ -84,7 +89,9 @@ fn scalar_gpu_broadcast_accepts_vector_matrix_and_higher_ranks_only_for_singleto
     // implementation must not silently reinterpret a non-scalar source.
     let mut graph = NeuralGraph::default();
     let source = graph.input(Shape::new(vec![2]).unwrap(), Domain::Finite);
-    let expanded = graph.broadcast_to(source, Shape::new(vec![2, 2]).unwrap()).unwrap();
+    let expanded = graph
+        .broadcast_to(source, Shape::new(vec![2, 2]).unwrap())
+        .unwrap();
     assert!(matches!(
         engine.compile(&graph, expanded),
         Err(verineural::GpuError::UnsupportedOperation {
@@ -101,21 +108,23 @@ fn scalar_broadcast_gpu_bits_match_source_across_ranks() {
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     );
-    let directory = std::env::temp_dir()
-        .join(format!("vn_scalar_broadcast_{}", std::process::id()));
-    for (i, dims) in [vec![4], vec![2, 3], vec![2, 1, 3]]
-        .into_iter().enumerate()
-    {
+    let directory =
+        std::env::temp_dir().join(format!("vn_scalar_broadcast_{}", std::process::id()));
+    for (i, dims) in [vec![4], vec![2, 3], vec![2, 1, 3]].into_iter().enumerate() {
         let mut graph = NeuralGraph::default();
         let scalar = graph.input(Shape::new(vec![]).unwrap(), Domain::Finite);
-        let broadcast = graph.broadcast_to(scalar, Shape::new(dims.clone()).unwrap()).unwrap();
+        let broadcast = graph
+            .broadcast_to(scalar, Shape::new(dims.clone()).unwrap())
+            .unwrap();
         let program = engine.compile(&graph, broadcast).unwrap();
         let initial = Tensor::from_slice(vec![], &[-0.0_f32]).unwrap();
-        let output = engine.execute(
-            &program,
-            &[(scalar, initial)],
-            &directory.join(format!("rank_{}", i + 1)),
-        ).unwrap();
+        let output = engine
+            .execute(
+                &program,
+                &[(scalar, initial)],
+                &directory.join(format!("rank_{}", i + 1)),
+            )
+            .unwrap();
         assert_eq!(output.shape().dims(), dims);
         for &value in output.values() {
             assert_eq!(value.to_bits(), (-0.0_f32).to_bits());
@@ -214,7 +223,9 @@ fn gpu_adamw_matches_host_and_resumes_bitwise() {
                 ])
                 .unwrap();
             resumed.replay().unwrap();
-            resumed.feedback_state_checked(restart_plan.feedback()).unwrap();
+            resumed
+                .feedback_state_checked(restart_plan.feedback())
+                .unwrap();
             let (after, after_opt) = restart_plan.checkpoint(&mut resumed, 3).unwrap();
             for (name, result) in after {
                 for (&a, &b) in result.values().iter().zip(params[&name].values()) {
