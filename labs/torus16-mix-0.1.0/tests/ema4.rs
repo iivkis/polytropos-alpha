@@ -51,21 +51,40 @@ fn validate_model(model: &Model, vocab: usize) {
 
 #[test]
 fn independent_matrices_only_untie_torus16_role_weights() {
-    assert_eq!(MatrixMode::parse("independent"), Some(MatrixMode::Independent));
-    assert_eq!(MatrixMode::parse("torus_shared"), Some(MatrixMode::TorusShared));
+    assert_eq!(
+        MatrixMode::parse("independent"),
+        Some(MatrixMode::Independent)
+    );
+    assert_eq!(
+        MatrixMode::parse("torus_shared"),
+        Some(MatrixMode::TorusShared)
+    );
     assert_eq!(MatrixMode::parse("global_shared"), None);
     assert_eq!(MatrixMode::Independent.matrix_count(), LAYERS * 8);
     assert_eq!(MatrixMode::TorusShared.matrix_count(), LAYERS);
     let weights = Ema4Weights::deterministic(RESEARCH_VOCAB).unwrap();
-    let shared = weights.trainable_parameters_for(MatrixMode::TorusShared).unwrap();
-    let independent = weights.trainable_parameters_for(MatrixMode::Independent).unwrap();
+    let shared = weights
+        .trainable_parameters_for(MatrixMode::TorusShared)
+        .unwrap();
+    let independent = weights
+        .trainable_parameters_for(MatrixMode::Independent)
+        .unwrap();
     assert_eq!(shared.len() + LAYERS * 7, independent.len());
     assert_eq!(
         Ema4Weights::parameter_count_for(RESEARCH_VOCAB, MatrixMode::Independent),
         24_908 + 28 * WIDTH * WIDTH
     );
-    assert_eq!(shared.values().map(|w| w.values().len()).sum::<usize>(), 24_908);
-    assert_eq!(independent.values().map(|w| w.values().len()).sum::<usize>(), 89_420);
+    assert_eq!(
+        shared.values().map(|w| w.values().len()).sum::<usize>(),
+        24_908
+    );
+    assert_eq!(
+        independent
+            .values()
+            .map(|w| w.values().len())
+            .sum::<usize>(),
+        89_420
+    );
     // Each independent role starts with exactly the same W as the shared
     // candidate, including negative/subnormal FP32 bits.
     for layer in 0..LAYERS {
@@ -73,7 +92,13 @@ fn independent_matrices_only_untie_torus16_role_weights() {
         for role in 0..8 {
             let actual = &independent[&format!("weight_{layer}_{role}")];
             assert_eq!(reference.shape(), actual.shape());
-            assert!(reference.values().iter().zip(actual.values()).all(|(a,b)| a.to_bits() == b.to_bits()));
+            assert!(
+                reference
+                    .values()
+                    .iter()
+                    .zip(actual.values())
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
         }
     }
     for (name, expected) in &shared {
@@ -82,26 +107,64 @@ fn independent_matrices_only_untie_torus16_role_weights() {
         }
         let actual = &independent[name];
         assert_eq!(expected.shape(), actual.shape());
-        assert!(expected.values().iter().zip(actual.values()).all(|(a,b)| a.to_bits() == b.to_bits()), "{name}");
+        assert!(
+            expected
+                .values()
+                .iter()
+                .zip(actual.values())
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "{name}"
+        );
     }
     // Both variants use the same public VeriNeural Model API and recurrent
     // transitions; invalid cross-mode bindings must be rejected.
     let shared_model = architecture_model_for(RESEARCH_VOCAB, MatrixMode::TorusShared).unwrap();
-    let independent_model = architecture_model_for(RESEARCH_VOCAB, MatrixMode::Independent).unwrap();
-    assert_eq!(shared_model.state_links().len(), independent_model.state_links().len());
-    assert_eq!(shared_model.graph().modules().len(), independent_model.graph().modules().len());
+    let independent_model =
+        architecture_model_for(RESEARCH_VOCAB, MatrixMode::Independent).unwrap();
+    assert_eq!(
+        shared_model.state_links().len(),
+        independent_model.state_links().len()
+    );
+    assert_eq!(
+        shared_model.graph().modules().len(),
+        independent_model.graph().modules().len()
+    );
     assert_eq!(shared_model.graph().modules().len(), 10 * LAYERS);
     for layer in 0..LAYERS {
         assert!(shared_model.source(&format!("weight_{layer}")).is_some());
-        assert!(independent_model.source(&format!("weight_{layer}")).is_none());
+        assert!(
+            independent_model
+                .source(&format!("weight_{layer}"))
+                .is_none()
+        );
         for role in 0..8 {
-            assert!(independent_model.source(&format!("weight_{layer}_{role}")).is_some());
+            assert!(
+                independent_model
+                    .source(&format!("weight_{layer}_{role}"))
+                    .is_some()
+            );
         }
     }
-    assert!(shared_model.bind(weights.bindings_for(0, MatrixMode::TorusShared).unwrap()).is_ok());
-    assert!(independent_model.bind(weights.bindings_for(0, MatrixMode::Independent).unwrap()).is_ok());
-    assert!(shared_model.bind(weights.bindings_for(0, MatrixMode::Independent).unwrap()).is_err());
-    assert!(independent_model.bind(weights.bindings_for(0, MatrixMode::TorusShared).unwrap()).is_err());
+    assert!(
+        shared_model
+            .bind(weights.bindings_for(0, MatrixMode::TorusShared).unwrap())
+            .is_ok()
+    );
+    assert!(
+        independent_model
+            .bind(weights.bindings_for(0, MatrixMode::Independent).unwrap())
+            .is_ok()
+    );
+    assert!(
+        shared_model
+            .bind(weights.bindings_for(0, MatrixMode::Independent).unwrap())
+            .is_err()
+    );
+    assert!(
+        independent_model
+            .bind(weights.bindings_for(0, MatrixMode::TorusShared).unwrap())
+            .is_err()
+    );
 }
 
 #[test]
@@ -114,7 +177,8 @@ fn torus_matrix_modes_initial_gpu_logits_and_state_match_bits() {
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     )
     .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
-    let root = std::env::temp_dir().join(format!("vn_torus_matrix_ablation_{}", std::process::id()));
+    let root =
+        std::env::temp_dir().join(format!("vn_torus_matrix_ablation_{}", std::process::id()));
     let tokens = [3, 7, 2];
     // Deliberately drop the baseline session before compiling independent
     // weights, because both four-layer CUDA Graphs can be large.
@@ -129,7 +193,9 @@ fn torus_matrix_modes_initial_gpu_logits_and_state_match_bits() {
             .unwrap();
         let mut observed = Vec::new();
         for &token in &tokens {
-            execution.set_input("token", &onehot(token, vocabulary)).unwrap();
+            execution
+                .set_input("token", &onehot(token, vocabulary))
+                .unwrap();
             execution.step().unwrap();
             observed.push((
                 execution.output("logits").unwrap(),
@@ -147,7 +213,9 @@ fn torus_matrix_modes_initial_gpu_logits_and_state_match_bits() {
         )
         .unwrap();
     for (step, &token) in tokens.iter().enumerate() {
-        execution.set_input("token", &onehot(token, vocabulary)).unwrap();
+        execution
+            .set_input("token", &onehot(token, vocabulary))
+            .unwrap();
         execution.step().unwrap();
         let actual_logits = execution.output("logits").unwrap();
         let actual_state = execution.state("mem_0").unwrap();
@@ -158,7 +226,8 @@ fn torus_matrix_modes_initial_gpu_logits_and_state_match_bits() {
             assert_eq!(actual.shape(), expected.shape());
             for (lane, (&a, &b)) in actual.values().iter().zip(expected.values()).enumerate() {
                 assert_eq!(
-                    a.to_bits(), b.to_bits(),
+                    a.to_bits(),
+                    b.to_bits(),
                     "step={step} {name} lane={lane} mismatched FP32 bits"
                 );
             }
@@ -174,9 +243,15 @@ fn seeded_matrix_ablation_preserves_matched_initialization_and_varies_diverse_ro
     let c = Ema4Weights::deterministic_seeded(16, 124).unwrap();
     assert_eq!(a.blocks[0].operator.weight, b.blocks[0].operator.weight);
     assert_ne!(a.blocks[0].operator.weight, c.blocks[0].operator.weight);
-    let shared = a.trainable_parameters_with_init(MatrixMode::TorusShared, RoleInit::Matched).unwrap();
-    let matched = a.trainable_parameters_with_init(MatrixMode::Independent, RoleInit::Matched).unwrap();
-    let diverse = a.trainable_parameters_with_init(MatrixMode::Independent, RoleInit::Diverse).unwrap();
+    let shared = a
+        .trainable_parameters_with_init(MatrixMode::TorusShared, RoleInit::Matched)
+        .unwrap();
+    let matched = a
+        .trainable_parameters_with_init(MatrixMode::Independent, RoleInit::Matched)
+        .unwrap();
+    let diverse = a
+        .trainable_parameters_with_init(MatrixMode::Independent, RoleInit::Diverse)
+        .unwrap();
     assert_eq!(matched["weight_0_0"], shared["weight_0"]);
     assert_eq!(matched["weight_0_7"], shared["weight_0"]);
     assert_ne!(diverse["weight_0_0"], diverse["weight_0_7"]);
@@ -196,39 +271,61 @@ fn torus_role_matrix_gradients_sum_to_shared_gradient() {
     let engine = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
-    ).with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    )
+    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
 
     let gradients_for = |mode: MatrixMode| -> Vec<Vec<f32>> {
         let model = architecture_model_for(vocab, mode).unwrap();
         let logits = model.output("logits").unwrap();
         let names = if mode == MatrixMode::TorusShared {
-            (0..LAYERS).map(|layer| format!("weight_{layer}")).collect::<Vec<_>>()
+            (0..LAYERS)
+                .map(|layer| format!("weight_{layer}"))
+                .collect::<Vec<_>>()
         } else {
             (0..LAYERS)
                 .flat_map(|layer| (0..8).map(move |role| format!("weight_{layer}_{role}")))
                 .collect::<Vec<_>>()
         };
-        let sources = names.iter().map(|name| model.source(name).unwrap().0).collect::<Vec<_>>();
+        let sources = names
+            .iter()
+            .map(|name| model.source(name).unwrap().0)
+            .collect::<Vec<_>>();
         let reverse = verineural::differentiate(model.graph(), logits, &sources).unwrap();
-        let grads = sources.iter().map(|&id| reverse.gradient_of(id).unwrap()).collect::<Vec<_>>();
+        let grads = sources
+            .iter()
+            .map(|&id| reverse.gradient_of(id).unwrap())
+            .collect::<Vec<_>>();
         let program = engine.compile_outputs(reverse.graph(), &grads).unwrap();
-        let source_bindings = model.bind(
-            weights.bindings_with_init(3, mode, RoleInit::Matched).unwrap()
-        ).unwrap();
+        let source_bindings = model
+            .bind(
+                weights
+                    .bindings_with_init(3, mode, RoleInit::Matched)
+                    .unwrap(),
+            )
+            .unwrap();
         let seed = Tensor::from_vec(
-            vec![1, vocab], (0..vocab).map(|i| (i as f32 + 1.) / 16.).collect()
-        ).unwrap();
+            vec![1, vocab],
+            (0..vocab).map(|i| (i as f32 + 1.) / 16.).collect(),
+        )
+        .unwrap();
         let supplied = reverse.bindings(&source_bindings, seed).unwrap();
-        let supplied = supplied.into_iter()
+        let supplied = supplied
+            .into_iter()
             .filter(|(id, _)| program.source_inputs().contains(id))
             .collect::<Vec<_>>();
         let root = std::env::temp_dir().join(format!(
-            "vn_role_vjp_{}_{}_{}", std::process::id(), vocab, mode.as_str()
+            "vn_role_vjp_{}_{}_{}",
+            std::process::id(),
+            vocab,
+            mode.as_str()
         ));
         let mut gpu = engine.prepare(&program, &supplied, &root).unwrap();
         gpu.replay().unwrap();
-        gpu.read_outputs_selected(&grads).unwrap().into_iter()
-            .map(|(_, tensor)| tensor.values().to_vec()).collect()
+        gpu.read_outputs_selected(&grads)
+            .unwrap()
+            .into_iter()
+            .map(|(_, tensor)| tensor.values().to_vec())
+            .collect()
     };
     // Running sequentially limits peak GPU memory usage.
     let shared = gradients_for(MatrixMode::TorusShared);
@@ -238,11 +335,14 @@ fn torus_role_matrix_gradients_sum_to_shared_gradient() {
     for layer in 0..LAYERS {
         for (lane, &expected) in shared[layer].iter().enumerate() {
             let actual: f32 = independent[layer * 8..(layer + 1) * 8]
-                .iter().map(|gradient| gradient[lane]).sum();
+                .iter()
+                .map(|gradient| gradient[lane])
+                .sum();
             // Different GPU reduction orders permit a bounded FP32 error;
             // this does not claim bitwise equivalence or formal proof.
             assert!(
-                actual.is_finite() && expected.is_finite()
+                actual.is_finite()
+                    && expected.is_finite()
                     && (actual - expected).abs() <= 1e-4 + 0.02 * expected.abs(),
                 "layer={layer} lane={lane}: shared={expected}, sum={actual}"
             );

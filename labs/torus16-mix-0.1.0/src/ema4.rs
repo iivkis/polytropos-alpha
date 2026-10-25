@@ -328,12 +328,14 @@ impl Ema4Weights {
                     vec![WIDTH, WIDTH],
                     if mode == MatrixMode::Independent && role_init == RoleInit::Diverse {
                         (0..WIDTH * WIDTH)
-                            .map(|index| matrix_sample(
-                                self.matrix_seed ^ 0x544f52555331364d,
-                                layer,
-                                role_weight,
-                                index,
-                            ))
+                            .map(|index| {
+                                matrix_sample(
+                                    self.matrix_seed ^ 0x544f52555331364d,
+                                    layer,
+                                    role_weight,
+                                    index,
+                                )
+                            })
                             .collect()
                     } else {
                         b.operator.weight.iter().flatten().copied().collect()
