@@ -482,3 +482,18 @@ previous snapshots; every public read API uses the protected address. The
 `ModelExecution::step` path avoids redundant manual snapshots. NVIDIA checks:
 `task verify-gpu-feedback-runtime`, plus `task check`, `task test`, and
 `task clippy`. No Lean proof of CUDA/JIT/SASS or hardware success is claimed.
+
+### P2 GPU training numerical equivalence acceptance (code, NVIDIA run pending)
+
+`task verify-gpu-p2-equivalence` runs the ignored multi-step exact
+D2D-vs-host state-feedback regression and existing pointwise-fusion GPU
+parity tests. The `TORUS16_VERIFY_FUSION` opt-in path runs the real EMA4
+training graph both unfused/fused with identical next-window token and CE
+labels, checks every logit, parameter gradient and terminal state as FP32
+bits, and drops the baseline CUDA session before preparing the fused one.
+Isolated 2+resume-to-4 and fresh 4-window executions compare CE/BPC and
+AdamW step logs and byte-for-byte checkpoint contents. The check must not
+reuse the user's primary checkpoint or infer any hardware result before the
+actual NVIDIA run. This verifies a bounded numerical execution fixture,
+not a formal FP32/PTX/JIT/SASS theorem; longer-horizon and
+architecture-agnostic equivalence remain open.

@@ -267,9 +267,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         .filter(|(id, _)| program.source_inputs().contains(id))
         .collect::<Vec<_>>();
     let artifact = std::env::temp_dir().join(format!("vn_ema4_bptt_{}", std::process::id()));
-    let baseline_replay_ms = if std::env::var_os("TORUS16_BENCH_COMPARE").is_some() {
-        // Compile/allocate/benchmark/drop the baseline first, so the full
-        // training model never requires two complete CUDA executions in VRAM.
+    // P2 acceptance uses the *real* supervised EMA4 reverse graph, with
+    // identical parameters, recurrent state, training tokens and CE labels.
+    // The baseline session is dropped before allocating the fused session to
+    // avoid requiring two large CUDA graphs in GPU memory simultaneously.
+    let verify_fusion = std::env::var_os("TORUS16_VERIFY_FUSION").is_some();
+    let compare_replay = std::env::var_os("TORUS16_BENCH_COMPARE").is_some();
+    let verify_updates = if verify_fusion && first_window < train_windows {
+        let mut updates = Vec::with_capacity(window_len * 2);
+        let start = first_window * window_len;
+        for t in 0..window_len {
+            updates.push((
+                window.inputs()[t]["token"],
+                onehot(corpus.train[start + t], vocab)?,
+            ));
+            updates.push((
+                window.cotangents()[t],
+                onehot(corpus.train[start + t + 1], vocab)?,
+            ));
+        }
+        Some(updates)
+    } else {
+        None
+    };
+    let (baseline_replay_ms, baseline_outputs) = if compare_replay || verify_updates.is_some() {
         let baseline_engine = GpuEngine::new(
             "llc",
             std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
@@ -282,12 +303,60 @@ fn main() -> Result<(), Box<dyn Error>> {
             .cloned()
             .collect::<Vec<_>>();
         let baseline_dir = artifact.join("baseline");
-        let execution = baseline_engine.prepare(&baseline, &baseline_sources, &baseline_dir)?;
-        Some(execution.benchmark(3, 10)?.average().as_secs_f64() * 1000.)
+        let mut execution = baseline_engine.prepare(&baseline, &baseline_sources, &baseline_dir)?;
+        let replay_ms = if compare_replay {
+            Some(execution.benchmark(3, 10)?.average().as_secs_f64() * 1000.)
+        } else {
+            None
+        };
+        let outputs = if let Some(updates) = &verify_updates {
+            let borrowed = updates.iter().map(|(id, tensor)| (*id, tensor)).collect::<Vec<_>>();
+            execution.update_input_subset(&borrowed)?;
+            execution.replay()?;
+            Some(execution.read_outputs_selected(&selected)?)
+        } else {
+            None
+        };
+        (replay_ms, outputs)
     } else {
-        None
+        (None, None)
     };
     let mut gpu = engine.prepare(&program, &supplied, &artifact)?;
+    if let Some(reference) = baseline_outputs {
+        let updates = verify_updates.as_ref().ok_or("missing fused parity input bindings")?;
+        let borrowed = updates.iter().map(|(id, tensor)| (*id, tensor)).collect::<Vec<_>>();
+        gpu.update_input_subset(&borrowed)?;
+        gpu.replay()?;
+        let actual = gpu.read_outputs_selected(&selected)?;
+        if reference.len() != actual.len() {
+            return Err("fused/unfused GPU output inventory mismatch".into());
+        }
+        let mut values_checked = 0usize;
+        for ((expected_id, expected), (actual_id, found)) in reference.iter().zip(&actual) {
+            if expected_id != actual_id || expected.shape() != found.shape() {
+                return Err("fused/unfused GPU node or shape mismatch".into());
+            }
+            for (lane, (&left, &right)) in
+                expected.values().iter().zip(found.values()).enumerate()
+            {
+                if left.to_bits() != right.to_bits() {
+                    return Err(format!(
+                        "fused/unfused FP32 mismatch node={} lane={lane}: baseline={:#010x} fused={:#010x}",
+                        expected_id.index(),
+                        left.to_bits(),
+                        right.to_bits()
+                    )
+                    .into());
+                }
+                values_checked += 1;
+            }
+        }
+        println!(
+            "fusion_parity=PASS selected_tensors={} fp32_values={} scope=EMA4_logits_gradients_terminal_states",
+            actual.len(),
+            values_checked
+        );
+    }
     println!(
         "setup_compile_and_cuda_prepare_ms={:.3}",
         compile_clock.elapsed().as_secs_f64() * 1000.

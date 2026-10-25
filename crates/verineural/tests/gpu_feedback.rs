@@ -107,3 +107,86 @@ fn direct_feedback_requires_fresh_outputs_and_preserves_selected_aliases() {
     expect_f32(&preserved_again[1].1, &first_state);
     expect_f32(&preserved_again[2].1, &second_state);
 }
+
+#[test]
+#[ignore = "requires NVIDIA GPU and LLVM NVPTX; checks D2D feedback parity with host readback/rebind over multiple graph replays"]
+fn device_feedback_matches_host_staged_state_bitwise() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![4]).unwrap();
+    let state_a = graph.input(shape.clone(), Domain::Any);
+    let state_b = graph.input(shape.clone(), Domain::Any);
+    let token = graph.input(shape, Domain::Finite);
+    let next_a = graph.add(state_a, token).unwrap();
+    let next_b = graph.mul(state_b, token).unwrap();
+    let logits = graph.add(next_a, next_b).unwrap();
+    let outputs = [next_a, next_b, logits];
+    let links = [(state_a, next_a), (state_b, next_b)];
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    );
+    let program = engine.compile_outputs(&graph, &outputs).unwrap();
+    let sources = [
+        (state_a, tensor(&[0.5, -1.5, 2.0, 0.25])),
+        (state_b, tensor(&[1., -0.5, 0., 4.])),
+        (token, tensor(&[0., 1., 2., 3.])),
+    ];
+    let dir = std::env::temp_dir().join(format!("vn_feedback_parity_{}", std::process::id()));
+    let mut device = engine.prepare(&program, &sources, &dir.join("device")).unwrap();
+    let mut host = engine.prepare(&program, &sources, &dir.join("host")).unwrap();
+
+    // Different tokens and two independent recurrent states exercise more
+    // than a one-step identity feedback. Both sessions execute the same DAG;
+    // only the state transport between windows differs.
+    let tokens = [
+        [0.25, -0.5, 2., 1.],
+        [1., 0.25, -0.5, 2.],
+        [0., 1.5, 1., -0.25],
+        [-1., 0.5, 2., 0.75],
+    ];
+    for (step, values) in tokens.iter().enumerate() {
+        let input = tensor(values);
+        device.update_input(token, &input).unwrap();
+        host.update_input(token, &input).unwrap();
+        device.replay().unwrap();
+        host.replay().unwrap();
+
+        let left = device.read_outputs_selected(&outputs).unwrap();
+        let right = host.read_outputs_selected(&outputs).unwrap();
+        assert_eq!(left.len(), right.len());
+        for ((id, actual), (expected_id, expected)) in left.iter().zip(&right) {
+            assert_eq!(*id, *expected_id);
+            for (lane, (&a, &b)) in actual.values().iter().zip(expected.values()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "step={step} output={} lane={lane}",
+                    id.index()
+                );
+            }
+        }
+
+        // Old TBPTT strategy: selected next states D2H, then both source
+        // inputs H2D. New strategy: selected next states directly D2D.
+        // State updates happen after comparing the pure DAG output.
+        device.feedback_state(&links).unwrap();
+        let staged = host.read_outputs_selected(&[next_a, next_b]).unwrap();
+        host.update_input_subset(&[
+            (state_a, &staged[0].1),
+            (state_b, &staged[1].1),
+        ])
+        .unwrap();
+        for &state in &[state_a, state_b] {
+            let new = device.read_source(state).unwrap();
+            let old = host.read_source(state).unwrap();
+            for (lane, (&a, &b)) in new.values().iter().zip(old.values()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "step={step} state={} lane={lane}",
+                    state.index()
+                );
+            }
+        }
+    }
+}

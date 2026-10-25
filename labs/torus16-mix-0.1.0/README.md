@@ -464,3 +464,28 @@ and per-kernel LLVM/PTX structural evidence. These checks are not a hardware
 FP32 proof. `cuda_graph_before/after` and `binary_pointwise_fusions` measure
 kernel-node reduction; actual GPU utilization and sustained tokens/sec must
 be measured separately on the target GPU.
+
+### GPU P2 numerical equivalence acceptance (pending NVIDIA run)
+
+`task verify-gpu-p2-equivalence` is an explicit, developer-run NVIDIA
+acceptance gate. It verifies the generic D2D recurrent-state update against
+the previous host D2H/H2D staging path (exact FP32 bits across several steps),
+then runs all ignored fused/unfused Add/Mul GPU parity suites. Finally it
+executes the real EMA4 BPTT backward graph with `TORUS16_VERIFY_FUSION=1`:
+the unfused and fused graphs receive identical initial weights, states,
+tokens and one-hot CE labels. Every selected logit, parameter gradient and
+terminal state must match bit-for-bit, with no simultaneous double GPU-graph
+allocation. The gate then compares training as 2 windows + checkpoint/resume
+to four continuous windows, checking per-window CE/BPC and optimizer steps,
+then byte-for-byte equality of the complete final checkpoint, including
+parameters, 68 recurrent states, AdamW moments and cursor.
+
+The gate uses isolated `mktemp` checkpoint paths and the checked-in corpus,
+overriding training-related settings inside its own shell command. Its files
+are deleted on success and kept on failure for investigation. Normal
+`TORUS16_CHECKPOINT` files are not touched. This validates one finite
+hardware configuration; it does *not* establish formal FP32, LLVM/PTX,
+CUDA JIT/SASS or general training-convergence guarantees. The optional
+`TORUS16_VERIFY_FUSION=1` environment setting can also be used with
+`task train-lab-torus16-ema4-bptt` to compare all training outputs on
+the first pending window before continuing ordinary training.
