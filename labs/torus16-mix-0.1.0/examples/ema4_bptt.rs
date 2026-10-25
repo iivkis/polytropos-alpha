@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Instant;
 use torus16_mix_lab::corpus::CharCorpus;
@@ -64,36 +65,45 @@ fn option_usize(
     }
     Ok(value)
 }
-/// Each evaluation starts with zero EMA/Conv9 state. Scores the same
-/// chronological holdout prefix at every training boundary; never trains on it.
-fn holdout_bpc(
-    engine: &GpuEngine,
-    model: &Model,
-    weights: &Ema4Weights,
-    params: &BTreeMap<String, Tensor<f32>>,
+/// Shared, read-only evaluation inputs for validation and final test.
+struct HoldoutContext<'a> {
+    engine: &'a GpuEngine,
+    model: &'a Model,
+    weights: &'a Ema4Weights,
     mode: MatrixMode,
     role_init: RoleInit,
-    corpus: &CharCorpus,
-    start: usize,
-    count: usize,
+    corpus: &'a CharCorpus,
+}
+
+/// Each evaluation starts with zero EMA/Conv9 state. The caller selects a
+/// disjoint validation or test interval; no holdout tokens are used to train.
+fn holdout_bpc(
+    context: &HoldoutContext<'_>,
+    params: &BTreeMap<String, Tensor<f32>>,
+    interval: Range<usize>,
 ) -> Result<(f64, usize), Box<dyn Error>> {
-    let mut bindings = weights.bindings_with_init(0, mode, role_init)?;
+    let HoldoutContext {
+        engine,
+        model,
+        weights,
+        mode,
+        role_init,
+        corpus,
+    } = context;
+    if interval.start >= interval.end || interval.end >= corpus.validation.len() {
+        return Err("holdout interval outside validation corpus".into());
+    }
+    let count = interval.len();
+    let mut bindings = weights.bindings_with_init(0, *mode, *role_init)?;
     for (name, tensor) in &mut bindings {
         if let Some(updated) = params.get(name) {
             *tensor = updated.clone();
         }
     }
     let dir = std::env::temp_dir().join(format!("vn_ema4_holdout_{}", std::process::id()));
-    if count == 0
-        || start
-            .checked_add(count)
-            .is_none_or(|end| end >= corpus.validation.len())
-    {
-        return Err("holdout interval outside validation corpus".into());
-    }
     let mut execution = engine.prepare_model(model, bindings, &dir)?;
     let mut ce = 0f64;
-    for t in start..start + count {
+    for t in interval {
         execution.set_input(
             "token",
             &onehot(corpus.validation[t], corpus.alphabet.len())?,
@@ -372,6 +382,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     )
     .with_launch_config(launch);
+    let holdout = HoldoutContext {
+        engine: &engine,
+        model: &model,
+        weights: &weights,
+        mode: matrix_mode,
+        role_init,
+        corpus: &corpus,
+    };
     // Before/after reports count actual CUDA Graph kernel nodes, not the
     // number of semantic IR nodes. Baseline is compiled but NOT executed.
     let old_kernels = {
@@ -641,26 +659,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             train_output_count
         };
         let outputs = gpu.read_outputs_selected(&selected[..read_count])?;
-        if iteration == 0 {
-            if let Some(path) = &initial_probe_path {
-                let states_snapshot = gpu.read_outputs_selected(&terminal_outputs)?;
-                let mut bytes = Vec::new();
-                for (_, tensor) in outputs
-                    .iter()
-                    .take(window_len)
-                    .chain(states_snapshot.iter())
-                {
-                    for &value in tensor.values() {
-                        bytes.extend_from_slice(&value.to_bits().to_le_bytes());
-                    }
+        if iteration == 0 && let Some(path) = &initial_probe_path {
+            let states_snapshot = gpu.read_outputs_selected(&terminal_outputs)?;
+            let mut bytes = Vec::new();
+            for (_, tensor) in outputs
+                .iter()
+                .take(window_len)
+                .chain(states_snapshot.iter())
+            {
+                for &value in tensor.values() {
+                    bytes.extend_from_slice(&value.to_bits().to_le_bytes());
                 }
-                fs::write(path, &bytes)?;
-                println!(
-                    "initial_training_probe_bytes={} matrix_mode={}",
-                    bytes.len(),
-                    matrix_mode.as_str()
-                );
             }
+            fs::write(path, &bytes)?;
+            println!(
+                "initial_training_probe_bytes={} matrix_mode={}",
+                bytes.len(),
+                matrix_mode.as_str()
+            );
         }
         let read_outputs_ms = timing.elapsed().as_secs_f64() * 1000.;
         let timing = Instant::now();
@@ -755,17 +771,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(states) = checkpoint_states {
             let validation = if eval_due {
                 let validation_started = Instant::now();
-                let (bpc, count) = holdout_bpc(
-                    &engine,
-                    &model,
-                    &weights,
-                    &params,
-                    matrix_mode,
-                    role_init,
-                    &corpus,
-                    0,
-                    val_limit,
-                )?;
+                let (bpc, count) = holdout_bpc(&holdout, &params, 0..val_limit)?;
                 let validation_elapsed = validation_started.elapsed().as_secs_f64();
                 validation_total_seconds += validation_elapsed;
                 println!(
@@ -905,17 +911,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Final metric is recomputed from the last saved parameters, including
     // when a finished run is reopened without further training.
     let validation_start = Instant::now();
-    let (bpc, count) = holdout_bpc(
-        &engine,
-        &model,
-        &weights,
-        &params,
-        matrix_mode,
-        role_init,
-        &corpus,
-        0,
-        val_limit,
-    )?;
+    let (bpc, count) = holdout_bpc(&holdout, &params, 0..val_limit)?;
     println!(
         "holdout_reset_streaming_bpc={bpc:.6} matrix_mode={} role_init={} matrix_seed={} scored_characters={count} validation_split=last_10pct eval_prepare_plus_stream_seconds={:.5} best_validation_bpc={:.6}",
         matrix_mode.as_str(),
@@ -942,15 +938,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
     let test_start = corpus.validation.len() - test_limit - 1;
     let (test_bpc, test_count) = holdout_bpc(
-        &engine,
-        &model,
-        &weights,
+        &holdout,
         &best_snapshot.parameters,
-        matrix_mode,
-        role_init,
-        &corpus,
-        test_start,
-        test_limit,
+        test_start..test_start + test_limit,
     )?;
     println!(
         "test_reset_streaming_bpc={test_bpc:.6} matrix_mode={} role_init={} matrix_seed={} scored_characters={test_count} test_split=validation_suffix_no_model_selection selection=best_validation_checkpoint checkpoint={}",
