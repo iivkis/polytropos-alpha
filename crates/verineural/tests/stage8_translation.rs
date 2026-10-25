@@ -25,6 +25,14 @@ fn synthetic_ptx(plan: &TranslationPlan) -> String {
             TranslationKind::SqrtAddDiv { .. } => (1, 0),
             TranslationKind::MulMulAddDiv { .. } => (1, 2),
             TranslationKind::MulDiamondAdd { .. } => (1, 3),
+            TranslationKind::DualPointwise {
+                first_mul,
+                second_mul,
+                ..
+            } => {
+                let muls = usize::from(first_mul) + usize::from(second_mul);
+                (2 - muls, muls)
+            }
             TranslationKind::BinaryChain {
                 first_add,
                 second_add,

@@ -2432,12 +2432,14 @@ impl GpuExecution {
     ) -> Result<GpuFeedbackProfile, GpuError> {
         self.execution_health.ensure_outputs_ready()?;
         let copies = self.feedback_copy_plan(links, runtime_domains)?;
-        let mut profile = GpuFeedbackProfile::default();
-        profile.feedback_values = copies
-            .iter()
-            .filter(|(dst, src, _)| dst != src)
-            .map(|(_, _, n)| n)
-            .sum();
+        let mut profile = GpuFeedbackProfile {
+            feedback_values: copies
+                .iter()
+                .filter(|(dst, src, _)| dst != src)
+                .map(|(_, _, n)| n)
+                .sum(),
+            ..GpuFeedbackProfile::default()
+        };
         if copies.is_empty() {
             return Ok(profile);
         }

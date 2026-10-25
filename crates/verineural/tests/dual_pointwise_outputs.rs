@@ -78,6 +78,50 @@ fn dependent_or_differently_shaped_outputs_are_not_paired() {
 }
 
 #[test]
+fn translation_checks_public_output_bindings_with_reordered_ptx_arithmetic() {
+    let (graph, _, outputs) = fixture();
+    let program = GpuEngine::default()
+        .with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion())
+        .compile_outputs(&graph, &outputs)
+        .unwrap();
+    let plan = program.translation_plan().unwrap();
+    let node = outputs[1].index();
+    // Scheduling the independent multiply before the add is legal. The first
+    // store must still contain the add and the second must contain the mul.
+    let reordered = format!(
+        ".version 7.0\n.target sm_52\n.address_size 64\n\
+         .visible .entry vn_node_{node}(\n)\n{{\n\
+           mul.rn.f32 %f2, %f3, %f4;\n\
+           add.rn.f32 %f1, %f5, %f6;\n\
+           st.global.f32 [%rd10], %f1;\n\
+           st.global.f32 [%rd11], %f2;\n}}\n"
+    );
+    plan.validate(program.llvm_ir(), &reordered).unwrap();
+
+    let swapped = reordered
+        .replace(
+            "st.global.f32 [%rd10], %f1;\n",
+            "st.global.f32 [%rd10], %f2;\n",
+        )
+        .replace(
+            "st.global.f32 [%rd11], %f2;\n",
+            "st.global.f32 [%rd11], %f1;\n",
+        );
+    assert_ne!(swapped, reordered);
+    assert!(
+        plan.validate(program.llvm_ir(), &swapped).is_err(),
+        "a correctly counted but incorrectly bound public output is not valid"
+    );
+
+    let duplicate = reordered.replace(
+        "st.global.f32 [%rd11], %f2;\n",
+        "st.global.f32 [%rd11], %f1;\n",
+    );
+    assert_ne!(duplicate, reordered);
+    assert!(plan.validate(program.llvm_ir(), &duplicate).is_err());
+}
+
+#[test]
 #[ignore = "requires NVIDIA CUDA Graph and LLVM NVPTX; compares both selected FP32 outputs bitwise"]
 fn gpu_dual_outputs_match_independent_unfused_kernels() {
     let (graph, inputs, [left, right]) = fixture();

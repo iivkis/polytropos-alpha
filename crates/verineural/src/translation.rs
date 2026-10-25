@@ -423,6 +423,82 @@ fn invalid(reason: impl Into<String>) -> TranslationError {
     TranslationError(reason.into())
 }
 
+/// Check the two independent pointwise result *bindings*, not the scheduling
+/// order of their arithmetic instructions. LLVM/NVPTX may reorder independent
+/// RNE instructions even at -O0. Both public results must still be stored
+/// separately and in their declared output order. Unknown PTX lowering fails
+/// closed rather than guessing about a register move or a vectorized store.
+fn validate_dual_pointwise_ptx(
+    asm: &str,
+    first: &str,
+    second: &str,
+    node: usize,
+) -> Result<(), TranslationError> {
+    let mut arithmetic = Vec::new();
+    let mut stores = Vec::new();
+    for (line_number, raw_line) in asm.lines().enumerate() {
+        let line = raw_line.split("//").next().unwrap_or("").trim();
+        let line = if line.starts_with('@') {
+            line.split_once(char::is_whitespace)
+                .map_or("", |(_, body)| body.trim_start())
+        } else {
+            line
+        };
+        let Some((opcode, arguments)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        match opcode {
+            "add.rn.f32" | "mul.rn.f32" => {
+                let register = arguments
+                    .split_once(',')
+                    .map(|(register, _)| register.trim())
+                    .ok_or_else(|| invalid("malformed DualPointwise PTX arithmetic operands"))?;
+                arithmetic.push((line_number, opcode, register));
+            }
+            "st.global.f32" => {
+                let (address, value) = arguments
+                    .trim()
+                    .trim_end_matches(';')
+                    .split_once(',')
+                    .ok_or_else(|| invalid("malformed DualPointwise PTX store operands"))?;
+                stores.push((line_number, address.trim(), value.trim()));
+            }
+            opcode if opcode.starts_with("st.global.") => {
+                return Err(invalid(format!(
+                    "unrecognized DualPointwise PTX store opcode at node {node}: {opcode}"
+                )));
+            }
+            _ => {}
+        }
+    }
+    if arithmetic.len() != 2 || stores.len() != 2 {
+        return Err(invalid(format!(
+            "DualPointwise PTX requires two RNE values and two scalar F32 stores at node {node}: arithmetic={}, stores={}",
+            arithmetic.len(),
+            stores.len()
+        )));
+    }
+    if stores[0].1 == stores[1].1 || stores[0].2 == stores[1].2 {
+        return Err(invalid(format!(
+            "DualPointwise PTX stores alias an address or result register at node {node}"
+        )));
+    }
+    for (store, expected) in stores.iter().zip([first, second]) {
+        let producers = arithmetic
+            .iter()
+            .filter(|&&(at, opcode, result)| {
+                at < store.0 && opcode == expected && result == store.2
+            })
+            .count();
+        if producers != 1 {
+            return Err(invalid(format!(
+                "DualPointwise PTX output/register binding mismatch at node {node}: expected {expected}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl TranslationPlan {
     fn check(&self) -> Result<(), TranslationError> {
         if !matches!(self.threads_per_block, 64 | 128 | 256 | 512) {
@@ -896,26 +972,9 @@ impl TranslationPlan {
                 }
                 audit_fp32_ptx(ir, asm)
                     .map_err(|err| invalid(format!("PTX node {node}: {err}")))?;
-                // The PTX may select registers differently, but cannot
-                // contract/reorder FP32 arithmetic or omit either store.
-                let sequence = asm
-                    .lines()
-                    .filter_map(|line| {
-                        let code = line.split("//").next().unwrap_or("");
-                        if code.contains("add.rn.f32") {
-                            Some("add.rn.f32")
-                        } else if code.contains("mul.rn.f32") {
-                            Some("mul.rn.f32")
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                if sequence != [first, second] || asm.matches("st.global.f32").count() != 2 {
-                    return Err(invalid(format!(
-                        "DualPointwise PTX instruction/store order mismatch at node {node}"
-                    )));
-                }
+                // Independent instructions may be scheduled in either
+                // order; each typed result must reach its own public store.
+                validate_dual_pointwise_ptx(asm, first, second, node)?;
                 let (add, mul, _) = kernel.kind.counts();
                 report.rounded_adds += add;
                 report.rounded_muls += mul;
