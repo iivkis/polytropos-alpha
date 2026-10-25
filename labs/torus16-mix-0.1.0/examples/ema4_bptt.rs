@@ -17,8 +17,7 @@ use torus16_mix_lab::ema4_checkpoint::{
 };
 use verineural::{
     AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, Model, NodeId,
-    ReluFusion, Shape,
-    Tensor, differentiate_with_seeds, unroll_model,
+    ReluFusion, Shape, Tensor, differentiate_with_seeds, unroll_model,
 };
 
 fn onehot(token: usize, width: usize) -> Result<Tensor<f32>, Box<dyn Error>> {
@@ -608,7 +607,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         "throughput_policy_threads_per_block={} metric_every={} optimizer_backend={} metric_sampling=reporting_only",
         threads_per_block,
         metric_every,
-        if gpu_optimizer.is_some() { "GPU_IR" } else { "CPU" }
+        if gpu_optimizer.is_some() {
+            "GPU_IR"
+        } else {
+            "CPU"
+        }
     );
     println!(
         "BPTT={} trainable_tensors={} trainable_values={} vocab={} IR_nodes={} CUDA_graph_kernels={}",
@@ -644,8 +647,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         let start = iteration * window_len;
         let mut input_updates = Vec::with_capacity(window_len * 2 + 2);
         for t in 0..window_len {
-            input_updates.push((window.inputs()[t]["token"], &onehots[corpus.train[start + t]]));
-            input_updates.push((window.cotangents()[t], &onehots[corpus.train[start + t + 1]]));
+            input_updates.push((
+                window.inputs()[t]["token"],
+                &onehots[corpus.train[start + t]],
+            ));
+            input_updates.push((
+                window.cotangents()[t],
+                &onehots[corpus.train[start + t + 1]],
+            ));
         }
         // Only two scalar bias corrections cross H2D on the GPU path.
         let correction_updates = gpu_optimizer
