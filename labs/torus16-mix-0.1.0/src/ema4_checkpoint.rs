@@ -587,6 +587,42 @@ mod tests {
         trailing.extend_from_slice(b"noise");
         assert!(Ema4Checkpoint::decode(&trailing).is_err());
 
+        // An explicit LR transition changes no stored AdamW moments or
+        // step cursor; the ordinary baseline validator must still reject it.
+        let mut decayed = restored.clone();
+        decayed.optimizer.learning_rate = 0.0004;
+        assert_eq!(decayed.optimizer.steps, restored.optimizer.steps);
+        assert_eq!(decayed.optimizer.moments, restored.optimizer.moments);
+        let requirements = || CheckpointRequirements {
+            bptt: 2,
+            vocab: 104,
+            corpus: fingerprint(b"corpus"),
+            architecture: 12345,
+            val_limit: 64,
+            test_limit: 64,
+            eval_every: 2,
+            max_windows: 4,
+            params: &expected,
+            states: &states,
+        };
+        assert!(decayed.validate(requirements()).is_err());
+        assert!(
+            decayed
+                .validate_with_learning_rate(requirements(), 0.001)
+                .is_err()
+        );
+        decayed
+            .validate_with_learning_rate(requirements(), 0.0004)
+            .unwrap();
+        let resumed_decayed =
+            AdamW::from_checkpoint(decayed.optimizer.clone(), &decayed.parameters).unwrap();
+        assert_eq!(resumed_decayed.learning_rate().to_bits(), 0.0004f32.to_bits());
+        assert_eq!(resumed_decayed.steps(), optimizer.steps());
+        assert_eq!(
+            resumed_decayed.checkpoint().moments,
+            restored.optimizer.moments
+        );
+
         let mut continued = trained.clone();
         optimizer.step(&mut continued, &gradients).unwrap();
         let mut resumed = trained;
