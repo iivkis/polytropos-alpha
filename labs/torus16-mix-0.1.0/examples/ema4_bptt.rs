@@ -134,7 +134,12 @@ impl<'a> ReusedHoldout<'a> {
         // Reconstruct the execution slice through the public Model API.
         // Include next-state roots and the writable state sources, even if a
         // next-state computation does not read its previous value.
-        let mut roots = context.model.outputs().values().copied().collect::<Vec<_>>();
+        let mut roots = context
+            .model
+            .outputs()
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
         roots.extend(context.model.state_links().values().copied());
         for name in context.model.state_links().keys() {
             let (state, role) = context
