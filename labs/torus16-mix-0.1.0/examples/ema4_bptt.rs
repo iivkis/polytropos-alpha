@@ -417,8 +417,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             *value = updated.clone();
         }
     }
-    let eval_dir =
-        std::env::temp_dir().join(format!("vn_ema4_holdout_{}", std::process::id()));
+    let eval_dir = std::env::temp_dir().join(format!("vn_ema4_holdout_{}", std::process::id()));
     let validation_start = Instant::now();
     let mut eval = engine.prepare_model(&model, eval_bindings, &eval_dir)?;
     let count = val_limit.min(corpus.validation.len() - 1);
