@@ -677,3 +677,15 @@ and **zero** linear Div-root fusion. EMA4 reports `diamond_fusions`.
 The GPU AdamW acceptance and end-to-end benchmark must be rerun
 after this change; no speedup is claimed yet. GPU-side finite-domain
 validation without D2H remains open.
+
+### Оптимизация GPU AdamW: групповой runtime и горизонтальное объединение IR
+
+**Реализованный экспериментальный код, NVIDIA-приёмка и ускорение не подтверждены:**
+
+- **P0:** EMA4 в режиме `TORUS16_GPU_ADAMW=1` не экспортирует градиенты как публичные outputs. Градиенты остаются внутренними зависимостями обновления AdamW. CPU-режим сохраняет исходный список выходов.
+- **P0:** runtime `CudaSession` проверяет несколько тензорных доменов одной kernel-node на bucket и копирует независимые feedback-связи побитовым grouped CUDA Graph kernel вместо отдельной D2D node на тензор. Для обоих путей размерные bucket'ы и таблица дескрипторов фиксируются при захвате. Динамический guard возвращает на CPU status **до** любой записи; aliasing и невалидные адреса отвергаются заранее. CUDA/PTX остаётся TCB.
+- **P1 (ограниченный срез):** `GpuLaunchConfig::with_internal_pointwise_fusion()` разрешает горизонтальное объединение двух независимых внутренних Add/Mul узлов одинаковой формы, с не более чем 64 просматриваемыми предыдущими кандидатами. Обе FP32 операции остаются независимыми и записывают два отдельных буфера. Используется существующий translation/memory/capability audit. В EMA4 опция включена только для экспериментального GPU AdamW. **Произвольный region fusion / grouped multi-tensor compute пока не реализованы.**
+- **P2:** device-conditional feedback и tensorized shared-weight minibatching **не реализованы**. Первый требует согласованной семантики deferred host error и аппаратной проверки CUDA conditional nodes; второй требует доказанной границы агрегирования градиентов. Нельзя выдавать `prepare_independent` за shared-weight minibatch.
+
+**Приёмка пользователем:** `task check`, `task test`, `task clippy`, `task verify-gpu-feedback-runtime`, `task verify-gpu-dual-pointwise-outputs`, `task verify-gpu-adamw`, `task benchmark-gpu-adamw`. В GPU тесты добавлены heterogeneous sizes, атомарный отказ guard, internal dual-output parity, а в обычные unit tests добавлены проверки bucket-плана и сохранения битов таблицы дескрипторов. Ускорение признаётся только по повторённой end-to-end производительности; количество kernels не является достаточным доказательством.
+
