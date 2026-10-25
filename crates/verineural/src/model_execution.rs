@@ -178,9 +178,8 @@ impl ModelExecution {
     /// state input on-device. Next step reuses the same CUDA Graph.
     pub fn step(&mut self) -> Result<(), ModelExecutionError> {
         self.gpu.replay()?;
-        // Preserve the last pure step's public values before feedback mutates
-        // any state input (including zero-copy reshape aliases).
-        self.gpu.snapshot_outputs()?;
+        // GpuExecution::feedback_state snapshots any observable output
+        // aliasing a state destination; do not copy those values twice.
         let links = self
             .state_links
             .iter()

@@ -470,3 +470,15 @@ AdamW update matching uninterrupted update). GPU-level continuous vs
 interrupted/resumed training equality remains to be measured. The
 non-cryptographic fingerprint and file checksum do not guarantee
 authenticity or proof of neural model correctness.
+
+**P1 GPU feedback runtime safety (code, GPU acceptance pending):**
+`GpuExecution::feedback_state` now rejects feedback before a completed
+replay/benchmark or after source updates; errors from metadata preflight do not
+mutate state. Observable selected outputs aliasing state destinations receive
+CUDA D2D snapshots before feedback. Raw execution preserves all selected outputs;
+named `ModelExecution` preserves only public outputs, avoiding extra state
+snapshots for internal allocation roots. New replay/benchmark invalidates the
+previous snapshots; every public read API uses the protected address. The
+`ModelExecution::step` path avoids redundant manual snapshots. NVIDIA checks:
+`task verify-gpu-feedback-runtime`, plus `task check`, `task test`, and
+`task clippy`. No Lean proof of CUDA/JIT/SASS or hardware success is claimed.

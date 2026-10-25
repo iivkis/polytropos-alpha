@@ -163,6 +163,13 @@ tasks:
     cmds:
       - cargo run -p verineural --example stateful_model_gpu
 
+  verify-gpu-feedback-runtime:
+    desc: NVIDIA regressions for raw state feedback readiness, alias snapshots and named stateful replay
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test gpu_feedback -- --ignored --nocapture
+      - cargo run -p verineural --example stateful_model_gpu
+
   gpu-stage4:
     desc: Lower IR to PTX and run the CUDA stage-4 example (developer-run)
     cmds:

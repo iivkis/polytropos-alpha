@@ -1672,7 +1672,15 @@ pub struct GpuExecution {
     // Only public outputs sharing storage with state inputs need snapshots.
     // Buffers are allocated once at prepare, before any CUDA Graph replay.
     preserved_output_addresses: BTreeMap<usize, u64>,
-    preserved_output_valid: bool,
+    // A named ModelExecution exposes only public readouts; raw GpuExecution
+    // considers every selected output observable during feedback.
+    feedback_observable_outputs: Option<Vec<NodeId>>,
+    // State destinations whose selected-output aliases already have device
+    // snapshots allocated; avoid rescanning every output on each replay.
+    feedback_snapshot_destinations: BTreeSet<u64>,
+    // replay() and benchmark() keep their shared-reference API, so validity
+    // must be invalidated through interior mutability on a new GPU epoch.
+    preserved_output_valid: Cell<bool>,
     execution_health: ExecutionHealth,
     has_graph: bool,
 }
@@ -1686,7 +1694,7 @@ impl GpuExecution {
         self.execution_health.ensure_ready()?;
         let given = validate_inputs(&self.program, inputs)?;
         self.execution_health.invalidate_outputs();
-        self.preserved_output_valid = false;
+        self.preserved_output_valid.set(false);
         for id in self.program.source_inputs() {
             self.execution_health
                 .record_io(self.session.copy_to_device(
@@ -1735,7 +1743,7 @@ impl GpuExecution {
             return Ok(());
         }
         self.execution_health.invalidate_outputs();
-        self.preserved_output_valid = false;
+        self.preserved_output_valid.set(false);
         for &(id, value) in inputs {
             self.execution_health.record_io(
                 self.session
@@ -1766,7 +1774,7 @@ impl GpuExecution {
         value.validate_domain(node.domain)?;
         let address = self.input_addresses[&id.index()];
         self.execution_health.invalidate_outputs();
-        self.preserved_output_valid = false;
+        self.preserved_output_valid.set(false);
         self.execution_health
             .record_io(self.session.copy_to_device(address, value.values()))?;
         self.execution_health
@@ -1787,7 +1795,15 @@ impl GpuExecution {
             .iter()
             .map(|&(state, _)| self.input_addresses[&state.index()])
             .collect::<BTreeSet<_>>();
+        // Internal state roots are not observable to ModelExecution clients.
+        let mut checked = BTreeSet::new();
         for &output in public_outputs {
+            if !checked.insert(output.index()) {
+                return Err(GpuError::InvalidInput {
+                    node: output.index(),
+                    reason: "duplicate observable feedback output",
+                });
+            }
             let (shape, address) = self
                 .output_addresses
                 .iter()
@@ -1807,6 +1823,8 @@ impl GpuExecution {
                     .insert(output.index(), snapshot);
             }
         }
+        self.feedback_snapshot_destinations.extend(destinations);
+        self.feedback_observable_outputs = Some(public_outputs.to_vec());
         Ok(())
     }
 
@@ -1814,7 +1832,7 @@ impl GpuExecution {
     /// All copies stay on the owned non-blocking stream; no host round-trip.
     pub(crate) fn snapshot_outputs(&mut self) -> Result<(), GpuError> {
         self.execution_health.ensure_outputs_ready()?;
-        self.preserved_output_valid = false;
+        self.preserved_output_valid.set(false);
         for (&index, &snapshot) in &self.preserved_output_addresses {
             let (_, shape, source) = self
                 .output_addresses
@@ -1832,7 +1850,7 @@ impl GpuExecution {
             self.execution_health
                 .record_io(self.session.synchronize())?;
         }
-        self.preserved_output_valid = true;
+        self.preserved_output_valid.set(true);
         Ok(())
     }
 
@@ -1879,7 +1897,7 @@ impl GpuExecution {
                 node: id.index(),
                 reason: "requested output is not selected",
             })?;
-        let address = if self.preserved_output_valid {
+        let address = if self.preserved_output_valid.get() {
             self.preserved_output_addresses
                 .get(&id.index())
                 .copied()
@@ -1971,11 +1989,31 @@ impl GpuExecution {
         Ok(copies)
     }
 
-    /// Copy selected completed outputs to next-step state inputs on-device.
-    /// A prevalidated layout is still checked before each transfer.
+    /// Copy completed selected outputs to next-step state inputs on-device.
+    ///
+    /// Requires a successful replay or benchmark after the most recent source
+    /// update. All links are validated before DMA. Observable outputs aliasing
+    /// feedback destinations are snapshotted before being overwritten.
+    /// ModelExecution preserves only named public outputs; raw GpuExecution
+    /// preserves every selected output. An invalid request leaves state intact.
     pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
-        self.execution_health.ensure_ready()?;
+        self.execution_health.ensure_outputs_ready()?;
         let copies = self.feedback_copy_plan(links)?;
+        if copies.is_empty() {
+            return Ok(());
+        }
+        if copies
+            .iter()
+            .any(|&(dst, _, _)| !self.feedback_snapshot_destinations.contains(&dst))
+        {
+            let observable = self
+                .feedback_observable_outputs
+                .clone()
+                .unwrap_or_else(|| self.program.outputs().to_vec());
+            self.configure_model_feedback(&observable, links)?;
+        }
+        // Refresh any earlier snapshots after a newer replay, too.
+        self.snapshot_outputs()?;
         for (dst, src, elements) in copies {
             if dst != src {
                 self.execution_health
@@ -2006,6 +2044,7 @@ impl GpuExecution {
     pub fn replay(&self) -> Result<(), GpuError> {
         self.execution_health.ensure_ready()?;
         self.execution_health.invalidate_outputs();
+        self.preserved_output_valid.set(false);
         if self.has_graph {
             self.execution_health
                 .record_io(self.session.launch_graph())?;
@@ -2021,7 +2060,14 @@ impl GpuExecution {
         self.execution_health.ensure_outputs_ready()?;
         let id = self.program.output;
         let shape = self.output_shape.clone();
-        let address = self.output_address;
+        let address = if self.preserved_output_valid.get() {
+            self.preserved_output_addresses
+                .get(&id.index())
+                .copied()
+                .unwrap_or(self.output_address)
+        } else {
+            self.output_address
+        };
         self.read_value_at(id, &shape, address)
     }
 
@@ -2043,7 +2089,15 @@ impl GpuExecution {
         let outputs = self.output_addresses.clone();
         let mut result = Vec::with_capacity(outputs.len());
         for (node, shape, pointer) in outputs {
-            result.push((node, self.read_value_at(node, &shape, pointer)?));
+            let address = if self.preserved_output_valid.get() {
+                self.preserved_output_addresses
+                    .get(&node.index())
+                    .copied()
+                    .unwrap_or(pointer)
+            } else {
+                pointer
+            };
+            result.push((node, self.read_value_at(node, &shape, address)?));
         }
         Ok(result)
     }
@@ -2083,7 +2137,7 @@ impl GpuExecution {
                     actual: node.dtype,
                 }));
             }
-            let address = if self.preserved_output_valid {
+            let address = if self.preserved_output_valid.get() {
                 self.preserved_output_addresses
                     .get(&id.index())
                     .copied()
@@ -2130,6 +2184,7 @@ impl GpuExecution {
             return Err(GpuError::NoKernelGraph);
         }
         self.execution_health.invalidate_outputs();
+        self.preserved_output_valid.set(false);
         let milliseconds = self.execution_health.record_io(
             self.session
                 .benchmark_graph(warmup_launches, measured_launches),
@@ -2788,7 +2843,9 @@ impl GpuEngine {
             output_address: buffers[&program.output.index()],
             output_addresses,
             preserved_output_addresses: BTreeMap::new(),
-            preserved_output_valid: false,
+            feedback_observable_outputs: None,
+            feedback_snapshot_destinations: BTreeSet::new(),
+            preserved_output_valid: Cell::new(false),
             execution_health: ExecutionHealth::default(),
             has_graph,
         })
