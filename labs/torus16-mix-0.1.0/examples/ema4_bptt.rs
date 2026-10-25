@@ -346,6 +346,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let gpu_adamw_requested = std::env::var_os("TORUS16_GPU_ADAMW").is_some();
+    // Explicit, checkpointed fine-tuning experiment. Do not change the
+    // established 0.002 baseline or silently reset AdamW moments/steps.
+    let lr_decay_5x = std::env::var_os("TORUS16_LR_DECAY_5X").is_some();
+    let baseline_lr = 0.002f32;
+    let training_lr = if lr_decay_5x { 0.0004f32 } else { baseline_lr };
+    if lr_decay_5x && !gpu_adamw_requested {
+        return Err("TORUS16_LR_DECAY_5X requires TORUS16_GPU_ADAMW".into());
+    }
     let metric_every = option_usize("TORUS16_METRIC_EVERY", 1, 1, 1_000_000)?;
     if metric_every > 1 && !gpu_adamw_requested {
         return Err("TORUS16_METRIC_EVERY>1 requires TORUS16_GPU_ADAMW=1: host optimizer still needs gradient readback".into());
@@ -407,9 +415,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
+    if lr_decay_5x && pending_checkpoint.is_none() {
+        return Err("TORUS16_LR_DECAY_5X requires a resumable checkpoint; fresh training is forbidden".into());
+    }
+    if let Some(saved) = pending_checkpoint.as_ref() {
+        let saved_lr = saved.optimizer.learning_rate;
+        let matches_requested = saved_lr.to_bits() == training_lr.to_bits();
+        let approved_transition =
+            lr_decay_5x && saved_lr.to_bits() == baseline_lr.to_bits();
+        if !matches_requested && !approved_transition {
+            return Err(format!(
+                "AdamW learning rate mismatch: checkpoint={saved_lr} requested={training_lr}; only explicit 0.002 -> 0.0004 transition is supported"
+            ).into());
+        }
+    }
     let (mut params, states, mut optimizer, first_window, mut best_validation) =
         if let Some(ckpt) = pending_checkpoint.as_ref() {
-            let opt = AdamW::from_checkpoint(ckpt.optimizer.clone(), &ckpt.parameters)?;
+            let mut optimizer_state = ckpt.optimizer.clone();
+            optimizer_state.learning_rate = training_lr;
+            let opt = AdamW::from_checkpoint(optimizer_state, &ckpt.parameters)?;
             (
                 ckpt.parameters.clone(),
                 ckpt.states.clone(),
@@ -421,7 +445,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             (
                 trainable_initial.clone(),
                 expected_states.clone(),
-                AdamW::new(0.002, 0.01)?,
+                AdamW::new(training_lr, 0.01)?,
                 0usize,
                 None,
             )
@@ -465,7 +489,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     );
     if let Some(ckpt) = pending_checkpoint.as_ref() {
-        ckpt.validate(CheckpointRequirements {
+        ckpt.validate_with_learning_rate(CheckpointRequirements {
             bptt: window_len,
             vocab,
             corpus: corpus_hash,
@@ -476,13 +500,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             max_windows: train_windows,
             params: &trainable_initial,
             states: &expected_states,
-        })?;
+        }, ckpt.optimizer.learning_rate)?;
         println!(
             "checkpoint_resumed={} completed_windows={}",
             checkpoint_path.display(),
             ckpt.completed_windows,
         );
     }
+    println!(
+        "training_adamw_lr={training_lr:.8} checkpoint_lr_transition={} optimizer_moments=preserved",
+        if lr_decay_5x { "explicit_5x_decay" } else { "unchanged" }
+    );
     println!(
         "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
         matrix_mode.as_str(),
@@ -1112,7 +1140,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // No training, early stopping or best-checkpoint choice sees test data.
     let best_path = checkpoint_path.with_extension("best.ckpt");
     let best_snapshot = Ema4Checkpoint::read(&best_path)?;
-    best_snapshot.validate(CheckpointRequirements {
+    let best_checkpoint_lr = best_snapshot.optimizer.learning_rate;
+    if best_checkpoint_lr.to_bits() != training_lr.to_bits()
+        && !(lr_decay_5x && best_checkpoint_lr.to_bits() == baseline_lr.to_bits())
+    {
+        return Err("best checkpoint has an unexpected AdamW learning rate".into());
+    }
+    best_snapshot.validate_with_learning_rate(CheckpointRequirements {
         bptt: window_len,
         vocab,
         corpus: corpus_hash,
@@ -1123,7 +1157,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         max_windows: train_windows,
         params: &trainable_initial,
         states: &expected_states,
-    })?;
+    }, best_checkpoint_lr)?;
     let test_start = corpus.validation.len() - test_limit - 1;
     let (test_bpc, test_count) = score_holdout(
         &mut cached_holdout,

@@ -250,6 +250,19 @@ pub struct CheckpointRequirements<'a> {
 
 impl Ema4Checkpoint {
     pub fn validate(&self, requirements: CheckpointRequirements<'_>) -> io::Result<()> {
+        self.validate_with_learning_rate(requirements, 0.002)
+    }
+
+    /// A caller-selected, explicit AdamW learning rate. No implicit changes
+    /// to optimizer moments, step cursor, architecture or evaluation protocol.
+    pub fn validate_with_learning_rate(
+        &self,
+        requirements: CheckpointRequirements<'_>,
+        learning_rate: f32,
+    ) -> io::Result<()> {
+        if !learning_rate.is_finite() || learning_rate <= 0. {
+            return Err(invalid("invalid expected AdamW learning rate"));
+        }
         let CheckpointRequirements {
             bptt,
             vocab,
@@ -282,7 +295,7 @@ impl Ema4Checkpoint {
             ));
         }
         let o = &self.optimizer;
-        if o.learning_rate.to_bits() != 0.002f32.to_bits()
+        if o.learning_rate.to_bits() != learning_rate.to_bits()
             || o.weight_decay.to_bits() != 0.01f32.to_bits()
             || o.beta1.to_bits() != 0.9f32.to_bits()
             || o.beta2.to_bits() != 0.999f32.to_bits()
