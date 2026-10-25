@@ -690,15 +690,15 @@ impl GpuProgram {
             }
             let writes = node.shape.element_count();
             let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) =
-                if let Some(&(left, first, _, _, _, _)) =
-                    self.fused_mul_diamond_adds.get(&index)
-                {
+                if let Some(&(left, first, _, _, _, _)) = self.fused_mul_diamond_adds.get(&index) {
                     let lhs = &self.graph.nodes()[left];
                     let rhs = &self.graph.nodes()[first];
                     (
                         vec![
-                            lhs.inputs[0].index(), lhs.inputs[1].index(),
-                            rhs.inputs[0].index(), rhs.inputs[1].index(),
+                            lhs.inputs[0].index(),
+                            lhs.inputs[1].index(),
+                            rhs.inputs[0].index(),
+                            rhs.inputs[1].index(),
                         ],
                         GpuMemoryPattern::Pointwise,
                     )
@@ -1498,8 +1498,8 @@ impl GpuProgram {
             });
         }
 
-        for (&root, &(left, right_first, right_second, reused, right_slot, left_slot))
-            in &self.fused_mul_diamond_adds
+        for (&root, &(left, right_first, right_second, reused, right_slot, left_slot)) in
+            &self.fused_mul_diamond_adds
         {
             if reused > 1 || right_slot > 1 || left_slot > 1 {
                 return Err(GpuError::Fp32PtxRejected {
@@ -1518,13 +1518,22 @@ impl GpuProgram {
                 && output.inputs[1 - left_slot].index() == right_second
                 && repeated.inputs[right_slot].index() == right_first
                 && repeated.inputs[1 - right_slot] == rhs.inputs[reused]
-                && [left, right_first, right_second].iter().all(|&id| uses[id] == 1)
-                && [left, right_first, right_second].iter().all(|id| !selected.contains(id))
-                && [left, right_first, right_second].iter().all(|id| !covered_removed.contains(id))
+                && [left, right_first, right_second]
+                    .iter()
+                    .all(|&id| uses[id] == 1)
+                && [left, right_first, right_second]
+                    .iter()
+                    .all(|id| !selected.contains(id))
+                && [left, right_first, right_second]
+                    .iter()
+                    .all(|id| !covered_removed.contains(id))
                 && lhs.shape == output.shape
                 && rhs.shape == output.shape
                 && repeated.shape == output.shape
-                && lhs.inputs.iter().chain(&rhs.inputs)
+                && lhs
+                    .inputs
+                    .iter()
+                    .chain(&rhs.inputs)
                     .all(|&id| self.graph.nodes()[id.index()].shape == output.shape)
                 && !self.fused_mul_adds.contains_key(&root)
                 && !self.fused_binary_pairs.contains_key(&root)
@@ -2939,22 +2948,34 @@ impl GpuEngine {
                             continue;
                         }
                         let sources = [
-                            left.inputs[0], left.inputs[1],
-                            first.inputs[0], first.inputs[1],
+                            left.inputs[0],
+                            left.inputs[1],
+                            first.inputs[0],
+                            first.inputs[1],
                         ];
-                        if sources.iter().any(|&id| graph.nodes()[id.index()].shape != root.shape) {
+                        if sources
+                            .iter()
+                            .any(|&id| graph.nodes()[id.index()].shape != root.shape)
+                        {
                             continue;
                         }
-                        if let Some(reused) = first.inputs.iter().position(
-                            |&id| id == second.inputs[1 - right_slot]
-                        ) {
-                            fused_mul_diamond_adds.insert(index, (
-                                left.id.index(), first.id.index(), second.id.index(),
-                                reused, right_slot, left_slot,
-                            ));
-                            skipped.extend([
-                                left.id.index(), first.id.index(), second.id.index(),
-                            ]);
+                        if let Some(reused) = first
+                            .inputs
+                            .iter()
+                            .position(|&id| id == second.inputs[1 - right_slot])
+                        {
+                            fused_mul_diamond_adds.insert(
+                                index,
+                                (
+                                    left.id.index(),
+                                    first.id.index(),
+                                    second.id.index(),
+                                    reused,
+                                    right_slot,
+                                    left_slot,
+                                ),
+                            );
+                            skipped.extend([left.id.index(), first.id.index(), second.id.index()]);
                             break 'diamond;
                         }
                     }
@@ -3097,7 +3118,10 @@ impl GpuEngine {
                 fused_mul_diamond_adds.get(&index)
             {
                 llvm_ir.push_str(&mul_diamond_add_kernel_ir(
-                    index, reused, right_slot == 1, left_slot == 1,
+                    index,
+                    reused,
+                    right_slot == 1,
+                    left_slot == 1,
                 ));
             } else if let Some(&(_, _, _, reused, middle_slot, add_slot)) =
                 fused_mul_mul_add_divs.get(&index)

@@ -192,8 +192,7 @@ impl TranslationKind {
             | Self::MulAddMul { .. }
             | Self::BinaryChain { .. }
             | Self::SqrtAddDiv { .. } => 3,
-            Self::MulMulAddDiv { .. }
-            | Self::MulDiamondAdd { .. } => 4,
+            Self::MulMulAddDiv { .. } | Self::MulDiamondAdd { .. } => 4,
             _ => 2,
         }
     }
@@ -859,8 +858,7 @@ impl TranslationPlan {
                         "MulDiamondAdd LLVM template mismatch at node {node}"
                     )));
                 }
-                audit_fp32_ptx(ir, asm)
-                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                audit_fp32_ptx(ir, asm).map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
                 let sequence = asm
                     .lines()
                     .map(|line| line.split("//").next().unwrap_or(""))
