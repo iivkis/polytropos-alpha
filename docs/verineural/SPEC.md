@@ -495,6 +495,8 @@ GPU Compiler переводит **любую поддерживаемую пол
 
 **Runtime diagnostic contract:** a reusable CUDA feedback/guard graph is preflight-checked again only when its descriptor plan changes; device allocations remain owned and immutable in address/size for the whole session. `GpuExecution::feedback_state_checked_device_profiled` is an opt-in *measurement*, not an additional mathematical proof: it times one feedback CUDA Graph with events on the explicit non-blocking stream, includes an extra synchronization, and must not be enabled when comparing end-to-end throughput. Normal checked feedback retains its previous synchronous/fail-closed behavior.
 
+**Prepared host feedback plan:** `GpuExecution` may retain a successful metadata preflight keyed by the exact ordered feedback links and whether runtime domain validation is required. The prepared plan owns its source/target device addresses, lengths, per-source domain obligations, and transfer list. Since compiled graph bindings remain stable for one execution, reuse does not relax validation; changing the key invokes the original full shape/dtype/domain/liveness/alias preflight. No runtime FP32 verdict may be cached. `GpuFeedbackProfile::plan_host` is an additional host-wall observation of plan lookup/preflight; it is not GPU execution time or a certificate.
+
 Оптимизации не могут свободно изменять FP32-семантику.
 
 Каждое преобразование должно иметь проверенное правило корректности, учитывающее точность арифметики.

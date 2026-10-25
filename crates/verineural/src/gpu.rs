@@ -10,6 +10,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::translation::{LOG2_E_F32_LLVM, TranslationKernel, TranslationKind, TranslationPlan};
@@ -2002,6 +2003,8 @@ impl GpuBenchmark {
 /// Values are observations, not a CUDA kernel-time or proof guarantee.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GpuFeedbackProfile {
+    /// Host time to look up or fully validate the exact feedback plan.
+    pub plan_host: Duration,
     pub validation_d2h: Duration,
     pub snapshot_d2d: Duration,
     pub feedback_d2d: Duration,
@@ -2011,6 +2014,19 @@ pub struct GpuFeedbackProfile {
     pub device_copy: Option<Duration>,
     pub checked_values: usize,
     pub feedback_values: usize,
+}
+
+// Compiled IR, NodeId identities, and device bindings are immutable during a
+// GpuExecution. Cache static plan metadata, never validated FP32 values.
+struct PreparedFeedback {
+    links: Vec<(NodeId, NodeId)>,
+    runtime_domains: bool,
+    copies: Vec<(u64, u64, usize)>,
+    transfers: Vec<(u64, u64, usize)>,
+    checked_sources: Vec<(u64, usize, bool)>,
+    checked_requirements: Vec<(Domain, Shape)>,
+    checked_values: usize,
+    feedback_values: usize,
 }
 
 /// One session-wide fail-closed gate for GPU launches, copies and sync.
@@ -2106,6 +2122,8 @@ pub struct GpuExecution {
     // State destinations whose selected-output aliases already have device
     // snapshots allocated; avoid rescanning every output on each replay.
     feedback_snapshot_destinations: BTreeSet<u64>,
+    // Exact feedback links and domain policy key the immutable plan cache.
+    prepared_feedback: Option<Rc<PreparedFeedback>>,
     // replay() and benchmark() keep their shared-reference API, so validity
     // must be invalidated through interior mutability on a new GPU epoch.
     preserved_output_valid: Cell<bool>,
@@ -2433,6 +2451,76 @@ impl GpuExecution {
         Ok(copies)
     }
 
+    fn prepared_feedback_plan(
+        &mut self,
+        links: &[(NodeId, NodeId)],
+        runtime_domains: bool,
+    ) -> Result<Rc<PreparedFeedback>, GpuError> {
+        if let Some(cached) = &self.prepared_feedback {
+            if cached.runtime_domains == runtime_domains && cached.links == links {
+                return Ok(Rc::clone(cached));
+            }
+        }
+        // A miss must run the original complete preflight before publishing
+        // the cache entry or enqueuing a single GPU state transfer.
+        let copies = self.feedback_copy_plan(links, runtime_domains)?;
+        let mut checked_sources = Vec::new();
+        let mut checked_requirements = Vec::new();
+        let mut checked_values = 0usize;
+        if runtime_domains {
+            let output_lookup = self
+                .output_addresses
+                .iter()
+                .map(|(id, _, address)| (id.index(), *address))
+                .collect::<BTreeMap<_, _>>();
+            for &(state, next) in links {
+                let old = self.program.graph.node(state)?;
+                let new = self.program.graph.node(next)?;
+                if new.domain.satisfies(old.domain) {
+                    continue;
+                }
+                if old.dtype != DType::F32 {
+                    return Err(GpuError::InvalidInput {
+                        node: state.index(),
+                        reason: "runtime feedback domain check requires F32",
+                    });
+                }
+                let elements = old.shape.element_count();
+                let &address = output_lookup.get(&next.index()).ok_or(
+                    GpuError::InvalidInput {
+                        node: next.index(),
+                        reason: "feedback source is not a selected output",
+                    },
+                )?;
+                checked_sources.push((
+                    address,
+                    elements,
+                    old.domain == Domain::NonNegativeFinite,
+                ));
+                checked_requirements.push((old.domain, old.shape.clone()));
+                checked_values += elements;
+            }
+        }
+        let transfers = copies
+            .iter()
+            .copied()
+            .filter(|(dst, src, _)| dst != src)
+            .collect::<Vec<_>>();
+        let feedback_values = transfers.iter().map(|&(_, _, n)| n).sum();
+        let prepared = Rc::new(PreparedFeedback {
+            links: links.to_vec(),
+            runtime_domains,
+            copies,
+            transfers,
+            checked_sources,
+            checked_requirements,
+            checked_values,
+            feedback_values,
+        });
+        self.prepared_feedback = Some(Rc::clone(&prepared));
+        Ok(prepared)
+    }
+
     /// Strict feedback for statically established source domains.
     /// Selected outputs aliasing state destinations are device-snapshotted.
     pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
@@ -2475,87 +2563,49 @@ impl GpuExecution {
         runtime_domains: bool,
         device_events: bool,
     ) -> Result<GpuFeedbackProfile, GpuError> {
+        let plan_started = Instant::now();
         self.execution_health.ensure_outputs_ready()?;
-        let copies = self.feedback_copy_plan(links, runtime_domains)?;
+        let plan = self.prepared_feedback_plan(links, runtime_domains)?;
         let mut profile = GpuFeedbackProfile {
-            feedback_values: copies
-                .iter()
-                .filter(|(dst, src, _)| dst != src)
-                .map(|(_, _, n)| n)
-                .sum(),
+            plan_host: plan_started.elapsed(),
+            checked_values: plan.checked_values,
+            feedback_values: plan.feedback_values,
             ..GpuFeedbackProfile::default()
         };
-        if copies.is_empty() {
+        if plan.copies.is_empty() {
             return Ok(profile);
         }
-        if runtime_domains {
-            let pending = links
-                .iter()
-                .filter_map(|&(state, next)| {
-                    let old = self.program.graph.node(state).ok()?;
-                    let new = self.program.graph.node(next).ok()?;
-                    if new.domain.satisfies(old.domain) {
-                        None
-                    } else {
-                        Some((state, next, old.domain, old.shape.clone()))
-                    }
-                })
-                .collect::<Vec<_>>();
-            if !pending.is_empty() {
-                let validation_started = Instant::now();
-                profile.checked_values = pending
+        if runtime_domains && !plan.checked_sources.is_empty() {
+            let validation_started = Instant::now();
+            // Descriptors may be cached, but current FP32 output bytes must
+            // be checked before every state mutation.
+            let domains_valid = self
+                .execution_health
+                .record_io(self.session.validate_output_domains(&plan.checked_sources))?;
+            if !domains_valid {
+                // Reject before writing state; exact host oracle is reserved
+                // for the exceptional path and retains source order.
+                let buffers = plan
+                    .checked_sources
                     .iter()
-                    .map(|(_, _, _, shape)| shape.element_count())
-                    .sum();
-                let output_lookup = self
-                    .output_addresses
-                    .iter()
-                    .map(|(id, _, address)| (id.index(), *address))
-                    .collect::<BTreeMap<_, _>>();
-                let sources = pending
-                    .iter()
-                    .map(|&(state, next, required, ref shape)| {
-                        if self.program.graph.node(state)?.dtype != DType::F32 {
-                            return Err(GpuError::InvalidInput {
-                                node: state.index(),
-                                reason: "runtime feedback domain check requires F32",
-                            });
-                        }
-                        let address = output_lookup[&next.index()];
-                        Ok((
-                            address,
-                            shape.element_count(),
-                            required == Domain::NonNegativeFinite,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, GpuError>>()?;
-                // The GPU guard uses integer FP32 bit classification and
-                // transfers only a 32-bit failure flag in the success path.
-                // No state is modified until this check has completed.
-                let domains_valid = self
+                    .map(|&(address, size, _)| (address, size))
+                    .collect::<Vec<_>>();
+                let copied = self
                     .execution_health
-                    .record_io(self.session.validate_output_domains(&sources))?;
-                if !domains_valid {
-                    // Exceptional path only: recover the original, precise
-                    // per-lane host-domain error without mutating state.
-                    let buffers = sources
-                        .iter()
-                        .map(|&(address, size, _)| (address, size))
-                        .collect::<Vec<_>>();
-                    let copied = self
-                        .execution_health
-                        .record_io(self.session.copy_f32_batch_to_host(&buffers))?;
-                    for ((_, _, required, shape), values) in pending.iter().zip(copied) {
-                        Tensor::new(shape.clone(), values)?.validate_domain(*required)?;
-                    }
-                    return Err(GpuError::Driver(
-                        "GPU domain guard rejected outputs not rejected by the host oracle".into(),
-                    ));
+                    .record_io(self.session.copy_f32_batch_to_host(&buffers))?;
+                for ((required, shape), values) in
+                    plan.checked_requirements.iter().zip(copied)
+                {
+                    Tensor::new(shape.clone(), values)?.validate_domain(*required)?;
                 }
-                profile.validation_d2h = validation_started.elapsed();
+                return Err(GpuError::Driver(
+                    "GPU domain guard rejected outputs not rejected by the host oracle".into(),
+                ));
             }
+            profile.validation_d2h = validation_started.elapsed();
         }
-        if copies
+        if plan
+            .copies
             .iter()
             .any(|&(dst, _, _)| !self.feedback_snapshot_destinations.contains(&dst))
         {
@@ -2569,18 +2619,13 @@ impl GpuExecution {
         self.snapshot_outputs()?;
         profile.snapshot_d2d = snapshot_started.elapsed();
         let feedback_started = Instant::now();
-        let transfers = copies
-            .into_iter()
-            .filter(|(dst, src, _)| dst != src)
-            .collect::<Vec<_>>();
         if device_events {
-            profile.device_copy = Some(
-                self.execution_health
-                    .record_io(self.session.launch_feedback_copies_device_timed(&transfers))?,
-            );
+            profile.device_copy = Some(self.execution_health.record_io(
+                self.session.launch_feedback_copies_device_timed(&plan.transfers),
+            )?);
         } else {
             self.execution_health
-                .record_io(self.session.launch_feedback_copies(&transfers))?;
+                .record_io(self.session.launch_feedback_copies(&plan.transfers))?;
         }
         profile.feedback_d2d = feedback_started.elapsed();
         let sync_started = Instant::now();
@@ -3802,6 +3847,7 @@ impl GpuEngine {
             preserved_output_addresses: BTreeMap::new(),
             feedback_observable_outputs: None,
             feedback_snapshot_destinations: BTreeSet::new(),
+            prepared_feedback: None,
             preserved_output_valid: Cell::new(false),
             execution_health: ExecutionHealth::default(),
             has_graph,
