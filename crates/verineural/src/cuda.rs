@@ -654,6 +654,23 @@ DONE:
                     self.guard_graph = ptr::null_mut();
                 }
                 self.guard_plan.clear();
+                let (order, batches) = transfer_buckets(
+                    &sources.iter().map(|source| source.1).collect::<Vec<_>>(),
+                )?;
+                let entries = order.iter().map(|&index| {
+                    let (address, elements, nonnegative) = sources[index];
+                    [address, elements as u64, u64::from(nonnegative)]
+                }).collect::<Vec<_>>();
+                let bytes = descriptor_bytes(&entries);
+                let words = bytes.len() / std::mem::size_of::<f32>();
+                if words > self.guard_descriptor_capacity {
+                    self.guard_descriptors = self.allocate(words)?;
+                    self.guard_descriptor_capacity = words;
+                }
+                self.upload_descriptor_bytes(self.guard_descriptors, &bytes)?;
+                // A fresh immutable descriptor table must outlive every
+                // capture and replay that addresses it.
+                self.synchronize()?;
                 check("cuStreamBeginCapture_v2", unsafe {
                     (self.functions.stream_capture_begin)(
                         self.stream,
@@ -661,27 +678,22 @@ DONE:
                     )
                 })?;
                 self.capturing = true;
-                for &(source, elements, nonnegative) in sources {
-                    let mut input = source;
+                for (start, count, grid) in batches {
+                    let mut descriptors = self.guard_descriptors;
                     let mut flag = self.guard_flag;
-                    let mut n = elements as u32;
-                    let mut mode = u32::from(nonnegative);
+                    let mut first = start;
                     let mut args = [
-                        (&mut input as *mut DevicePtr).cast::<c_void>(),
+                        (&mut descriptors as *mut DevicePtr).cast::<c_void>(),
                         (&mut flag as *mut DevicePtr).cast::<c_void>(),
-                        (&mut n as *mut u32).cast::<c_void>(),
-                        (&mut mode as *mut u32).cast::<c_void>(),
+                        (&mut first as *mut u32).cast::<c_void>(),
                     ];
-                    let threads = 256u32;
-                    let grid = u32::try_from(elements.div_ceil(threads as usize))
-                        .map_err(|_| GpuError::UnsupportedSize { elements })?;
                     check("cuLaunchKernel", unsafe {
                         (self.functions.launch)(
                             self.guard_kernel,
                             grid,
+                            count,
                             1,
-                            1,
-                            threads,
+                            256,
                             1,
                             1,
                             0,
