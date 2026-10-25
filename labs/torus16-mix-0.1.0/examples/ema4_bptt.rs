@@ -17,7 +17,8 @@ use torus16_mix_lab::ema4_checkpoint::{
 };
 use verineural::{
     AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuCodegenOptLevel, GpuEngine, GpuLaunchConfig,
-    Model, ModelExecution, NodeId, ReluFusion, Shape, SourceRole, Tensor, differentiate_with_seeds, unroll_model,
+    Model, ModelExecution, NodeId, ReluFusion, Shape, SourceRole, Tensor, differentiate_with_seeds,
+    unroll_model,
 };
 
 fn onehot(token: usize, width: usize) -> Result<Tensor<f32>, Box<dyn Error>> {
@@ -127,9 +128,12 @@ struct ReusedHoldout<'a> {
 
 impl<'a> ReusedHoldout<'a> {
     fn prepare(context: &HoldoutContext<'a>) -> Result<Self, Box<dyn Error>> {
-        let initial = context.weights.bindings_with_init(0, context.mode, context.role_init)?;
+        let initial = context
+            .weights
+            .bindings_with_init(0, context.mode, context.role_init)?;
         // Restrict updates to materialized parameter sources in this graph.
-        let active = context.engine
+        let active = context
+            .engine
             .compile_outputs(context.model.graph(), &context.model.execution_roots())?
             .source_inputs()
             .iter()
@@ -148,9 +152,8 @@ impl<'a> ReusedHoldout<'a> {
                 }
             }
         }
-        let dir = std::env::temp_dir().join(format!(
-            "vn_ema4_holdout_cached_{}", std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("vn_ema4_holdout_cached_{}", std::process::id()));
         let execution = context.engine.prepare_model(context.model, initial, &dir)?;
         let onehots = (0..context.corpus.alphabet.len())
             .map(|token| onehot(token, context.corpus.alphabet.len()))
@@ -174,7 +177,8 @@ impl<'a> ReusedHoldout<'a> {
         }
         // Missing parameters use initialization, just as fresh model.bind.
         for (name, initial) in &self.initial_parameters {
-            self.execution.set_parameter(name, params.get(name).unwrap_or(initial))?;
+            self.execution
+                .set_parameter(name, params.get(name).unwrap_or(initial))?;
         }
         // Important: no recurrent information may leak between holdout runs.
         for (name, value) in &self.reset_states {
@@ -183,12 +187,11 @@ impl<'a> ReusedHoldout<'a> {
         let count = interval.len();
         let mut ce = 0f64;
         for t in interval {
-            self.execution.set_input("token", &self.onehots[self.corpus.validation[t]])?;
+            self.execution
+                .set_input("token", &self.onehots[self.corpus.validation[t]])?;
             self.execution.step()?;
             let logits = self.execution.output("logits")?;
-            ce += f64::from(cross_entropy(
-                logits.values(), self.corpus.validation[t + 1]
-            )?.0);
+            ce += f64::from(cross_entropy(logits.values(), self.corpus.validation[t + 1])?.0);
         }
         Ok((ce / (count as f64 * std::f64::consts::LN_2), count))
     }
@@ -732,7 +735,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     println!(
         "holdout_session_mode={} holdout_session_prepare_s={:.6} scope=outside_training_timer",
-        if cached_holdout.is_some() { "reused" } else { "fresh" },
+        if cached_holdout.is_some() {
+            "reused"
+        } else {
+            "fresh"
+        },
         holdout_prepare_started.elapsed().as_secs_f64()
     );
     let train_start = Instant::now();
@@ -926,7 +933,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Some(states) = checkpoint_states {
             let validation = if eval_due {
                 let validation_started = Instant::now();
-                let (bpc, count) = score_holdout(&mut cached_holdout, &holdout, &params, 0..val_limit)?;
+                let (bpc, count) =
+                    score_holdout(&mut cached_holdout, &holdout, &params, 0..val_limit)?;
                 let validation_elapsed = validation_started.elapsed().as_secs_f64();
                 validation_total_seconds += validation_elapsed;
                 println!(
