@@ -17,8 +17,7 @@ use torus16_mix_lab::ema4_checkpoint::{
 };
 use verineural::{
     AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuCodegenOptLevel, GpuEngine, GpuLaunchConfig,
-    Model, NodeId,
-    ReluFusion, Shape, Tensor, differentiate_with_seeds, unroll_model,
+    Model, NodeId, ReluFusion, Shape, Tensor, differentiate_with_seeds, unroll_model,
 };
 
 fn onehot(token: usize, width: usize) -> Result<Tensor<f32>, Box<dyn Error>> {
@@ -611,7 +610,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Only logits and gradients cross D2H on every window. Recurrent
     // state feedback remains device-resident until a checkpoint boundary.
     let output_count = window.outputs().len();
-    println!("llc_codegen_optimization={} translation_validation=required numeric_equivalence=not_proven", codegen_opt_level.llc_flag());
+    println!(
+        "llc_codegen_optimization={} translation_validation=required numeric_equivalence=not_proven",
+        codegen_opt_level.llc_flag()
+    );
     println!(
         "throughput_policy_threads_per_block={} metric_every={} optimizer_backend={} metric_sampling=reporting_only",
         threads_per_block,
