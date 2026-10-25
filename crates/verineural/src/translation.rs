@@ -30,6 +30,10 @@ pub enum TranslationKind {
         second_add: bool,
         producer_on_right: bool,
     },
+    /// Strictly rounded Sqrt→Add→Div, preserving the Add operand order.
+    SqrtAddDiv {
+        sqrt_on_right: bool,
+    },
     MulAddMul {
         add_mul_on_right: bool,
         mul_add_on_right: bool,
@@ -96,6 +100,7 @@ impl TranslationKind {
             Self::Mul => "mul",
             Self::MulAdd { .. } => "mul_add",
             Self::BinaryChain { .. } => "binary_chain",
+            Self::SqrtAddDiv { .. } => "sqrt_add_div",
             Self::MulAddMul { .. } => "mul_add_mul",
             Self::Sub => "sub_rn",
             Self::DivRne => "div_rn",
@@ -134,6 +139,7 @@ impl TranslationKind {
                 (adds, 2 - adds, 0)
             }
             Self::MulAddMul { .. } => (1, 2, 0),
+            Self::SqrtAddDiv { .. } => (1, 0, 0),
             Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
             Self::MatMul { .. } => (1, 1, 0),
@@ -168,7 +174,8 @@ impl TranslationKind {
             | Self::MulBiasRelu { .. }
             | Self::MulAdd { .. }
             | Self::MulAddMul { .. }
-            | Self::BinaryChain { .. } => 3,
+            | Self::BinaryChain { .. }
+            | Self::SqrtAddDiv { .. } => 3,
             _ => 2,
         }
     }
@@ -208,6 +215,7 @@ impl TranslationKind {
                     + 2 * usize::from(second_add)
                     + 4 * usize::from(producer_on_right)
             }
+            Self::SqrtAddDiv { sqrt_on_right } => usize::from(sqrt_on_right),
             Self::MulAddMul {
                 add_mul_on_right,
                 mul_add_on_right,
@@ -232,6 +240,9 @@ impl TranslationKind {
                 first_add: inner & 1 != 0,
                 second_add: inner & 2 != 0,
                 producer_on_right: inner & 4 != 0,
+            },
+            "sqrt_add_div" if inner < 2 => Self::SqrtAddDiv {
+                sqrt_on_right: inner == 1,
             },
             "mul_add_mul" if inner < 12 => Self::MulAddMul {
                 add_mul_on_right: inner & 1 != 0,
@@ -384,6 +395,7 @@ impl TranslationPlan {
                 TranslationKind::MulAdd { .. }
                     | TranslationKind::MulAddMul { .. }
                     | TranslationKind::BinaryChain { .. }
+                    | TranslationKind::SqrtAddDiv { .. }
             ) {
                 if kernel.reads.iter().any(|&(_, size)| size != kernel.writes) {
                     return Err(invalid("mul-add source shape mismatch"));
@@ -733,6 +745,69 @@ impl TranslationPlan {
                 report.details.push_str(&format!(
                     "node={node} kind={} reads={reads} writes={} add.rn.f32=0 mul.rn.f32=0 relu=0 status=structural-pass\n",
                     kernel.kind.name(), kernel.writes
+                ));
+                continue;
+            }
+            if let TranslationKind::SqrtAddDiv { sqrt_on_right } = kernel.kind {
+                let add_operands = if sqrt_on_right {
+                    "(float %y, float %root)"
+                } else {
+                    "(float %root, float %y)"
+                };
+                let expected = [
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx",
+                    "%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx",
+                    "%biasp = getelementptr float, ptr addrspace(1) %bias, i32 %idx",
+                    "%x = load float, ptr addrspace(1) %ap, align 4",
+                    "%y = load float, ptr addrspace(1) %bp, align 4",
+                    "%z = load float, ptr addrspace(1) %biasp, align 4",
+                    "%root = call float asm sideeffect \"sqrt.rn.f32 $0, $1;\", \"=f,f\"(float %x)",
+                    "%value = call float asm sideeffect \"div.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %z, float %shifted)",
+                    "icmp ult i32 %idx, %length",
+                    "br i1 %valid, label %compute, label %done",
+                    "store float %value, ptr addrspace(1) %op, align 4",
+                ];
+                let middle = format!(
+                    "%shifted = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"{add_operands}"
+                );
+                if expected.iter().any(|&needle| !ir.contains(needle))
+                    || !matches!(
+                        (ir.find(expected[6]), ir.find(&middle), ir.find(expected[7])),
+                        (Some(a), Some(b), Some(c)) if a < b && b < c
+                    )
+                    || ir.matches("call float asm sideeffect").count() != 3
+                    || ir.matches("fcmp ").count() != 0
+                {
+                    return Err(invalid(format!(
+                        "SqrtAddDiv LLVM operand/order mismatch at node {node}"
+                    )));
+                }
+                audit_fp32_ptx(ir, asm)
+                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                let operations = asm
+                    .lines()
+                    .map(|line| line.split("//").next().unwrap_or(""))
+                    .filter_map(|line| {
+                        if line.contains("sqrt.rn.f32") {
+                            Some("sqrt")
+                        } else if line.contains("add.rn.f32") {
+                            Some("add")
+                        } else if line.contains("div.rn.f32") {
+                            Some("div")
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if operations != ["sqrt", "add", "div"] {
+                    return Err(invalid(format!(
+                        "SqrtAddDiv PTX instruction order mismatch at node {node}"
+                    )));
+                }
+                report.rounded_adds += 1;
+                report.details.push_str(&format!(
+                    "node={node} kind=sqrt_add_div reads={:?} writes={} fp32=sqrt.rn-add.rn-div.rn hardware=trusted\n",
+                    kernel.reads, kernel.writes
                 ));
                 continue;
             }
@@ -1160,6 +1235,7 @@ impl TranslationPlan {
                 // explicit FP32 operand order and an early continue.
                 // Keep this match exhaustive without weakening validation.
                 | TranslationKind::BinaryChain { .. }
+                | TranslationKind::SqrtAddDiv { .. }
                 | TranslationKind::MulAdd { .. }
                 | TranslationKind::MulAddMul { .. } => None,
             };

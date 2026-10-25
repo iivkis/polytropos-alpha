@@ -325,6 +325,7 @@ pub enum GpuOptimizationKind {
     MulAddFusion,
     MulAddMulFusion,
     BinaryPointwiseFusion,
+    SqrtAddDivFusion,
 }
 
 impl GpuOptimizationKind {
@@ -335,6 +336,7 @@ impl GpuOptimizationKind {
             Self::MulAddFusion => "mul-add-fusion",
             Self::MulAddMulFusion => "mul-add-mul-fusion",
             Self::BinaryPointwiseFusion => "binary-pointwise-fusion",
+            Self::SqrtAddDivFusion => "sqrt-add-div-fusion",
         }
     }
 }
@@ -558,6 +560,8 @@ pub struct GpuProgram {
     fused_mul_add_muls: BTreeMap<usize, (usize, usize, usize, usize, usize)>,
     // Binary Add/Mul root -> (exclusive Add/Mul producer, root operand slot).
     fused_binary_pairs: BTreeMap<usize, (usize, usize)>,
+    // Div root -> (Sqrt inner, Add middle, Sqrt's Add operand slot).
+    fused_sqrt_add_divs: BTreeMap<usize, (usize, usize, usize)>,
 }
 
 impl GpuProgram {
@@ -610,6 +614,11 @@ impl GpuProgram {
         &self.fused_binary_pairs
     }
 
+    /// Opt-in rounded Sqrt→Add→Div chains with exclusive intermediate uses.
+    pub fn fused_sqrt_add_divs(&self) -> &BTreeMap<usize, (usize, usize, usize)> {
+        &self.fused_sqrt_add_divs
+    }
+
     pub fn removed_kernel_count(&self) -> usize {
         self.skipped_nodes().len()
     }
@@ -627,6 +636,10 @@ impl GpuProgram {
         );
         for &(mul, add, _, _, _) in self.fused_mul_add_muls.values() {
             skipped.insert(mul);
+            skipped.insert(add);
+        }
+        for &(sqrt, add, _) in self.fused_sqrt_add_divs.values() {
+            skipped.insert(sqrt);
             skipped.insert(add);
         }
         skipped
@@ -648,7 +661,18 @@ impl GpuProgram {
             }
             let writes = node.shape.element_count();
             let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) =
-                if let Some(&(mul, add, slot, _, _)) = self.fused_mul_add_muls.get(&index) {
+                if let Some(&(sqrt, add, slot)) = self.fused_sqrt_add_divs.get(&index) {
+                    let inner = &self.graph.nodes()[sqrt];
+                    let middle = &self.graph.nodes()[add];
+                    (
+                        vec![
+                            inner.inputs[0].index(),
+                            middle.inputs[1 - slot].index(),
+                            node.inputs[0].index(),
+                        ],
+                        GpuMemoryPattern::Pointwise,
+                    )
+                } else if let Some(&(mul, add, slot, _, _)) = self.fused_mul_add_muls.get(&index) {
                     let inner = &self.graph.nodes()[mul];
                     let middle = &self.graph.nodes()[add];
                     (
@@ -978,7 +1002,13 @@ impl GpuProgram {
         let mut kernels = Vec::new();
         for contract in self.memory_contracts()? {
             let node = &self.graph.nodes()[contract.kernel_node];
-            let kind = if let Some(&(_, _, add_slot, outer_slot, reuse)) =
+            let kind = if let Some(&(_, _, slot)) =
+                self.fused_sqrt_add_divs.get(&contract.kernel_node)
+            {
+                TranslationKind::SqrtAddDiv {
+                    sqrt_on_right: slot == 1,
+                }
+            } else if let Some(&(_, _, add_slot, outer_slot, reuse)) =
                 self.fused_mul_add_muls.get(&contract.kernel_node)
             {
                 TranslationKind::MulAddMul {
@@ -1392,6 +1422,50 @@ impl GpuProgram {
                 root,
                 kind: GpuOptimizationKind::MulAddFusion,
                 removed_nodes: vec![mul],
+                exclusive_reachable_use: true,
+                selected_outputs_preserved: true,
+            });
+        }
+
+        for (&root, &(sqrt, add, slot)) in &self.fused_sqrt_add_divs {
+            let output = &self.graph.nodes()[root];
+            let middle = &self.graph.nodes()[add];
+            let inner = &self.graph.nodes()[sqrt];
+            let div = matches!(&output.operation, Operation::Pointwise(spec)
+                if supported_pointwise(spec) == Some(TranslationKind::DivRne));
+            let square_root = matches!(&inner.operation, Operation::Pointwise(spec)
+                if supported_pointwise(spec) == Some(TranslationKind::SqrtRne));
+            let compatible = slot < 2
+                && div
+                && square_root
+                && matches!(middle.operation, Operation::Add)
+                && output.inputs[1].index() == add
+                && middle.inputs[slot].index() == sqrt
+                && output.shape == middle.shape
+                && middle.shape == inner.shape
+                && [inner.inputs[0], middle.inputs[1 - slot], output.inputs[0]]
+                    .iter()
+                    .all(|&id| self.graph.nodes()[id.index()].shape == output.shape)
+                && uses[sqrt] == 1
+                && uses[add] == 1
+                && !selected.contains(&sqrt)
+                && !selected.contains(&add)
+                && !covered_removed.contains(&sqrt)
+                && !covered_removed.contains(&add)
+                && !self.fused_mul_adds.contains_key(&add)
+                && !self.fused_mul_add_muls.contains_key(&add)
+                && !self.fused_binary_pairs.contains_key(&add);
+            if !compatible {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid sqrt-add-div fusion at node {root}"),
+                });
+            }
+            covered_removed.insert(sqrt);
+            covered_removed.insert(add);
+            optimizations.push(GpuOptimizationCapability {
+                root,
+                kind: GpuOptimizationKind::SqrtAddDivFusion,
+                removed_nodes: vec![sqrt, add],
                 exclusive_reachable_use: true,
                 selected_outputs_preserved: true,
             });
@@ -2513,6 +2587,7 @@ impl GpuEngine {
         let mut fused_mul_adds = BTreeMap::new();
         let mut fused_mul_add_muls = BTreeMap::new();
         let mut fused_binary_pairs = BTreeMap::new();
+        let mut fused_sqrt_add_divs = BTreeMap::new();
         if self.launch.relu_fusion == ReluFusion::Experimental {
             for &index in &live_nodes {
                 let node = &graph.nodes()[index];
@@ -2548,6 +2623,48 @@ impl GpuEngine {
             skipped.extend(chain.iter().copied());
         }
         if self.launch.pointwise_fusion() {
+            // Opt-in architecture-neutral strict-order fusion:
+            // Sqrt(x) -> Add(sqrt(x), epsilon) -> Div(numerator, sum).
+            // Sources must have exactly the same shape and both internal
+            // nodes exactly one reachable use (including selected outputs).
+            for &index in live_nodes.iter().rev() {
+                let root = &graph.nodes()[index];
+                let is_div = matches!(&root.operation, Operation::Pointwise(spec)
+                    if supported_pointwise(spec) == Some(TranslationKind::DivRne));
+                if !is_div || skipped.contains(&index) {
+                    continue;
+                }
+                let middle = graph.node(root.inputs[1])?;
+                if !matches!(middle.operation, Operation::Add)
+                    || uses[middle.id.index()] != 1
+                    || skipped.contains(&middle.id.index())
+                    || root.shape != middle.shape
+                {
+                    continue;
+                }
+                for slot in 0..2 {
+                    let inner = graph.node(middle.inputs[slot])?;
+                    let is_sqrt = matches!(&inner.operation, Operation::Pointwise(spec)
+                        if supported_pointwise(spec) == Some(TranslationKind::SqrtRne));
+                    if !is_sqrt
+                        || uses[inner.id.index()] != 1
+                        || skipped.contains(&inner.id.index())
+                        || inner.shape != root.shape
+                        || [inner.inputs[0], middle.inputs[1 - slot], root.inputs[0]]
+                            .iter()
+                            .any(|&id| graph.nodes()[id.index()].shape != root.shape)
+                    {
+                        continue;
+                    }
+                    fused_sqrt_add_divs.insert(
+                        index,
+                        (inner.id.index(), middle.id.index(), slot),
+                    );
+                    skipped.insert(inner.id.index());
+                    skipped.insert(middle.id.index());
+                    break;
+                }
+            }
             // Longer chains take priority, but never cross observed values,
             // shared nodes or existing ReLU fusion boundaries.
             for &index in live_nodes.iter().rev() {
@@ -2681,7 +2798,9 @@ impl GpuEngine {
             {
                 continue;
             }
-            if let Some(&(_, _, add_slot, outer_slot, reuse)) = fused_mul_add_muls.get(&index) {
+            if let Some(&(_, _, slot)) = fused_sqrt_add_divs.get(&index) {
+                llvm_ir.push_str(&sqrt_add_div_kernel_ir(index, slot == 1));
+            } else if let Some(&(_, _, add_slot, outer_slot, reuse)) = fused_mul_add_muls.get(&index) {
                 llvm_ir.push_str(&mul_add_mul_kernel_ir(
                     index,
                     add_slot == 1,
@@ -2818,6 +2937,7 @@ impl GpuEngine {
             fused_mul_adds,
             fused_mul_add_muls,
             fused_binary_pairs,
+            fused_sqrt_add_divs,
         };
         // Fail closed unless every launched kernel has matching memory and
         // translation evidence and every applied optimization has valid
@@ -3213,6 +3333,46 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
 /// 3-op, 3-source fusion: Mul(a,b) -> Add(product,c) -> Mul(sum,one-of-a/b/c).
 /// Strictly preserve BOTH binary operand orders and two explicit mul.rn
 /// instructions; no reassociation or implicit FMA.
+/// Strictly rounded, architecture-neutral 3-op pointwise chain:
+/// sqrt.rn(x) → add.rn(sqrt(x), epsilon) → div.rn(numerator, sum).
+/// Never contract, reorder the Add operands, or skip intermediate rounding.
+fn sqrt_add_div_kernel_ir(index: usize, sqrt_on_right: bool) -> String {
+    let add_operands = if sqrt_on_right {
+        "(float %y, float %root)"
+    } else {
+        "(float %root, float %y)"
+    };
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %bias, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %idx
+  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx
+  %biasp = getelementptr float, ptr addrspace(1) %bias, i32 %idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %y = load float, ptr addrspace(1) %bp, align 4
+  %z = load float, ptr addrspace(1) %biasp, align 4
+  %root = call float asm sideeffect "sqrt.rn.f32 $0, $1;", "=f,f"(float %x)
+  %shifted = call float asm sideeffect "add.rn.f32 $0, $1, $2;", "=f,f,f"{add_operands}
+  %value = call float asm sideeffect "div.rn.f32 $0, $1, $2;", "=f,f,f"(float %z, float %shifted)
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %value, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
+}
+
 fn mul_add_mul_kernel_ir(index: usize, add_right: bool, outer_right: bool, reuse: usize) -> String {
     let add_operands = if add_right {
         "(float %z, float %product)"

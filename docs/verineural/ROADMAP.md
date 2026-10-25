@@ -548,3 +548,25 @@ more general multi-operation/region kernel fusion, tensorized *shared-weight*
 minibatches with correct state separation and gradient aggregation, and a
 sustained EMA4 end-to-end throughput comparison. Scheduling independent
 programs does not automatically accelerate single-sequence EMA4 BPTT.
+
+### Strict-order three-operation Sqrt→Add→Div fusion (code, hardware acceptance pending)
+
+The opt-in architecture-neutral pointwise fusion pass now recognizes
+`Div(numerator, Add(Sqrt(x), epsilon))` only when both intermediate nodes
+are unobserved and have exactly one reachable consumer and all three source
+tensors have identical shape. The original operand order of `Add` is
+preserved. The generated three-input CUDA Graph kernel emits separate
+`sqrt.rn.f32`, `add.rn.f32`, `div.rn.f32` instructions, retaining each
+FP32 rounding boundary. The fusion removes two kernels per matched chain
+but may not alter wall-clock time beneficially. A source-derived capability
+plan explains both removed nodes, memory contracts validate three source
+extents, and translation validation checks LLVM operand wiring and ordered
+PTX instructions before device execution. No Lean IEEE/SASS theorem follows
+from these structural checks.
+
+`task verify-gpu-sqrt-add-div-fusion` exercises operand order, observed
+intermediates, fan-out negatives, translation-plan serialization and actual
+NVIDIA bitwise fused/unfused results. The generic GPU AdamW plan's unit
+test checks that this fusion reduces its denominator expression. All GPU
+and Cargo acceptance remain to be run by the developer. Full arbitrary
+pointwise-region fusion and runtime-domain predicates remain open.

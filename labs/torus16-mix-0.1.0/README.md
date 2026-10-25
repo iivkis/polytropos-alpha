@@ -548,3 +548,17 @@ shared-weight batched EMA4 training, gradient aggregation, or higher GPU
 utilization for a single recurrent sequence. Tensor-wise finite-domain
 validation of GPU AdamW remains D2H; no fully GPU-side finite guard is
 claimed.
+
+### GPU AdamW denominator fusion (experimental)
+
+Generic VeriNeural pointwise fusion includes strict-order
+`Sqrt→Add→Div` with three full-shaped inputs, targeting the expensive
+`sqrt(v_hat) + epsilon` denominator pattern present in many algorithms,
+including the optional GPU AdamW. The compiler emits a single CUDA Graph
+kernel with three separate rounded PTX operations instead of three
+kernels, without reassociation or FMA. Shared/observable intermediate
+values are not fused. Check with
+`task verify-gpu-sqrt-add-div-fusion`. Actual reduction in EMA4 kernel
+count, end-to-end tokens/s and GPU utilization must be measured on the
+target device after testing. Existing finite-domain parameter checks
+still require D2H until a separately verified on-device predicate exists.
