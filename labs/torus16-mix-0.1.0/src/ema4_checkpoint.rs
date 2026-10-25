@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
-use verineural::{AdamW, AdamWCheckpoint, Tensor};
+use verineural::{AdamW, AdamWCheckpoint, Model, Tensor};
 
-const MAGIC: &[u8] = b"VN-EMA4-BPTT-CKPT-v1\0";
+const MAGIC: &[u8] = b"VN-EMA4-BPTT-CKPT-v2\0";
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1024;
 const MAX_ELEMENTS: usize = 1_000_000;
@@ -19,6 +19,59 @@ pub fn fingerprint(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325_u64, |h, &b| {
         (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
     })
+}
+
+/// Fail-closed *compatibility* fingerprint of the public Semantic IR. The
+/// digest is deliberately non-cryptographic; it is not an artifact signature
+/// or a proof of GPU/kernel correctness. Ignore transient graph NodeId IDs.
+pub fn architecture_fingerprint(
+    model: &Model,
+    seed: u64,
+    role_init: &str,
+    initial: &[(String, Tensor<f32>)],
+) -> u64 {
+    let mut description = format!(
+        "ema4-training-graph-v2|seed={seed}|role_init={role_init}|policy={:?}\n",
+        model.graph().policy(),
+    );
+    for node in model.graph().nodes() {
+        description.push_str(&format!(
+            "node={}|op={:?}|shape={:?}|dtype={:?}|domain={:?}|contract={:?}|semantics={:?}|inputs=",
+            node.id.index(),
+            node.operation,
+            node.shape,
+            node.dtype,
+            node.domain,
+            node.contract,
+            node.semantics,
+        ));
+        for input in &node.inputs {
+            description.push_str(&format!("{},", input.index()));
+        }
+        description.push('\n');
+    }
+    for (name, node) in model.outputs() {
+        description.push_str(&format!("output={name}:{}\n", node.index()));
+    }
+    for (name, node) in model.state_links() {
+        description.push_str(&format!("next_state={name}:{}\n", node.index()));
+    }
+    let mut bytes = description.into_bytes();
+    // Bind the initial named constants/weights as well as the graph shape:
+    // a changed fixed numeric constant can change semantics without any IR
+    // node changing. This is a compatibility checksum, not cryptographic.
+    for (name, tensor) in initial {
+        bytes.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+        for &dim in tensor.shape().dims() {
+            bytes.extend_from_slice(&(dim as u64).to_le_bytes());
+        }
+        bytes.push(0xff);
+        for &value in tensor.values() {
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+    }
+    fingerprint(&bytes)
 }
 
 fn u64w(out: &mut Vec<u8>, n: u64) {
@@ -145,6 +198,9 @@ pub struct Ema4Checkpoint {
     pub bptt: usize,
     pub vocab: usize,
     pub corpus_fingerprint: u64,
+    pub architecture_fingerprint: u64,
+    /// Lowest validation BPC recorded at completed evaluation boundaries.
+    pub best_validation_bpc: Option<f32>,
     pub parameters: BTreeMap<String, Tensor<f32>>,
     pub states: BTreeMap<String, Tensor<f32>>,
     pub optimizer: AdamWCheckpoint,
@@ -155,6 +211,7 @@ impl Ema4Checkpoint {
         bptt: usize,
         vocab: usize,
         corpus: u64,
+        architecture: u64,
         max_windows: usize,
         params: &BTreeMap<String, Tensor<f32>>,
         states: &BTreeMap<String, Tensor<f32>>,
@@ -162,13 +219,15 @@ impl Ema4Checkpoint {
         if self.bptt != bptt
             || self.vocab != vocab
             || self.corpus_fingerprint != corpus
+            || self.architecture_fingerprint != architecture
+            || self.best_validation_bpc.is_some_and(|v| !v.is_finite() || v < 0.)
             || self.completed_windows > max_windows
             || u64::try_from(self.completed_windows).ok() != Some(self.optimizer.steps)
             || !same_schema(&self.parameters, params)
             || !same_schema(&self.states, states)
         {
             return Err(invalid(
-                "checkpoint incompatible with corpus/IR/BPTT/window cursor",
+                "checkpoint incompatible with architecture/seed/corpus/BPTT/window cursor",
             ));
         }
         let o = &self.optimizer;
@@ -192,8 +251,15 @@ impl Ema4Checkpoint {
             self.bptt as u64,
             self.vocab as u64,
             self.corpus_fingerprint,
+            self.architecture_fingerprint,
         ] {
             u64w(&mut out, n);
+        }
+        if let Some(best) = self.best_validation_bpc {
+            u64w(&mut out, 1);
+            f32w(&mut out, best)?;
+        } else {
+            u64w(&mut out, 0);
         }
         tensorsw(&mut out, &self.parameters)?;
         tensorsw(&mut out, &self.states)?;
@@ -240,6 +306,12 @@ impl Ema4Checkpoint {
         let bptt = reader.bounded(16)?;
         let vocab = reader.bounded(4096)?;
         let corpus_fingerprint = reader.u64()?;
+        let architecture_fingerprint = reader.u64()?;
+        let best_validation_bpc = match reader.bounded(1)? {
+            0 => None,
+            1 => Some(reader.f32()?),
+            _ => return Err(invalid("invalid validation metric flag")),
+        };
         let parameters = reader.tensors()?;
         let states = reader.tensors()?;
         let learning_rate = reader.f32()?;
@@ -266,6 +338,8 @@ impl Ema4Checkpoint {
             bptt,
             vocab,
             corpus_fingerprint,
+            architecture_fingerprint,
+            best_validation_bpc,
             parameters,
             states,
             optimizer: AdamWCheckpoint {
@@ -339,33 +413,39 @@ mod tests {
             bptt: 2,
             vocab: 104,
             corpus_fingerprint: fingerprint(b"corpus"),
+            architecture_fingerprint: 12345,
+            best_validation_bpc: Some(3.4),
             parameters: trained.clone(),
             states: states.clone(),
             optimizer: optimizer.checkpoint(),
         };
         snapshot
-            .validate(2, 104, fingerprint(b"corpus"), 4, &expected, &states)
+            .validate(2, 104, fingerprint(b"corpus"), 12345, 4, &expected, &states)
             .unwrap();
         let bytes = snapshot.encode().unwrap();
         let restored = Ema4Checkpoint::decode(&bytes).unwrap();
+        assert_eq!(restored.best_validation_bpc, Some(3.4));
         assert_eq!(restored.parameters, trained);
         assert_eq!(restored.states, states);
         assert_eq!(restored.optimizer, optimizer.checkpoint());
         assert!(
             restored
-                .validate(3, 104, fingerprint(b"corpus"), 4, &expected, &states)
+                .validate(3, 104, fingerprint(b"corpus"), 12345, 4, &expected, &states)
                 .is_err()
         );
         assert!(
             restored
-                .validate(2, 104, fingerprint(b"changed"), 4, &expected, &states)
+                .validate(2, 104, fingerprint(b"changed"), 12345, 4, &expected, &states)
                 .is_err()
         );
         assert!(
             restored
-                .validate(2, 104, fingerprint(b"corpus"), 0, &expected, &states)
+                .validate(2, 104, fingerprint(b"corpus"), 12345, 0, &expected, &states)
                 .is_err()
         );
+        assert!(restored
+            .validate(2, 104, fingerprint(b"corpus"), 12346, 4, &expected, &states)
+            .is_err());
         let mut bad = bytes.clone();
         bad[9] ^= 0x7f;
         assert!(Ema4Checkpoint::decode(&bad).is_err());
@@ -384,6 +464,65 @@ mod tests {
     }
 
     #[test]
+    fn architecture_checksum_is_stable_and_rejects_changed_ir_seed_and_role_init() {
+        use crate::ema4::{Ema4Weights, MatrixMode, RoleInit, architecture_model_for};
+        let weights = Ema4Weights::deterministic_seeded(16, 17).unwrap();
+        let w = |mode, role_init| {
+            weights.bindings_with_init(0, mode, role_init).unwrap()
+        };
+        let shared = architecture_model_for(16, MatrixMode::TorusShared).unwrap();
+        let shared_again = architecture_model_for(16, MatrixMode::TorusShared).unwrap();
+        let independent = architecture_model_for(16, MatrixMode::Independent).unwrap();
+        let initial = w(MatrixMode::TorusShared, RoleInit::Matched);
+        let id = architecture_fingerprint(&shared, 17, "matched", &initial);
+        assert_eq!(
+            id,
+            architecture_fingerprint(&shared_again, 17, "matched", &initial)
+        );
+        assert_ne!(id, architecture_fingerprint(&shared, 18, "matched", &initial));
+        assert_ne!(id, architecture_fingerprint(&shared, 17, "diverse", &initial));
+        assert_ne!(id, architecture_fingerprint(
+            &independent, 17, "matched",
+            &w(MatrixMode::Independent, RoleInit::Matched)
+        ));
+        let mut altered = initial.clone();
+        let i = altered.iter().position(|(name, _)| name == "one_scalar").unwrap();
+        altered[i].1 = scalar(0.5);
+        assert_ne!(id, architecture_fingerprint(&shared, 17, "matched", &altered));
+    }
+
+    #[test]
+    fn checkpoint_rejects_legacy_v1_and_other_matrix_mode_even_with_valid_schema() {
+        use crate::ema4::{Ema4Weights, MatrixMode, RoleInit, architecture_model_for};
+        let weights = Ema4Weights::deterministic(16).unwrap();
+        let model = architecture_model_for(16, MatrixMode::TorusShared).unwrap();
+        let bindings = weights.bindings_with_init(0, MatrixMode::TorusShared, RoleInit::Matched).unwrap();
+        let identity = architecture_fingerprint(&model, 0, "matched", &bindings);
+        let params = weights.trainable_parameters_for(MatrixMode::TorusShared).unwrap();
+        let snapshot = Ema4Checkpoint {
+            completed_windows: 0,
+            bptt: 2,
+            vocab: 16,
+            corpus_fingerprint: fingerprint(b"corpus"),
+            architecture_fingerprint: identity,
+            best_validation_bpc: None,
+            parameters: params.clone(),
+            states: BTreeMap::new(),
+            optimizer: AdamW::new(0.002, 0.01).unwrap().checkpoint(),
+        };
+        let encoded = snapshot.encode().unwrap();
+        let decoded = Ema4Checkpoint::decode(&encoded).unwrap();
+        decoded.validate(2, 16, fingerprint(b"corpus"), identity, 4, &params, &BTreeMap::new()).unwrap();
+        assert!(decoded.validate(2, 16, fingerprint(b"corpus"), identity + 1, 4, &params, &BTreeMap::new()).is_err());
+        let mut old_magic = encoded.clone();
+        old_magic[..MAGIC.len()].copy_from_slice(b"VN-EMA4-BPTT-CKPT-v1\0");
+        let checksum = fingerprint(&old_magic[..old_magic.len() - 8]);
+        let n = old_magic.len();
+        old_magic[n - 8..].copy_from_slice(&checksum.to_le_bytes());
+        assert!(Ema4Checkpoint::decode(&old_magic).is_err());
+    }
+
+    #[test]
     fn atomic_file_roundtrip() {
         let params = BTreeMap::from([("a".into(), scalar(0.25))]);
         let checkpoint = Ema4Checkpoint {
@@ -391,6 +530,8 @@ mod tests {
             bptt: 2,
             vocab: 104,
             corpus_fingerprint: 17,
+            architecture_fingerprint: 9876,
+            best_validation_bpc: None,
             parameters: params.clone(),
             states: BTreeMap::new(),
             optimizer: AdamW::new(0.002, 0.01).unwrap().checkpoint(),

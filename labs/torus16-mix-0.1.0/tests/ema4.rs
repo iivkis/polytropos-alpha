@@ -167,6 +167,84 @@ fn torus_matrix_modes_initial_gpu_logits_and_state_match_bits() {
 }
 
 #[test]
+fn seeded_matrix_ablation_preserves_matched_initialization_and_varies_diverse_roles() {
+    use torus16_mix_lab::ema4::RoleInit;
+    let a = Ema4Weights::deterministic_seeded(16, 123).unwrap();
+    let b = Ema4Weights::deterministic_seeded(16, 123).unwrap();
+    let c = Ema4Weights::deterministic_seeded(16, 124).unwrap();
+    assert_eq!(a.blocks[0].operator.weight, b.blocks[0].operator.weight);
+    assert_ne!(a.blocks[0].operator.weight, c.blocks[0].operator.weight);
+    let shared = a.trainable_parameters_with_init(MatrixMode::TorusShared, RoleInit::Matched).unwrap();
+    let matched = a.trainable_parameters_with_init(MatrixMode::Independent, RoleInit::Matched).unwrap();
+    let diverse = a.trainable_parameters_with_init(MatrixMode::Independent, RoleInit::Diverse).unwrap();
+    assert_eq!(matched["weight_0_0"], shared["weight_0"]);
+    assert_eq!(matched["weight_0_7"], shared["weight_0"]);
+    assert_ne!(diverse["weight_0_0"], diverse["weight_0_7"]);
+    assert_ne!(diverse["weight_0_0"], shared["weight_0"]);
+    assert_eq!(
+        diverse.values().map(|v| v.values().len()).sum::<usize>(),
+        matched.values().map(|v| v.values().len()).sum::<usize>()
+    );
+}
+
+#[test]
+#[ignore = "requires NVIDIA and LLVM NVPTX; compare summed independent-role VJPs against shared-W VJP"]
+fn torus_role_matrix_gradients_sum_to_shared_gradient() {
+    use torus16_mix_lab::ema4::RoleInit;
+    let vocab = 16;
+    let weights = Ema4Weights::deterministic_seeded(vocab, 13).unwrap();
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    ).with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+
+    let gradients_for = |mode: MatrixMode| -> Vec<Vec<f32>> {
+        let model = architecture_model_for(vocab, mode).unwrap();
+        let logits = model.output("logits").unwrap();
+        let names = if mode == MatrixMode::TorusShared {
+            vec!["weight_0".to_string()]
+        } else {
+            (0..8).map(|role| format!("weight_0_{role}")).collect()
+        };
+        let sources = names.iter().map(|name| model.source(name).unwrap().0).collect::<Vec<_>>();
+        let reverse = verineural::differentiate(model.graph(), logits, &sources).unwrap();
+        let grads = sources.iter().map(|&id| reverse.gradient_of(id).unwrap()).collect::<Vec<_>>();
+        let program = engine.compile_outputs(reverse.graph(), &grads).unwrap();
+        let source_bindings = model.bind(
+            weights.bindings_with_init(3, mode, RoleInit::Matched).unwrap()
+        ).unwrap();
+        let seed = Tensor::from_vec(
+            vec![1, vocab], (0..vocab).map(|i| (i as f32 + 1.) / 16.).collect()
+        ).unwrap();
+        let supplied = reverse.bindings(&source_bindings, seed).unwrap();
+        let supplied = supplied.into_iter()
+            .filter(|(id, _)| program.source_inputs().contains(id))
+            .collect::<Vec<_>>();
+        let root = std::env::temp_dir().join(format!(
+            "vn_role_vjp_{}_{}_{}", std::process::id(), vocab, mode.as_str()
+        ));
+        let mut gpu = engine.prepare(&program, &supplied, &root).unwrap();
+        gpu.replay().unwrap();
+        gpu.read_outputs_selected(&grads).unwrap().into_iter()
+            .map(|(_, tensor)| tensor.values().to_vec()).collect()
+    };
+    // Running sequentially limits peak GPU memory usage.
+    let shared = gradients_for(MatrixMode::TorusShared).remove(0);
+    let independent = gradients_for(MatrixMode::Independent);
+    assert_eq!(independent.len(), 8);
+    for (lane, &expected) in shared.iter().enumerate() {
+        let actual: f32 = independent.iter().map(|gradient| gradient[lane]).sum();
+        // GPU order of accumulation differs after weight tying. This is a
+        // numerical VJP sanity check, not an IEEE bitwise equivalence proof.
+        assert!(
+            actual.is_finite() && expected.is_finite()
+                && (actual - expected).abs() <= 1e-4 + 0.02 * expected.abs(),
+            "gradient lane={lane}: shared={expected}, sum={actual}"
+        );
+    }
+}
+
+#[test]
 fn research_shape_and_named_bindings() {
     let weights = Ema4Weights::deterministic(RESEARCH_VOCAB).unwrap();
     assert_eq!(Ema4Weights::parameter_count(RESEARCH_VOCAB), 24_908);

@@ -9,10 +9,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 use torus16_mix_lab::corpus::CharCorpus;
-use torus16_mix_lab::ema4::{Ema4Weights, MatrixMode, architecture_model_for};
-use torus16_mix_lab::ema4_checkpoint::{Ema4Checkpoint, fingerprint};
+use torus16_mix_lab::ema4::{Ema4Weights, MatrixMode, RoleInit, architecture_model_for};
+use torus16_mix_lab::ema4_checkpoint::{Ema4Checkpoint, architecture_fingerprint, fingerprint};
 use verineural::{
-    AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, NodeId, Shape, Tensor,
+    AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, Model, NodeId, Shape, Tensor,
     differentiate_with_seeds, unroll_model,
 };
 
@@ -61,6 +61,37 @@ fn option_usize(
     }
     Ok(value)
 }
+/// Each evaluation starts with zero EMA/Conv9 state. Scores the same
+/// chronological holdout prefix at every training boundary; never trains on it.
+fn holdout_bpc(
+    engine: &GpuEngine,
+    model: &Model,
+    weights: &Ema4Weights,
+    params: &BTreeMap<String, Tensor<f32>>,
+    mode: MatrixMode,
+    role_init: RoleInit,
+    corpus: &CharCorpus,
+    val_limit: usize,
+) -> Result<(f64, usize), Box<dyn Error>> {
+    let mut bindings = weights.bindings_with_init(0, mode, role_init)?;
+    for (name, tensor) in &mut bindings {
+        if let Some(updated) = params.get(name) {
+            *tensor = updated.clone();
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("vn_ema4_holdout_{}", std::process::id()));
+    let mut execution = engine.prepare_model(model, bindings, &dir)?;
+    let count = val_limit.min(corpus.validation.len() - 1);
+    let mut ce = 0f64;
+    for t in 0..count {
+        execution.set_input("token", &onehot(corpus.validation[t], corpus.alphabet.len())?)?;
+        execution.step()?;
+        let logits = execution.output("logits")?;
+        ce += f64::from(cross_entropy(logits.values(), corpus.validation[t + 1])?.0);
+    }
+    Ok((ce / (count as f64 * std::f64::consts::LN_2), count))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     // The research handoff corpus is versioned with this lab. A custom
     // TORUS16_CORPUS remains optional for explicit alternative experiments.
@@ -71,12 +102,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
     let corpus = CharCorpus::read(&corpus_path)?;
     let window_len = option_usize("TORUS16_BPTT", 2, 2, 8)?;
-    let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 131072)?;
+    let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 1_000_000)?;
     let val_limit = option_usize("TORUS16_VAL_LIMIT", 64, 2, 100000)?;
     let mode_name = std::env::var("TORUS16_MATRIX_MODE")
         .unwrap_or_else(|_| "torus_shared".into());
     let matrix_mode = MatrixMode::parse(&mode_name)
         .ok_or("TORUS16_MATRIX_MODE must be independent or torus_shared")?;
+    let role_init_name = std::env::var("TORUS16_ROLE_INIT")
+        .unwrap_or_else(|_| "matched".into());
+    let role_init = RoleInit::parse(&role_init_name)
+        .ok_or("TORUS16_ROLE_INIT must be matched or diverse")?;
+    if matrix_mode == MatrixMode::TorusShared && role_init != RoleInit::Matched {
+        return Err("TorusShared requires TORUS16_ROLE_INIT=matched".into());
+    }
+    let matrix_seed = std::env::var("TORUS16_MATRIX_SEED")
+        .ok()
+        .map(|seed| seed.parse::<u64>())
+        .transpose()?
+        .unwrap_or(0);
+    let eval_every = option_usize("TORUS16_EVAL_EVERY", 4096, 1, 131072)?;
     let checkpoint_every = option_usize("TORUS16_CHECKPOINT_EVERY", 128, 1, 4096)?;
     let checkpoint_path = std::env::var_os("TORUS16_CHECKPOINT")
         .map(PathBuf::from)
@@ -98,12 +142,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let compile_clock = Instant::now();
     let vocab = corpus.alphabet.len();
-    let weights = Ema4Weights::deterministic(vocab)?;
+    let weights = Ema4Weights::deterministic_seeded(vocab, matrix_seed)?;
     let model = architecture_model_for(vocab, matrix_mode)?;
-    let trainable_initial = weights.trainable_parameters_for(matrix_mode)?;
+    let initial_bindings = weights.bindings_with_init(0, matrix_mode, role_init)?;
+    let model_fingerprint = architecture_fingerprint(
+        &model, matrix_seed, role_init.as_str(), &initial_bindings,
+    );
+    let trainable_initial = weights.trainable_parameters_with_init(matrix_mode, role_init)?;
     let parameter_count: usize = trainable_initial.values().map(|v| v.values().len()).sum();
     println!(
-        "experiment_matrix_mode={} projection_matrices={} matrix_values={} trainable_values={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={}",
+        "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} eval_every={}",
+        matrix_mode.as_str(),
+        role_init.as_str(),
+        matrix_seed,
+        model_fingerprint,
         matrix_mode.as_str(),
         matrix_mode.matrix_count(),
         matrix_mode.matrix_count() * torus16_mix_lab::WIDTH * torus16_mix_lab::WIDTH,
@@ -111,7 +163,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         corpus_hash,
         window_len,
         train_windows,
-        val_limit
+        val_limit,
+        eval_every
     );
     let window = unroll_model(&model, "logits", window_len)?;
     let named_parameter = window.parameters();
@@ -187,7 +240,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("missing terminal state for {name}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let all = weights.bindings_for(0, matrix_mode)?;
+    let all = initial_bindings;
     let expected_states = window
         .initial_states()
         .keys()
@@ -198,12 +251,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("missing initial recurrent state: {name}"))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let (mut params, states, mut optimizer, first_window) = if !fresh && checkpoint_path.exists() {
+    let (mut params, states, mut optimizer, first_window, mut best_validation) = if !fresh && checkpoint_path.exists() {
         let ckpt = Ema4Checkpoint::read(&checkpoint_path)?;
         ckpt.validate(
             window_len,
             vocab,
             corpus_hash,
+            model_fingerprint,
             train_windows,
             &trainable_initial,
             &expected_states,
@@ -214,13 +268,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             checkpoint_path.display(),
             ckpt.completed_windows
         );
-        (ckpt.parameters, ckpt.states, opt, ckpt.completed_windows)
+        (ckpt.parameters, ckpt.states, opt, ckpt.completed_windows, ckpt.best_validation_bpc)
     } else {
         (
             trainable_initial,
             expected_states,
             AdamW::new(0.002, 0.01)?,
             0usize,
+            None,
         )
     };
     // Experimental architecture-neutral GPU optimizer; defaults to the
@@ -473,6 +528,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         gpu_optimizer.is_some() && std::env::var_os("TORUS16_GPU_FEEDBACK_EVENTS").is_some();
     let mut feedback_checked_values = 0usize;
     let mut feedback_copied_values = 0usize;
+    let mut validation_total_seconds = 0.0f64;
     // Training-only learning curve over fixed consecutive windows. The
     // held-out BPC below is the generalization metric, not this moving mean.
     let mut curve_bpc_sum = 0.0f64;
@@ -567,8 +623,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             feedback_copied_values += p.feedback_values;
         }
 
-        let checkpoint_due =
-            (iteration + 1) % checkpoint_every == 0 || iteration + 1 == train_windows;
+        let eval_due = (iteration + 1) % eval_every == 0 || iteration + 1 == train_windows;
+        // An evaluation boundary also saves a resumable snapshot so the
+        // measured model and the selected best checkpoint are identical.
+        let checkpoint_due = (iteration + 1) % checkpoint_every == 0 || eval_due;
         let timing = Instant::now();
         let checkpoint_states = if checkpoint_due {
             let copied = gpu.read_outputs_selected(&terminal_outputs)?;
@@ -607,16 +665,51 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
         let upload_parameters_ms = timing.elapsed().as_secs_f64() * 1000.;
         if let Some(states) = checkpoint_states {
-            Ema4Checkpoint {
+            let validation = if eval_due {
+                let validation_started = Instant::now();
+                let (bpc, count) = holdout_bpc(
+                    &engine, &model, &weights, &params, matrix_mode, role_init, &corpus, val_limit,
+                )?;
+                let validation_elapsed = validation_started.elapsed().as_secs_f64();
+                validation_total_seconds += validation_elapsed;
+                println!(
+                    "validation_window={} holdout_reset_streaming_bpc={bpc:.6} scored_characters={count} role_init={} matrix_seed={} elapsed_s={validation_elapsed:.4}",
+                    iteration + 1,
+                    role_init.as_str(),
+                    matrix_seed,
+                );
+                Some(bpc as f32)
+            } else {
+                None
+            };
+            let improved = validation.is_some_and(|bpc| {
+                best_validation.is_none_or(|previous| bpc < previous)
+            });
+            if improved {
+                best_validation = validation;
+            }
+            let snapshot = Ema4Checkpoint {
                 completed_windows: iteration + 1,
                 bptt: window_len,
                 vocab,
                 corpus_fingerprint: corpus_hash,
+                architecture_fingerprint: model_fingerprint,
+                best_validation_bpc: best_validation,
                 parameters: params.clone(),
                 states,
                 optimizer: checkpoint_optimizer.unwrap_or_else(|| optimizer.checkpoint()),
+            };
+            if improved {
+                let best_path = checkpoint_path.with_extension("best.ckpt");
+                snapshot.write_atomic(&best_path)?;
+                println!(
+                    "best_validation_window={} holdout_bpc={:.6} checkpoint={}",
+                    iteration + 1,
+                    best_validation.unwrap_or(0.),
+                    best_path.display()
+                );
             }
-            .write_atomic(&checkpoint_path)?;
+            snapshot.write_atomic(&checkpoint_path)?;
         }
 
         for (total, sample) in profile_totals.iter_mut().zip([
@@ -670,63 +763,60 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     let profile_windows = train_windows - first_window;
+    // A completed checkpoint can be inspected again without generating NaN
+    // timing summaries from a zero-window no-op training loop.
+    let profile_divisor = profile_windows.max(1) as f64;
     println!(
         "training_profile_avg_ms windows={} input_h2d={:.4} graph_replay={:.4} selected_d2h={:.4} host_ce={:.4} host_adamw={:.4} feedback_total={:.4} checkpoint_state_d2h={:.4} parameters_or_checkpoint_io={:.4} feedback_validation_d2h={:.4} feedback_snapshot_d2d={:.4} feedback_copy_sync={:.4} feedback_plan_host={:.4} feedback_device_event_ms={:.4} feedback_events={} feedback_checked_values={} feedback_copied_values={} timing=host_wall_including_sync",
         profile_windows,
-        profile_totals[0] / profile_windows as f64,
-        profile_totals[1] / profile_windows as f64,
-        profile_totals[2] / profile_windows as f64,
-        profile_totals[3] / profile_windows as f64,
-        profile_totals[4] / profile_windows as f64,
-        profile_totals[5] / profile_windows as f64,
-        profile_totals[6] / profile_windows as f64,
-        profile_totals[7] / profile_windows as f64,
-        profile_totals[8] / profile_windows as f64,
-        profile_totals[9] / profile_windows as f64,
-        profile_totals[10] / profile_windows as f64,
-        profile_totals[12] / profile_windows as f64,
-        profile_totals[11] / profile_windows as f64,
+        profile_totals[0] / profile_divisor,
+        profile_totals[1] / profile_divisor,
+        profile_totals[2] / profile_divisor,
+        profile_totals[3] / profile_divisor,
+        profile_totals[4] / profile_divisor,
+        profile_totals[5] / profile_divisor,
+        profile_totals[6] / profile_divisor,
+        profile_totals[7] / profile_divisor,
+        profile_totals[8] / profile_divisor,
+        profile_totals[9] / profile_divisor,
+        profile_totals[10] / profile_divisor,
+        profile_totals[12] / profile_divisor,
+        profile_totals[11] / profile_divisor,
         gpu_feedback_events,
         feedback_checked_values,
         feedback_copied_values,
     );
-    let train_elapsed = train_start.elapsed().as_secs_f64();
+    let including_validation = train_start.elapsed().as_secs_f64();
+    // Validation creates a separate GPU inference session and must not be
+    // silently counted as training throughput. Checkpoint and feedback costs
+    // remain in the training clock.
+    let train_elapsed = (including_validation - validation_total_seconds).max(f64::EPSILON);
     println!(
-        "training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} scope=GPU_replay_plus_host_CE_AdamW_transfers optimizer_backend={}",
+        "training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} validation_total_s={:.6} training_with_validation_s={:.6} scope=GPU_replay_plus_host_CE_AdamW_transfers optimizer_backend={}",
         train_elapsed,
         (train_windows - first_window) * window_len,
         ((train_windows - first_window) * window_len) as f64 / train_elapsed,
+        validation_total_seconds,
+        including_validation,
         if gpu_optimizer.is_some() {
             "GPU_IR"
         } else {
             "CPU"
         }
     );
-    // Real holdout: chronological final 10% only. One recurrent inference
-    // step per symbol, with state reset to zero at the validation boundary.
-    let mut eval_bindings = weights.bindings_for(0, matrix_mode)?;
-    for (name, value) in &mut eval_bindings {
-        if let Some(updated) = params.get(name) {
-            *value = updated.clone();
-        }
-    }
-    let eval_dir = std::env::temp_dir().join(format!("vn_ema4_holdout_{}", std::process::id()));
+    // Final metric is recomputed from the last saved parameters, including
+    // when a finished run is reopened without further training.
     let validation_start = Instant::now();
-    let mut eval = engine.prepare_model(&model, eval_bindings, &eval_dir)?;
-    let count = val_limit.min(corpus.validation.len() - 1);
-    let mut val_ce = 0f64;
-    for t in 0..count {
-        let input = onehot(corpus.validation[t], vocab)?;
-        eval.set_input("token", &input)?;
-        eval.step()?;
-        let logits = eval.output("logits")?;
-        val_ce += f64::from(cross_entropy(logits.values(), corpus.validation[t + 1])?.0);
-    }
-    let bpc = val_ce / (count as f64 * std::f64::consts::LN_2);
+    let (bpc, count) = holdout_bpc(
+        &engine, &model, &weights, &params, matrix_mode, role_init, &corpus, val_limit,
+    )?;
     println!(
-        "holdout_reset_streaming_bpc={bpc:.6} matrix_mode={} scored_characters={count} validation_split=last_10pct eval_prepare_plus_stream_seconds={:.5}",
+        "holdout_reset_streaming_bpc={bpc:.6} matrix_mode={} role_init={} matrix_seed={} scored_characters={count} validation_split=last_10pct eval_prepare_plus_stream_seconds={:.5} best_validation_bpc={:.6}",
         matrix_mode.as_str(),
-        validation_start.elapsed().as_secs_f64()
+        role_init.as_str(),
+        matrix_seed,
+        validation_start.elapsed().as_secs_f64(),
+        best_validation.unwrap_or(bpc as f32),
     );
     println!(
         "NOTE: GPU approximate-exp softmax CE seed + VJP, host CE metric; GPU AdamW experimental when opted in; no formal FP32 gradient/optimizer proof."

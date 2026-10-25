@@ -48,6 +48,43 @@ impl MatrixMode {
     }
 }
 
+/// Initialization policy for independent role matrices. The matched mode
+/// isolates weight tying; the diverse mode is the unconstrained baseline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoleInit {
+    Matched,
+    Diverse,
+}
+
+impl RoleInit {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "matched" => Some(Self::Matched),
+            "diverse" => Some(Self::Diverse),
+            _ => None,
+        }
+    }
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Diverse => "diverse",
+        }
+    }
+}
+
+// An integer-only, reproducible sampler; neither backend GPU RNG nor global
+// PRNG state affects the experiment's initial FP32 tensor values.
+fn matrix_sample(seed: u64, layer: usize, role: usize, index: usize) -> f32 {
+    let mut x = seed
+        ^ ((layer as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15))
+        ^ ((role as u64 + 1).wrapping_mul(0xbf58476d1ce4e5b9))
+        ^ ((index as u64 + 1).wrapping_mul(0x94d049bb133111eb));
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+    ((x >> 40) as f32 / (1u32 << 24) as f32 - 0.5) * 0.04
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockWeights {
     pub operator: Parameters,
@@ -88,6 +125,7 @@ impl Default for BlockWeights {
 #[derive(Clone, Debug)]
 pub struct Ema4Weights {
     pub vocabulary: usize,
+    pub matrix_seed: u64,
     /// Tied input/output embedding [vocabulary, 48].
     pub embedding: Vec<f32>,
     pub blocks: [BlockWeights; LAYERS],
@@ -97,18 +135,33 @@ pub struct Ema4Weights {
 
 impl Ema4Weights {
     pub fn deterministic(vocabulary: usize) -> Result<Self, ModelError> {
+        Self::deterministic_seeded(vocabulary, 0)
+    }
+
+    pub fn deterministic_seeded(vocabulary: usize, seed: u64) -> Result<Self, ModelError> {
         if vocabulary == 0 || vocabulary > 4096 {
             return Err(ModelError::Invalid("vocabulary must be 1..=4096".into()));
         }
-        Ok(Self {
+        let mut result = Self {
             vocabulary,
+            matrix_seed: seed,
             embedding: (0..vocabulary * WIDTH)
                 .map(|i| ((i * 19 + 7) % 37) as f32 * 0.0011 - 0.020)
                 .collect(),
             blocks: std::array::from_fn(|_| BlockWeights::default()),
             final_gamma: [1.; WIDTH],
             final_beta: [0.; WIDTH],
-        })
+        };
+        if seed != 0 {
+            for (layer, block) in result.blocks.iter_mut().enumerate() {
+                for (row, values) in block.operator.weight.iter_mut().enumerate() {
+                    for (col, value) in values.iter_mut().enumerate() {
+                        *value = matrix_sample(seed, layer, 0, row * WIDTH + col);
+                    }
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub const fn parameter_count(vocabulary: usize) -> usize {
@@ -140,6 +193,14 @@ impl Ema4Weights {
         &self,
         mode: MatrixMode,
     ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
+        self.trainable_parameters_with_init(mode, RoleInit::Matched)
+    }
+
+    pub fn trainable_parameters_with_init(
+        &self,
+        mode: MatrixMode,
+        role_init: RoleInit,
+    ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
         let fixed = [
             "ones_column",
             "inv_width",
@@ -154,7 +215,7 @@ impl Ema4Weights {
             "minus_up",
         ];
         let parameters = self
-            .bindings_for(0, mode)?
+            .bindings_with_init(0, mode, role_init)?
             .into_iter()
             .filter(|(name, _)| {
                 name != "token"
@@ -182,6 +243,15 @@ impl Ema4Weights {
         &self,
         token: usize,
         mode: MatrixMode,
+    ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
+        self.bindings_with_init(token, mode, RoleInit::Matched)
+    }
+
+    pub fn bindings_with_init(
+        &self,
+        token: usize,
+        mode: MatrixMode,
+        role_init: RoleInit,
     ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
         if token >= self.vocabulary || self.embedding.len() != self.vocabulary * WIDTH {
             return Err(ModelError::Invalid(
@@ -256,7 +326,18 @@ impl Ema4Weights {
                     &mut result,
                     &name,
                     vec![WIDTH, WIDTH],
-                    b.operator.weight.iter().flatten().copied().collect(),
+                    if mode == MatrixMode::Independent && role_init == RoleInit::Diverse {
+                        (0..WIDTH * WIDTH)
+                            .map(|index| matrix_sample(
+                                self.matrix_seed ^ 0x544f52555331364d,
+                                layer,
+                                role_weight,
+                                index,
+                            ))
+                            .collect()
+                    } else {
+                        b.operator.weight.iter().flatten().copied().collect()
+                    },
                 )?;
             }
             for role in 0..ROLES {
