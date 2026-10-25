@@ -2361,6 +2361,9 @@ impl GpuExecution {
         runtime_domains: bool,
     ) -> Result<Vec<(u64, u64, usize)>, GpuError> {
         let mut destinations = BTreeSet::new();
+        let output_lookup = self.output_addresses.iter()
+            .map(|(id, _, address)| (id.index(), *address))
+            .collect::<BTreeMap<_, _>>();
         let mut copies = Vec::with_capacity(links.len());
         for &(state, next) in links {
             let old = self.program.graph.node(state)?;
@@ -2397,15 +2400,10 @@ impl GpuExecution {
                     node: state.index(),
                     reason: "feedback destination is not a live source",
                 })?;
-            let src = self
-                .output_addresses
-                .iter()
-                .find(|(node, _, _)| *node == next)
-                .map(|(_, _, address)| *address)
-                .ok_or(GpuError::InvalidInput {
-                    node: next.index(),
-                    reason: "feedback source is not a selected output",
-                })?;
+            let &src = output_lookup.get(&next.index()).ok_or(GpuError::InvalidInput {
+                node: next.index(),
+                reason: "feedback source is not a selected output",
+            })?;
             copies.push((dest, src, old.shape.element_count()));
         }
         // Feedback is a parallel, simultaneous assignment. Reject duplicate
@@ -2486,6 +2484,9 @@ impl GpuExecution {
                     .iter()
                     .map(|(_, _, _, shape)| shape.element_count())
                     .sum();
+                let output_lookup = self.output_addresses.iter()
+                    .map(|(id, _, address)| (id.index(), *address))
+                    .collect::<BTreeMap<_, _>>();
                 let sources = pending
                     .iter()
                     .map(|&(state, next, required, ref shape)| {
@@ -2495,12 +2496,7 @@ impl GpuExecution {
                                 reason: "runtime feedback domain check requires F32",
                             });
                         }
-                        let address = self
-                            .output_addresses
-                            .iter()
-                            .find(|(node, _, _)| *node == next)
-                            .expect("feedback plan already validated source")
-                            .2;
+                        let address = output_lookup[&next.index()];
                         Ok((
                             address,
                             shape.element_count(),
