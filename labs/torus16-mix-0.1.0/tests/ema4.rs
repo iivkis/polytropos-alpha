@@ -202,9 +202,11 @@ fn torus_role_matrix_gradients_sum_to_shared_gradient() {
         let model = architecture_model_for(vocab, mode).unwrap();
         let logits = model.output("logits").unwrap();
         let names = if mode == MatrixMode::TorusShared {
-            vec!["weight_0".to_string()]
+            (0..LAYERS).map(|layer| format!("weight_{layer}")).collect::<Vec<_>>()
         } else {
-            (0..8).map(|role| format!("weight_0_{role}")).collect()
+            (0..LAYERS)
+                .flat_map(|layer| (0..8).map(move |role| format!("weight_{layer}_{role}")))
+                .collect::<Vec<_>>()
         };
         let sources = names.iter().map(|name| model.source(name).unwrap().0).collect::<Vec<_>>();
         let reverse = verineural::differentiate(model.graph(), logits, &sources).unwrap();
@@ -229,18 +231,22 @@ fn torus_role_matrix_gradients_sum_to_shared_gradient() {
             .map(|(_, tensor)| tensor.values().to_vec()).collect()
     };
     // Running sequentially limits peak GPU memory usage.
-    let shared = gradients_for(MatrixMode::TorusShared).remove(0);
+    let shared = gradients_for(MatrixMode::TorusShared);
     let independent = gradients_for(MatrixMode::Independent);
-    assert_eq!(independent.len(), 8);
-    for (lane, &expected) in shared.iter().enumerate() {
-        let actual: f32 = independent.iter().map(|gradient| gradient[lane]).sum();
-        // GPU order of accumulation differs after weight tying. This is a
-        // numerical VJP sanity check, not an IEEE bitwise equivalence proof.
-        assert!(
-            actual.is_finite() && expected.is_finite()
-                && (actual - expected).abs() <= 1e-4 + 0.02 * expected.abs(),
-            "gradient lane={lane}: shared={expected}, sum={actual}"
-        );
+    assert_eq!(shared.len(), LAYERS);
+    assert_eq!(independent.len(), LAYERS * 8);
+    for layer in 0..LAYERS {
+        for (lane, &expected) in shared[layer].iter().enumerate() {
+            let actual: f32 = independent[layer * 8..(layer + 1) * 8]
+                .iter().map(|gradient| gradient[lane]).sum();
+            // Different GPU reduction orders permit a bounded FP32 error;
+            // this does not claim bitwise equivalence or formal proof.
+            assert!(
+                actual.is_finite() && expected.is_finite()
+                    && (actual - expected).abs() <= 1e-4 + 0.02 * expected.abs(),
+                "layer={layer} lane={lane}: shared={expected}, sum={actual}"
+            );
+        }
     }
 }
 

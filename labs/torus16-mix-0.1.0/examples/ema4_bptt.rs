@@ -71,7 +71,8 @@ fn holdout_bpc(
     mode: MatrixMode,
     role_init: RoleInit,
     corpus: &CharCorpus,
-    val_limit: usize,
+    start: usize,
+    count: usize,
 ) -> Result<(f64, usize), Box<dyn Error>> {
     let mut bindings = weights.bindings_with_init(0, mode, role_init)?;
     for (name, tensor) in &mut bindings {
@@ -80,10 +81,12 @@ fn holdout_bpc(
         }
     }
     let dir = std::env::temp_dir().join(format!("vn_ema4_holdout_{}", std::process::id()));
+    if count == 0 || start.checked_add(count).is_none_or(|end| end >= corpus.validation.len()) {
+        return Err("holdout interval outside validation corpus".into());
+    }
     let mut execution = engine.prepare_model(model, bindings, &dir)?;
-    let count = val_limit.min(corpus.validation.len() - 1);
     let mut ce = 0f64;
-    for t in 0..count {
+    for t in start..start + count {
         execution.set_input("token", &onehot(corpus.validation[t], corpus.alphabet.len())?)?;
         execution.step()?;
         let logits = execution.output("logits")?;
@@ -104,6 +107,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let window_len = option_usize("TORUS16_BPTT", 2, 2, 8)?;
     let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 1_000_000)?;
     let val_limit = option_usize("TORUS16_VAL_LIMIT", 64, 2, 100000)?;
+    let test_limit = option_usize("TORUS16_TEST_LIMIT", 64, 2, 100000)?;
+    if val_limit.checked_add(test_limit).and_then(|sum| sum.checked_add(2))
+        .is_none_or(|needed| needed > corpus.validation.len())
+    {
+        return Err("validation and test subsets must be disjoint and fit in the held-out corpus".into());
+    }
     let mode_name = std::env::var("TORUS16_MATRIX_MODE")
         .unwrap_or_else(|_| "torus_shared".into());
     let matrix_mode = MatrixMode::parse(&mode_name)
@@ -145,27 +154,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let weights = Ema4Weights::deterministic_seeded(vocab, matrix_seed)?;
     let model = architecture_model_for(vocab, matrix_mode)?;
     let initial_bindings = weights.bindings_with_init(0, matrix_mode, role_init)?;
-    let model_fingerprint = architecture_fingerprint(
-        &model, matrix_seed, role_init.as_str(), &initial_bindings,
-    );
     let trainable_initial = weights.trainable_parameters_with_init(matrix_mode, role_init)?;
     let parameter_count: usize = trainable_initial.values().map(|v| v.values().len()).sum();
-    println!(
-        "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} eval_every={}",
-        matrix_mode.as_str(),
-        role_init.as_str(),
-        matrix_seed,
-        model_fingerprint,
-        matrix_mode.as_str(),
-        matrix_mode.matrix_count(),
-        matrix_mode.matrix_count() * torus16_mix_lab::WIDTH * torus16_mix_lab::WIDTH,
-        parameter_count,
-        corpus_hash,
-        window_len,
-        train_windows,
-        val_limit,
-        eval_every
-    );
     let window = unroll_model(&model, "logits", window_len)?;
     let named_parameter = window.parameters();
     let names = trainable_initial.keys().cloned().collect::<Vec<_>>();
@@ -251,25 +241,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("missing initial recurrent state: {name}"))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let (mut params, states, mut optimizer, first_window, mut best_validation) = if !fresh && checkpoint_path.exists() {
-        let ckpt = Ema4Checkpoint::read(&checkpoint_path)?;
-        ckpt.validate(
-            window_len,
-            vocab,
-            corpus_hash,
-            model_fingerprint,
-            train_windows,
-            &trainable_initial,
-            &expected_states,
-        )?;
-        let opt = AdamW::from_checkpoint(ckpt.optimizer, &ckpt.parameters)?;
-        println!(
-            "checkpoint_resumed={} completed_windows={}",
-            checkpoint_path.display(),
-            ckpt.completed_windows
-        );
-        (ckpt.parameters, ckpt.states, opt, ckpt.completed_windows, ckpt.best_validation_bpc)
+    // Construct the *actual* training graph first, then validate its
+    // full fingerprint against the checkpoint before any GPU replay.
+    let pending_checkpoint = if !fresh && checkpoint_path.exists() {
+        Some(Ema4Checkpoint::read(&checkpoint_path)?)
     } else {
+        None
+    };
+    let (mut params, states, mut optimizer, first_window, mut best_validation) =
+        if let Some(ckpt) = pending_checkpoint.as_ref() {
+            let opt = AdamW::from_checkpoint(ckpt.optimizer.clone(), &ckpt.parameters)?;
+            (
+                ckpt.parameters.clone(), ckpt.states.clone(), opt,
+                ckpt.completed_windows, ckpt.best_validation_bpc,
+            )
+        } else {
         (
             trainable_initial,
             expected_states,
@@ -296,6 +282,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
+    // Full unrolled BPTT, CE cotangents, reverse AD and optimizer IR are
+    // checked for compatibility, as are the named source bindings, initial
+    // values and the complete held-out evaluation protocol.
+    let model_fingerprint = architecture_fingerprint(
+        &model, &execution_graph, matrix_seed, role_init.as_str(),
+        &initial_bindings, val_limit, test_limit, eval_every,
+        if gpu_optimizer.is_some() { "GPU_IR_ADAMW_V1" } else { "HOST_ADAMW_V1" },
+    );
+    if let Some(ckpt) = pending_checkpoint.as_ref() {
+        ckpt.validate(
+            window_len, vocab, corpus_hash, model_fingerprint,
+            val_limit, test_limit, eval_every, train_windows,
+            &trainable_initial, &expected_states,
+        )?;
+        println!(
+            "checkpoint_resumed={} completed_windows={}",
+            checkpoint_path.display(), ckpt.completed_windows,
+        );
+    }
+    println!(
+        "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
+        matrix_mode.as_str(),
+        role_init.as_str(),
+        matrix_seed,
+        model_fingerprint,
+        matrix_mode.matrix_count(),
+        matrix_mode.matrix_count() * torus16_mix_lab::WIDTH * torus16_mix_lab::WIDTH,
+        parameter_count,
+        corpus_hash,
+        window_len,
+        train_windows,
+        val_limit,
+        test_limit,
+        eval_every
+    );
+
     if let Some(plan) = &gpu_optimizer {
         selected.extend(plan.outputs());
     }
@@ -445,6 +467,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         (None, None)
     };
     let mut gpu = engine.prepare(&program, &supplied, &artifact)?;
+    if fresh {
+        let stale_best = checkpoint_path.with_extension("best.ckpt");
+        if stale_best.exists() {
+            fs::remove_file(stale_best)?;
+        }
+    }
     if let Some(reference) = baseline_outputs {
         let updates = verify_updates
             .as_ref()
@@ -529,6 +557,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut feedback_checked_values = 0usize;
     let mut feedback_copied_values = 0usize;
     let mut validation_total_seconds = 0.0f64;
+    // Test-only probe of the first *training* BPTT replay. The inputs and
+    // cotangents are identical between independently and jointly tied W.
+    let initial_probe_path = std::env::var_os("TORUS16_INITIAL_PROBE_PATH").map(PathBuf::from);
     // Training-only learning curve over fixed consecutive windows. The
     // held-out BPC below is the generalization metric, not this moving mean.
     let mut curve_bpc_sum = 0.0f64;
@@ -574,6 +605,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             train_output_count
         };
         let outputs = gpu.read_outputs_selected(&selected[..read_count])?;
+        if iteration == 0 {
+            if let Some(path) = &initial_probe_path {
+                let states_snapshot = gpu.read_outputs_selected(&terminal_outputs)?;
+                let mut bytes = Vec::new();
+                for (_, tensor) in outputs.iter().take(window_len).chain(states_snapshot.iter()) {
+                    for &value in tensor.values() {
+                        bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+                    }
+                }
+                fs::write(path, &bytes)?;
+                println!("initial_training_probe_bytes={} matrix_mode={}", bytes.len(), matrix_mode.as_str());
+            }
+        }
         let read_outputs_ms = timing.elapsed().as_secs_f64() * 1000.;
         let timing = Instant::now();
         let mut total = 0f32;
@@ -668,7 +712,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let validation = if eval_due {
                 let validation_started = Instant::now();
                 let (bpc, count) = holdout_bpc(
-                    &engine, &model, &weights, &params, matrix_mode, role_init, &corpus, val_limit,
+                    &engine, &model, &weights, &params, matrix_mode, role_init, &corpus, 0, val_limit,
                 )?;
                 let validation_elapsed = validation_started.elapsed().as_secs_f64();
                 validation_total_seconds += validation_elapsed;
@@ -694,6 +738,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 vocab,
                 corpus_fingerprint: corpus_hash,
                 architecture_fingerprint: model_fingerprint,
+                validation_limit: val_limit,
+                test_limit,
+                validation_every: eval_every,
                 best_validation_bpc: best_validation,
                 parameters: params.clone(),
                 states,
@@ -808,7 +855,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // when a finished run is reopened without further training.
     let validation_start = Instant::now();
     let (bpc, count) = holdout_bpc(
-        &engine, &model, &weights, &params, matrix_mode, role_init, &corpus, val_limit,
+        &engine, &model, &weights, &params, matrix_mode, role_init, &corpus, 0, val_limit,
     )?;
     println!(
         "holdout_reset_streaming_bpc={bpc:.6} matrix_mode={} role_init={} matrix_seed={} scored_characters={count} validation_split=last_10pct eval_prepare_plus_stream_seconds={:.5} best_validation_bpc={:.6}",
@@ -817,6 +864,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         matrix_seed,
         validation_start.elapsed().as_secs_f64(),
         best_validation.unwrap_or(bpc as f32),
+    );
+    // Only the checkpoint selected by validation is evaluated on test.
+    // No training, early stopping or best-checkpoint choice sees test data.
+    let best_path = checkpoint_path.with_extension("best.ckpt");
+    let best_snapshot = Ema4Checkpoint::read(&best_path)?;
+    best_snapshot.validate(
+        window_len, vocab, corpus_hash, model_fingerprint,
+        val_limit, test_limit, eval_every, train_windows,
+        &trainable_initial, &expected_states,
+    )?;
+    let test_start = corpus.validation.len() - test_limit - 1;
+    let (test_bpc, test_count) = holdout_bpc(
+        &engine, &model, &weights, &best_snapshot.parameters, matrix_mode, role_init,
+        &corpus, test_start, test_limit,
+    )?;
+    println!(
+        "test_reset_streaming_bpc={test_bpc:.6} matrix_mode={} role_init={} matrix_seed={} scored_characters={test_count} test_split=validation_suffix_no_model_selection selection=best_validation_checkpoint checkpoint={}",
+        matrix_mode.as_str(), role_init.as_str(), matrix_seed, best_path.display(),
     );
     println!(
         "NOTE: GPU approximate-exp softmax CE seed + VJP, host CE metric; GPU AdamW experimental when opted in; no formal FP32 gradient/optimizer proof."
