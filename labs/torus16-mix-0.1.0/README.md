@@ -584,3 +584,21 @@ not general performance guarantees. Keep `TORUS16_GPU_ADAMW` unset for
 production-length EMA4 training; it is an experimental comparison mode.
 A structural negative broadcast test was updated for the expanded scalar
 CUDA profile. The revised sources still need a test rerun.
+
+### Experimental four-operation pointwise fusion (hardware verification pending)
+
+The generic compiler now supports exclusive four-stage
+`Mul→Mul→Add→Div` chains with a repeated first multiplicand, four
+external inputs and separate explicit FP32 RNE operations. This matches
+one subgraph of the GPU AdamW second-moment update without embedding
+optimizer logic in the kernel generator. The opt-in pointwise fusion
+removes up to three kernel launches per eligible chain; actual matches
+are reported as `four_op_fusions` in the `cuda_graph_before` log.
+`task verify-gpu-four-op-fusion` covers all eight operand-order/reuse
+cases, selected/shared intermediate rejection, memory/translation plan
+and NVIDIA fused/unfused FP32 bit parity. The existing
+`task verify-gpu-adamw` validates optimizer checkpoint integration.
+Only a fresh `task benchmark-gpu-adamw` can establish throughput;
+the previous GPU AdamW measured 61.17 tokens/s against CPU AdamW at
+132.83 tokens/s, so the CPU remains the default. No performance or
+hardware result is claimed for this new rule before that run.

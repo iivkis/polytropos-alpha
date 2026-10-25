@@ -34,6 +34,12 @@ pub enum TranslationKind {
     SqrtAddDiv {
         sqrt_on_right: bool,
     },
+    /// Mul(Mul(a,b),a|b) then Add then Div, four explicit RNE operations.
+    MulMulAddDiv {
+        reused_source: u8,
+        multiply_on_right: bool,
+        add_on_right: bool,
+    },
     MulAddMul {
         add_mul_on_right: bool,
         mul_add_on_right: bool,
@@ -101,6 +107,7 @@ impl TranslationKind {
             Self::MulAdd { .. } => "mul_add",
             Self::BinaryChain { .. } => "binary_chain",
             Self::SqrtAddDiv { .. } => "sqrt_add_div",
+            Self::MulMulAddDiv { .. } => "mul_mul_add_div",
             Self::MulAddMul { .. } => "mul_add_mul",
             Self::Sub => "sub_rn",
             Self::DivRne => "div_rn",
@@ -139,6 +146,7 @@ impl TranslationKind {
                 (adds, 2 - adds, 0)
             }
             Self::MulAddMul { .. } => (1, 2, 0),
+            Self::MulMulAddDiv { .. } => (1, 2, 0),
             Self::SqrtAddDiv { .. } => (1, 0, 0),
             Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
@@ -176,6 +184,7 @@ impl TranslationKind {
             | Self::MulAddMul { .. }
             | Self::BinaryChain { .. }
             | Self::SqrtAddDiv { .. } => 3,
+            Self::MulMulAddDiv { .. } => 4,
             _ => 2,
         }
     }
@@ -216,6 +225,15 @@ impl TranslationKind {
                     + 4 * usize::from(producer_on_right)
             }
             Self::SqrtAddDiv { sqrt_on_right } => usize::from(sqrt_on_right),
+            Self::MulMulAddDiv {
+                reused_source,
+                multiply_on_right,
+                add_on_right,
+            } => {
+                usize::from(reused_source)
+                    + 2 * usize::from(multiply_on_right)
+                    + 4 * usize::from(add_on_right)
+            },
             Self::MulAddMul {
                 add_mul_on_right,
                 mul_add_on_right,
@@ -243,6 +261,11 @@ impl TranslationKind {
             },
             "sqrt_add_div" if inner < 2 => Self::SqrtAddDiv {
                 sqrt_on_right: inner == 1,
+            },
+            "mul_mul_add_div" if inner < 8 => Self::MulMulAddDiv {
+                reused_source: (inner & 1) as u8,
+                multiply_on_right: inner & 2 != 0,
+                add_on_right: inner & 4 != 0,
             },
             "mul_add_mul" if inner < 12 => Self::MulAddMul {
                 add_mul_on_right: inner & 1 != 0,
@@ -396,9 +419,15 @@ impl TranslationPlan {
                     | TranslationKind::MulAddMul { .. }
                     | TranslationKind::BinaryChain { .. }
                     | TranslationKind::SqrtAddDiv { .. }
+                    | TranslationKind::MulMulAddDiv { .. }
             ) {
                 if kernel.reads.iter().any(|&(_, size)| size != kernel.writes) {
                     return Err(invalid("mul-add source shape mismatch"));
+                }
+                if let TranslationKind::MulMulAddDiv { reused_source, .. } = kernel.kind {
+                    if reused_source > 1 {
+                        return Err(invalid("MulMulAddDiv source selector must be 0..=1"));
+                    }
                 }
                 if let TranslationKind::MulAddMul { reused_source, .. } = kernel.kind {
                     if reused_source > 2 {
@@ -745,6 +774,89 @@ impl TranslationPlan {
                 report.details.push_str(&format!(
                     "node={node} kind={} reads={reads} writes={} add.rn.f32=0 mul.rn.f32=0 relu=0 status=structural-pass\n",
                     kernel.kind.name(), kernel.writes
+                ));
+                continue;
+            }
+            if let TranslationKind::MulMulAddDiv {
+                reused_source,
+                multiply_on_right,
+                add_on_right,
+            } = kernel.kind
+            {
+                if reused_source > 1 {
+                    return Err(invalid("invalid MulMulAddDiv source selector"));
+                }
+                let factor = if reused_source == 0 { "%x" } else { "%y" };
+                let second_args = if multiply_on_right {
+                    format!("(float {factor}, float %first)")
+                } else {
+                    format!("(float %first, float {factor})")
+                };
+                let add_args = if add_on_right {
+                    "(float %z, float %second)"
+                } else {
+                    "(float %second, float %z)"
+                };
+                let first = "%first = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)";
+                let second = format!(
+                    "%second = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"{second_args}"
+                );
+                let third = format!(
+                    "%third = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"{add_args}"
+                );
+                let fourth = "%value = call float asm sideeffect \"div.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %third, float %w)";
+                let required = [
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx",
+                    "%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx",
+                    "%cp = getelementptr float, ptr addrspace(1) %c, i32 %idx",
+                    "%dp = getelementptr float, ptr addrspace(1) %d, i32 %idx",
+                    "%x = load float, ptr addrspace(1) %ap, align 4",
+                    "%y = load float, ptr addrspace(1) %bp, align 4",
+                    "%z = load float, ptr addrspace(1) %cp, align 4",
+                    "%w = load float, ptr addrspace(1) %dp, align 4",
+                    "icmp ult i32 %idx, %length",
+                    "br i1 %valid, label %compute, label %done",
+                    "store float %value, ptr addrspace(1) %op, align 4",
+                ];
+                if required.iter().any(|&x| !ir.contains(x))
+                    || !matches!(
+                        (ir.find(first), ir.find(&second), ir.find(&third), ir.find(fourth)),
+                        (Some(a), Some(b), Some(c), Some(d)) if a < b && b < c && c < d
+                    )
+                    || ir.matches("call float asm sideeffect").count() != 4
+                    || ir.contains("fcmp ")
+                {
+                    return Err(invalid(format!(
+                        "MulMulAddDiv LLVM template mismatch at node {node}"
+                    )));
+                }
+                audit_fp32_ptx(ir, asm)
+                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                let sequence = asm
+                    .lines()
+                    .map(|line| line.split("//").next().unwrap_or(""))
+                    .filter_map(|line| {
+                        if line.contains("mul.rn.f32") {
+                            Some("mul")
+                        } else if line.contains("add.rn.f32") {
+                            Some("add")
+                        } else if line.contains("div.rn.f32") {
+                            Some("div")
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if sequence != ["mul", "mul", "add", "div"] {
+                    return Err(invalid(format!(
+                        "MulMulAddDiv PTX instruction order mismatch at node {node}"
+                    )));
+                }
+                report.rounded_muls += 2;
+                report.rounded_adds += 1;
+                report.details.push_str(&format!(
+                    "node={node} kind=mul_mul_add_div reads={:?} writes={} FP32=mul-mul-add-div.rn hardware=trusted\n",
+                    kernel.reads, kernel.writes
                 ));
                 continue;
             }
@@ -1235,6 +1347,7 @@ impl TranslationPlan {
                 // Keep this match exhaustive without weakening validation.
                 | TranslationKind::BinaryChain { .. }
                 | TranslationKind::SqrtAddDiv { .. }
+                | TranslationKind::MulMulAddDiv { .. }
                 | TranslationKind::MulAdd { .. }
                 | TranslationKind::MulAddMul { .. } => None,
             };

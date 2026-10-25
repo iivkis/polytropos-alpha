@@ -758,6 +758,49 @@ mod platform {
             })
         }
 
+        /// Four-source kernel capture. The sole launch is performed on the
+        /// session-owned CU_STREAM_NON_BLOCKING while a CUDA Graph is captured.
+        pub fn launch4(
+            &self,
+            name: &str,
+            sources: [DevicePtr; 4],
+            output: DevicePtr,
+            length: usize,
+            threads: u32,
+        ) -> Result<(), GpuError> {
+            if !self.capturing {
+                return Err(GpuError::Driver(
+                    "direct kernel launch is forbidden; capture a CUDA Graph".into(),
+                ));
+            }
+            let function = *self.kernels.get(name).ok_or_else(|| {
+                GpuError::Driver(
+                    "kernel function must be resolved before CUDA Graph capture".into(),
+                )
+            })?;
+            let count = i32::try_from(length)
+                .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
+            let grid = u32::try_from(length.div_ceil(threads as usize))
+                .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
+            let [mut a, mut b, mut c, mut d] = sources;
+            let mut dst = output;
+            let mut n = count;
+            let mut args = [
+                (&mut a as *mut DevicePtr).cast::<c_void>(),
+                (&mut b as *mut DevicePtr).cast::<c_void>(),
+                (&mut c as *mut DevicePtr).cast::<c_void>(),
+                (&mut d as *mut DevicePtr).cast::<c_void>(),
+                (&mut dst as *mut DevicePtr).cast::<c_void>(),
+                (&mut n as *mut i32).cast::<c_void>(),
+            ];
+            check("cuLaunchKernel", unsafe {
+                (self.functions.launch)(
+                    function, grid, 1, 1, threads, 1, 1, 0, self.stream,
+                    args.as_mut_ptr(), ptr::null_mut(),
+                )
+            })
+        }
+
         pub fn synchronize(&self) -> Result<(), GpuError> {
             let _context = self.enter_context()?;
             // SAFETY: stream belongs to this CUDA context; never synchronize legacy.
@@ -933,6 +976,19 @@ mod platform {
             &self,
             _: &str,
             _: [u64; 3],
+            _: u64,
+            _: usize,
+            _: u32,
+        ) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn launch4(
+            &self,
+            _: &str,
+            _: [u64; 4],
             _: u64,
             _: usize,
             _: u32,

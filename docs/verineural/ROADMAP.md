@@ -609,3 +609,34 @@ scheduling speedup is a separate benchmark, not single-sequence EMA4 speedup.
 pointwise fusion or true shared-parameter minibatch training must improve
 wall-clock training throughput; a lower kernel count alone is insufficient.
 Preserve FP32 order/rounding, memory contracts and hardware parity tests.
+
+### Bounded four-op pointwise fusion, four-source CUDA Graph lowering (code, hardware pending)
+
+The opt-in architecture-neutral compiler now recognizes the exclusive
+shape-preserving subgraph `Div(Add(Mul(Mul(a,b), a|b), c), d)`.
+It emits a single four-source CUDA Graph kernel with four separate
+`mul.rn.f32`, `mul.rn.f32`, `add.rn.f32`, `div.rn.f32` instructions.
+The repeated first multiplicand is reused in registers, and both operand
+order selectors are represented explicitly in a versioned
+`TranslationKind::MulMulAddDiv`. Each intermediate must have exactly
+one reachable use, be unselected, and have the exact root shape. Shared
+or observable intermediates fail to fuse. The capability report records all
+three removed kernels, the memory contract bounds all four full-shape
+sources, and the LLVM/PTX translation validator checks operand binding
+and rounded instruction sequence. The CUDA runtime `launch4` captures
+the kernel on the existing owned non-blocking stream, never the default
+stream and never outside CUDA Graph capture.
+
+This general pattern occurs in the second-moment update and bias
+correction of the optional GPU AdamW, without introducing a specialized
+optimizer kernel. Structural and independent NVIDIA bitwise comparisons
+over all eight operand-order combinations are in
+`task verify-gpu-four-op-fusion`; `task verify-gpu-adamw` checks optimizer
+integration and restart. The end-to-end gate is
+`task benchmark-gpu-adamw` using the same 256-window fixture as before.
+The existing CPU baseline measured 132.83 tokens/s while the previous
+GPU implementation reached 61.17 tokens/s. A smaller post-fusion kernel
+count is not proof of faster execution; do not select GPU mode by default
+unless measured sustained throughput improves. Full arbitrary-size
+pointwise region fusion, source-sharing across arbitrary fanout, and
+formal IEEE/SASS equivalence remain unsupported.

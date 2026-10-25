@@ -571,6 +571,13 @@ tasks:
         echo "PASS: uninterrupted and checkpoint-resumed training match per-window CE/BPC and optimizer steps"
         echo "PASS: final EMA4 checkpoints are bit-identical, including 271 parameter tensors, recurrent states and AdamW"
 
+  verify-gpu-four-op-fusion:
+    desc: Structural and NVIDIA bitwise acceptance for generic rounded four-operation pointwise fusion
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test mul_mul_add_div_fusion
+      - cargo test -p verineural --test mul_mul_add_div_fusion -- --ignored --nocapture
+
   verify-gpu-sqrt-add-div-fusion:
     desc: Structural and NVIDIA bitwise acceptance for generic 3-operation rounded Sqrt/Add/Div fusion
     deps: [prepare]

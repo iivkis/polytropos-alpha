@@ -60,6 +60,9 @@ fn optimizer_is_a_generic_ir_extension_and_excludes_other_sources() {
     // Universal Sqrt→Add→Div fusion is exercised by AdamW's v_hat
     // denominator, without an optimizer-specific compiler path.
     assert_eq!(program.fused_sqrt_add_divs().len(), 1);
+    // Four-op fusion applies to AdamW's repeated gradient product
+    // before bias correction, without a model- or optimizer-specific rule.
+    assert_eq!(program.fused_mul_mul_add_divs().len(), 1);
     // Scalar inputs and two moment buffers are pure graph sources. They
     // do not appear in the list of optimizer-decayed parameters.
     assert_eq!(plan.bindings().len(), 11);
