@@ -24,21 +24,35 @@ fn independent_public_outputs_share_one_kernel_without_losing_observability() {
     let optimized = base
         .clone()
         .with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
-    assert_eq!(base.compile_outputs(&graph, &[left, right]).unwrap().kernel_count().unwrap(), 2);
+    assert_eq!(
+        base.compile_outputs(&graph, &[left, right])
+            .unwrap()
+            .kernel_count()
+            .unwrap(),
+        2
+    );
     for outputs in [[left, right], [right, left]] {
         let fused = optimized.compile_outputs(&graph, &outputs).unwrap();
         assert_eq!(fused.outputs(), &outputs);
         assert_eq!(fused.kernel_count().unwrap(), 1);
-        assert_eq!(fused.fused_dual_outputs().get(&right.index()), Some(&left.index()));
+        assert_eq!(
+            fused.fused_dual_outputs().get(&right.index()),
+            Some(&left.index())
+        );
         let contracts = fused.memory_contracts().unwrap();
         assert_eq!(contracts.len(), 1);
         assert_eq!(contracts[0].reads.len(), 4);
         assert_eq!(contracts[0].writes, 8);
         assert_eq!(contracts[0].additional_writes, vec![(left.index(), 8)]);
         let plan = fused.translation_plan().unwrap();
-        assert_eq!(plan.kernels[0].kind, TranslationKind::DualPointwise {
-            earlier: left.index(), first_mul: false, second_mul: true,
-        });
+        assert_eq!(
+            plan.kernels[0].kind,
+            TranslationKind::DualPointwise {
+                earlier: left.index(),
+                first_mul: false,
+                second_mul: true,
+            }
+        );
         assert_eq!(plan, TranslationPlan::from_text(&plan.to_text()).unwrap());
         assert_eq!(fused.capability_plan().unwrap().optimizations.len(), 1);
         assert_eq!(fused.llvm_ir().matches("store float %first").count(), 1);
@@ -51,8 +65,8 @@ fn independent_public_outputs_share_one_kernel_without_losing_observability() {
 fn dependent_or_differently_shaped_outputs_are_not_paired() {
     let (mut graph, [_, _, c, _], [left, right]) = fixture();
     let dependent = graph.mul(left, c).unwrap();
-    let opt = GpuEngine::default()
-        .with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
+    let opt =
+        GpuEngine::default().with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
     let plan = opt.compile_outputs(&graph, &[left, dependent]).unwrap();
     assert_eq!(plan.kernel_count().unwrap(), 2);
     assert!(plan.fused_dual_outputs().is_empty());
@@ -99,7 +113,9 @@ fn gpu_dual_outputs_match_independent_unfused_kernels() {
         plain.replay().unwrap();
         fused.replay().unwrap();
         for ((want_id, expected), (got_id, actual)) in plain
-            .read_outputs_selected(&[right, left]).unwrap().iter()
+            .read_outputs_selected(&[right, left])
+            .unwrap()
+            .iter()
             .zip(fused.read_outputs_selected(&[right, left]).unwrap().iter())
         {
             assert_eq!(want_id, got_id);
@@ -111,5 +127,10 @@ fn gpu_dual_outputs_match_independent_unfused_kernels() {
     let ptx = std::fs::read_to_string(optimized.lower(&b, &dir.join("audit")).unwrap()).unwrap();
     let invalid = ptx.replacen("mul.rn.f32", "mul.f32", 1);
     assert_ne!(invalid, ptx);
-    assert!(b.translation_plan().unwrap().validate(b.llvm_ir(), &invalid).is_err());
+    assert!(
+        b.translation_plan()
+            .unwrap()
+            .validate(b.llvm_ir(), &invalid)
+            .is_err()
+    );
 }

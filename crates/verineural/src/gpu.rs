@@ -706,231 +706,238 @@ impl GpuProgram {
                 continue;
             }
             let writes = node.shape.element_count();
-            let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) =
-                if let Some(&earlier) = self.fused_dual_outputs.get(&index) {
-                    let first = &self.graph.nodes()[earlier];
-                    (
-                        first.inputs.iter().chain(&node.inputs).map(|id| id.index()).collect(),
-                        GpuMemoryPattern::Pointwise,
-                    )
-                } else if let Some(&(left, first, _, _, _, _)) = self.fused_mul_diamond_adds.get(&index) {
-                    let lhs = &self.graph.nodes()[left];
-                    let rhs = &self.graph.nodes()[first];
-                    (
-                        vec![
-                            lhs.inputs[0].index(),
-                            lhs.inputs[1].index(),
-                            rhs.inputs[0].index(),
-                            rhs.inputs[1].index(),
-                        ],
-                        GpuMemoryPattern::Pointwise,
-                    )
-                } else if let Some(&(inner, _, add, _, _, add_slot)) =
-                    self.fused_mul_mul_add_divs.get(&index)
-                {
-                    let first = &self.graph.nodes()[inner];
-                    let sum = &self.graph.nodes()[add];
-                    (
-                        vec![
-                            first.inputs[0].index(),
-                            first.inputs[1].index(),
-                            sum.inputs[1 - add_slot].index(),
-                            node.inputs[1].index(),
-                        ],
-                        GpuMemoryPattern::Pointwise,
-                    )
-                } else if let Some(&(sqrt, add, slot)) = self.fused_sqrt_add_divs.get(&index) {
-                    let inner = &self.graph.nodes()[sqrt];
-                    let middle = &self.graph.nodes()[add];
-                    (
-                        vec![
-                            inner.inputs[0].index(),
-                            middle.inputs[1 - slot].index(),
-                            node.inputs[0].index(),
-                        ],
-                        GpuMemoryPattern::Pointwise,
-                    )
-                } else if let Some(&(mul, add, slot, _, _)) = self.fused_mul_add_muls.get(&index) {
-                    let inner = &self.graph.nodes()[mul];
-                    let middle = &self.graph.nodes()[add];
-                    (
-                        vec![
-                            inner.inputs[0].index(),
-                            inner.inputs[1].index(),
-                            middle.inputs[1 - slot].index(),
-                        ],
-                        GpuMemoryPattern::Pointwise,
-                    )
-                } else if let Some(&(mul, slot)) = self.fused_mul_adds.get(&index) {
-                    let producer = &self.graph.nodes()[mul];
-                    (
-                        vec![
-                            producer.inputs[0].index(),
-                            producer.inputs[1].index(),
-                            node.inputs[1 - slot].index(),
-                        ],
-                        GpuMemoryPattern::Pointwise,
-                    )
-                } else if let Some(&(producer, slot)) = self.fused_binary_pairs.get(&index) {
-                    let inner = &self.graph.nodes()[producer];
-                    (
-                        vec![
-                            inner.inputs[0].index(),
-                            inner.inputs[1].index(),
-                            node.inputs[1 - slot].index(),
-                        ],
-                        GpuMemoryPattern::Pointwise,
-                    )
-                } else if let Some(chain) = self.fused_pointwise_chains.get(&index) {
-                    let inner = &self.graph.nodes()[chain[0]];
-                    let bias = &self.graph.nodes()[chain[1]];
-                    (
-                        vec![
-                            inner.inputs[0].index(),
-                            inner.inputs[1].index(),
-                            bias.inputs[1].index(),
-                        ],
-                        GpuMemoryPattern::BiasAdd {
+            let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) = if let Some(&earlier) =
+                self.fused_dual_outputs.get(&index)
+            {
+                let first = &self.graph.nodes()[earlier];
+                (
+                    first
+                        .inputs
+                        .iter()
+                        .chain(&node.inputs)
+                        .map(|id| id.index())
+                        .collect(),
+                    GpuMemoryPattern::Pointwise,
+                )
+            } else if let Some(&(left, first, _, _, _, _)) = self.fused_mul_diamond_adds.get(&index)
+            {
+                let lhs = &self.graph.nodes()[left];
+                let rhs = &self.graph.nodes()[first];
+                (
+                    vec![
+                        lhs.inputs[0].index(),
+                        lhs.inputs[1].index(),
+                        rhs.inputs[0].index(),
+                        rhs.inputs[1].index(),
+                    ],
+                    GpuMemoryPattern::Pointwise,
+                )
+            } else if let Some(&(inner, _, add, _, _, add_slot)) =
+                self.fused_mul_mul_add_divs.get(&index)
+            {
+                let first = &self.graph.nodes()[inner];
+                let sum = &self.graph.nodes()[add];
+                (
+                    vec![
+                        first.inputs[0].index(),
+                        first.inputs[1].index(),
+                        sum.inputs[1 - add_slot].index(),
+                        node.inputs[1].index(),
+                    ],
+                    GpuMemoryPattern::Pointwise,
+                )
+            } else if let Some(&(sqrt, add, slot)) = self.fused_sqrt_add_divs.get(&index) {
+                let inner = &self.graph.nodes()[sqrt];
+                let middle = &self.graph.nodes()[add];
+                (
+                    vec![
+                        inner.inputs[0].index(),
+                        middle.inputs[1 - slot].index(),
+                        node.inputs[0].index(),
+                    ],
+                    GpuMemoryPattern::Pointwise,
+                )
+            } else if let Some(&(mul, add, slot, _, _)) = self.fused_mul_add_muls.get(&index) {
+                let inner = &self.graph.nodes()[mul];
+                let middle = &self.graph.nodes()[add];
+                (
+                    vec![
+                        inner.inputs[0].index(),
+                        inner.inputs[1].index(),
+                        middle.inputs[1 - slot].index(),
+                    ],
+                    GpuMemoryPattern::Pointwise,
+                )
+            } else if let Some(&(mul, slot)) = self.fused_mul_adds.get(&index) {
+                let producer = &self.graph.nodes()[mul];
+                (
+                    vec![
+                        producer.inputs[0].index(),
+                        producer.inputs[1].index(),
+                        node.inputs[1 - slot].index(),
+                    ],
+                    GpuMemoryPattern::Pointwise,
+                )
+            } else if let Some(&(producer, slot)) = self.fused_binary_pairs.get(&index) {
+                let inner = &self.graph.nodes()[producer];
+                (
+                    vec![
+                        inner.inputs[0].index(),
+                        inner.inputs[1].index(),
+                        node.inputs[1 - slot].index(),
+                    ],
+                    GpuMemoryPattern::Pointwise,
+                )
+            } else if let Some(chain) = self.fused_pointwise_chains.get(&index) {
+                let inner = &self.graph.nodes()[chain[0]];
+                let bias = &self.graph.nodes()[chain[1]];
+                (
+                    vec![
+                        inner.inputs[0].index(),
+                        inner.inputs[1].index(),
+                        bias.inputs[1].index(),
+                    ],
+                    GpuMemoryPattern::BiasAdd {
+                        columns: node.shape.dims()[1],
+                    },
+                )
+            } else {
+                let producer = self.fused_relus.get(&index).copied().unwrap_or(index);
+                let op_node = &self.graph.nodes()[producer];
+                let pattern = match &op_node.operation {
+                    Operation::BiasAdd => GpuMemoryPattern::BiasAdd {
+                        columns: node.shape.dims()[1],
+                    },
+                    Operation::MatMul => {
+                        let left = &self.graph.nodes()[op_node.inputs[0].index()];
+                        GpuMemoryPattern::MatMul {
+                            rows: left.shape.dims()[0],
+                            inner: left.shape.dims()[1],
                             columns: node.shape.dims()[1],
-                        },
-                    )
-                } else {
-                    let producer = self.fused_relus.get(&index).copied().unwrap_or(index);
-                    let op_node = &self.graph.nodes()[producer];
-                    let pattern = match &op_node.operation {
-                        Operation::BiasAdd => GpuMemoryPattern::BiasAdd {
-                            columns: node.shape.dims()[1],
-                        },
-                        Operation::MatMul => {
-                            let left = &self.graph.nodes()[op_node.inputs[0].index()];
-                            GpuMemoryPattern::MatMul {
-                                rows: left.shape.dims()[0],
-                                inner: left.shape.dims()[1],
-                                columns: node.shape.dims()[1],
-                            }
                         }
-                        Operation::Permute { axes } => {
-                            let input = &self.graph.nodes()[op_node.inputs[0].index()];
-                            if input.shape.rank() != 2 || axes.as_slice() != [1, 0] {
-                                return Err(GpuError::UnsupportedOperation {
-                                    node: index,
-                                    operation: op_node.operation.name(),
-                                });
-                            }
-                            GpuMemoryPattern::Transpose2D {
+                    }
+                    Operation::Permute { axes } => {
+                        let input = &self.graph.nodes()[op_node.inputs[0].index()];
+                        if input.shape.rank() != 2 || axes.as_slice() != [1, 0] {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: op_node.operation.name(),
+                            });
+                        }
+                        GpuMemoryPattern::Transpose2D {
+                            rows: input.shape.dims()[0],
+                            columns: input.shape.dims()[1],
+                        }
+                    }
+                    Operation::ReverseAxis { axis } => {
+                        let input = &self.graph.nodes()[op_node.inputs[0].index()];
+                        if input.shape.rank() != 2 {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: op_node.operation.name(),
+                            });
+                        }
+                        match axis {
+                            0 => GpuMemoryPattern::ReverseRows2D {
                                 rows: input.shape.dims()[0],
                                 columns: input.shape.dims()[1],
-                            }
-                        }
-                        Operation::ReverseAxis { axis } => {
-                            let input = &self.graph.nodes()[op_node.inputs[0].index()];
-                            if input.shape.rank() != 2 {
+                            },
+                            1 => GpuMemoryPattern::ReverseColumns2D {
+                                rows: input.shape.dims()[0],
+                                columns: input.shape.dims()[1],
+                            },
+                            _ => {
                                 return Err(GpuError::UnsupportedOperation {
                                     node: index,
                                     operation: op_node.operation.name(),
                                 });
                             }
-                            match axis {
-                                0 => GpuMemoryPattern::ReverseRows2D {
-                                    rows: input.shape.dims()[0],
-                                    columns: input.shape.dims()[1],
-                                },
-                                1 => GpuMemoryPattern::ReverseColumns2D {
-                                    rows: input.shape.dims()[0],
-                                    columns: input.shape.dims()[1],
-                                },
-                                _ => {
-                                    return Err(GpuError::UnsupportedOperation {
-                                        node: index,
-                                        operation: op_node.operation.name(),
-                                    });
-                                }
-                            }
                         }
-                        Operation::Concat { axis } => {
-                            let left = &self.graph.nodes()[op_node.inputs[0].index()];
-                            let right = &self.graph.nodes()[op_node.inputs[1].index()];
-                            if *axis != 0
-                                && !(*axis == 1
-                                    && left.shape.rank() == 2
-                                    && left.shape.dims()[0] == 1
-                                    && right.shape.dims()[0] == 1)
-                            {
-                                return Err(GpuError::UnsupportedOperation {
-                                    node: index,
-                                    operation: op_node.operation.name(),
-                                });
-                            }
-                            GpuMemoryPattern::ConcatAxis0 {
-                                left: left.shape.element_count(),
-                            }
+                    }
+                    Operation::Concat { axis } => {
+                        let left = &self.graph.nodes()[op_node.inputs[0].index()];
+                        let right = &self.graph.nodes()[op_node.inputs[1].index()];
+                        if *axis != 0
+                            && !(*axis == 1
+                                && left.shape.rank() == 2
+                                && left.shape.dims()[0] == 1
+                                && right.shape.dims()[0] == 1)
+                        {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: op_node.operation.name(),
+                            });
                         }
-                        Operation::SliceAxis {
-                            axis: 1,
-                            start,
-                            len,
-                        } => {
-                            let input = &self.graph.nodes()[op_node.inputs[0].index()];
-                            if input.shape.rank() != 2
-                                || input.shape.dims()[0] != 1
-                                || *len != writes
-                                || start
-                                    .checked_add(*len)
-                                    .is_none_or(|end| end > input.shape.dims()[1])
-                            {
-                                return Err(GpuError::UnsupportedOperation {
-                                    node: index,
-                                    operation: op_node.operation.name(),
-                                });
-                            }
-                            GpuMemoryPattern::SliceLastRow {
-                                start: *start,
-                                source_width: input.shape.dims()[1],
-                            }
+                        GpuMemoryPattern::ConcatAxis0 {
+                            left: left.shape.element_count(),
                         }
-                        Operation::BroadcastTo(_) => {
-                            let input = &self.graph.nodes()[op_node.inputs[0].index()];
-                            // Broadcasting a one-element tensor uses source
-                            // address zero for every output lane, independently
-                            // of output rank. General axis-wise broadcasting
-                            // still has no GPU lowering and must fail closed.
-                            if input.shape.element_count() != 1 {
-                                return Err(GpuError::UnsupportedOperation {
-                                    node: index,
-                                    operation: op_node.operation.name(),
-                                });
-                            }
-                            GpuMemoryPattern::BroadcastScalar
+                    }
+                    Operation::SliceAxis {
+                        axis: 1,
+                        start,
+                        len,
+                    } => {
+                        let input = &self.graph.nodes()[op_node.inputs[0].index()];
+                        if input.shape.rank() != 2
+                            || input.shape.dims()[0] != 1
+                            || *len != writes
+                            || start
+                                .checked_add(*len)
+                                .is_none_or(|end| end > input.shape.dims()[1])
+                        {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: op_node.operation.name(),
+                            });
                         }
-                        Operation::ArgMax { axis, tie_break } => {
-                            let input = &self.graph.nodes()[op_node.inputs[0].index()];
-                            if input.shape.rank() != 2
-                                || *axis != 1
-                                || !matches!(tie_break, crate::ArgMaxTieBreak::First)
-                            {
-                                return Err(GpuError::UnsupportedOperation {
-                                    node: index,
-                                    operation: op_node.operation.name(),
-                                });
-                            }
-                            GpuMemoryPattern::ArgMaxLast {
-                                width: input.shape.dims()[1],
-                            }
+                        GpuMemoryPattern::SliceLastRow {
+                            start: *start,
+                            source_width: input.shape.dims()[1],
                         }
-                        Operation::Take { axis: 0 } => {
-                            let data = &self.graph.nodes()[op_node.inputs[0].index()];
-                            GpuMemoryPattern::TakeAxis0 {
-                                lane: writes,
-                                choices: data.shape.dims()[0],
-                            }
+                    }
+                    Operation::BroadcastTo(_) => {
+                        let input = &self.graph.nodes()[op_node.inputs[0].index()];
+                        // Broadcasting a one-element tensor uses source
+                        // address zero for every output lane, independently
+                        // of output rank. General axis-wise broadcasting
+                        // still has no GPU lowering and must fail closed.
+                        if input.shape.element_count() != 1 {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: op_node.operation.name(),
+                            });
                         }
-                        _ => GpuMemoryPattern::Pointwise,
-                    };
-                    (
-                        op_node.inputs.iter().map(|id| id.index()).collect(),
-                        pattern,
-                    )
+                        GpuMemoryPattern::BroadcastScalar
+                    }
+                    Operation::ArgMax { axis, tie_break } => {
+                        let input = &self.graph.nodes()[op_node.inputs[0].index()];
+                        if input.shape.rank() != 2
+                            || *axis != 1
+                            || !matches!(tie_break, crate::ArgMaxTieBreak::First)
+                        {
+                            return Err(GpuError::UnsupportedOperation {
+                                node: index,
+                                operation: op_node.operation.name(),
+                            });
+                        }
+                        GpuMemoryPattern::ArgMaxLast {
+                            width: input.shape.dims()[1],
+                        }
+                    }
+                    Operation::Take { axis: 0 } => {
+                        let data = &self.graph.nodes()[op_node.inputs[0].index()];
+                        GpuMemoryPattern::TakeAxis0 {
+                            lane: writes,
+                            choices: data.shape.dims()[0],
+                        }
+                    }
+                    _ => GpuMemoryPattern::Pointwise,
                 };
+                (
+                    op_node.inputs.iter().map(|id| id.index()).collect(),
+                    pattern,
+                )
+            };
             let required = match pattern {
                 GpuMemoryPattern::Pointwise => vec![writes; read_nodes.len()],
                 GpuMemoryPattern::BiasAdd { columns } => {
@@ -1068,7 +1075,10 @@ impl GpuProgram {
                 kernel_node: index,
                 reads,
                 writes,
-                additional_writes: self.fused_dual_outputs.get(&index).map_or_else(Vec::new, |&earlier| vec![(earlier, writes)]),
+                additional_writes: self
+                    .fused_dual_outputs
+                    .get(&index)
+                    .map_or_else(Vec::new, |&earlier| vec![(earlier, writes)]),
                 pattern,
             });
         }
@@ -1801,7 +1811,10 @@ impl GpuProgram {
             ));
             theorems.push(output_name);
             for &(other, extent) in &contract.additional_writes {
-                let name = format!("memory_node_{}_additional_{}_output_bound", contract.kernel_node, other);
+                let name = format!(
+                    "memory_node_{}_additional_{}_output_bound",
+                    contract.kernel_node, other
+                );
                 source.push_str(&format!(
                     "theorem {name} (index : Nat) (active : index < {extent}) : index < {extent} := by\n  exact VeriNeural.pointwise_address_bound active\n\n"
                 ));
@@ -2420,7 +2433,11 @@ impl GpuExecution {
         self.execution_health.ensure_outputs_ready()?;
         let copies = self.feedback_copy_plan(links, runtime_domains)?;
         let mut profile = GpuFeedbackProfile::default();
-        profile.feedback_values = copies.iter().filter(|(dst, src, _)| dst != src).map(|(_, _, n)| n).sum();
+        profile.feedback_values = copies
+            .iter()
+            .filter(|(dst, src, _)| dst != src)
+            .map(|(_, _, n)| n)
+            .sum();
         if copies.is_empty() {
             return Ok(profile);
         }
@@ -2439,7 +2456,10 @@ impl GpuExecution {
                 .collect::<Vec<_>>();
             if !pending.is_empty() {
                 let validation_started = Instant::now();
-                profile.checked_values = pending.iter().map(|(_, _, _, shape)| shape.element_count()).sum();
+                profile.checked_values = pending
+                    .iter()
+                    .map(|(_, _, _, shape)| shape.element_count())
+                    .sum();
                 let sources = pending
                     .iter()
                     .map(|&(_, next, _, ref shape)| {
@@ -2490,7 +2510,8 @@ impl GpuExecution {
         }
         profile.feedback_d2d = feedback_started.elapsed();
         let sync_started = Instant::now();
-        self.execution_health.record_io(self.session.synchronize())?;
+        self.execution_health
+            .record_io(self.session.synchronize())?;
         profile.stream_sync = sync_started.elapsed();
         Ok(profile)
     }
@@ -3519,7 +3540,8 @@ impl GpuEngine {
         let skipped = program.skipped_nodes();
 
         for &index in &program.live_nodes {
-            if skipped.contains(&index) && !program.fused_dual_outputs.values().any(|&n| n == index) {
+            if skipped.contains(&index) && !program.fused_dual_outputs.values().any(|&n| n == index)
+            {
                 continue;
             }
             let node = &program.graph.nodes()[index];
@@ -3586,7 +3608,12 @@ impl GpuEngine {
             for &(source, elements) in &contract.reads {
                 let input_ptr = buffers[&source];
                 session.require_allocation(input_ptr, elements)?;
-                if input_ptr == output_ptr || contract.additional_writes.iter().any(|&(other, _)| input_ptr == buffers[&other]) {
+                if input_ptr == output_ptr
+                    || contract
+                        .additional_writes
+                        .iter()
+                        .any(|&(other, _)| input_ptr == buffers[&other])
+                {
                     return Err(GpuError::InvalidInput {
                         node: contract.kernel_node,
                         reason: "in-place CUDA kernel write is not supported",
@@ -3611,7 +3638,10 @@ impl GpuEngine {
                     .collect::<Vec<_>>();
                 if let Some(&(other, _)) = contract.additional_writes.first() {
                     if contract.additional_writes.len() != 1 || inputs.len() != 4 {
-                        return Err(GpuError::InvalidInput { node: index, reason: "invalid dual-output kernel ABI" });
+                        return Err(GpuError::InvalidInput {
+                            node: index,
+                            reason: "invalid dual-output kernel ABI",
+                        });
                     }
                     session.launch4_dual(
                         &format!("vn_node_{index}"),
@@ -4067,8 +4097,16 @@ done:
 /// The four source pointers preserve the exact source operand order for both
 /// operations. No FMA, fast-math, reassociation or output aliasing is allowed.
 fn dual_pointwise_kernel_ir(index: usize, first_mul: bool, second_mul: bool) -> String {
-    let first = if first_mul { "mul.rn.f32" } else { "add.rn.f32" };
-    let second = if second_mul { "mul.rn.f32" } else { "add.rn.f32" };
+    let first = if first_mul {
+        "mul.rn.f32"
+    } else {
+        "add.rn.f32"
+    };
+    let second = if second_mul {
+        "mul.rn.f32"
+    } else {
+        "add.rn.f32"
+    };
     format!(
         r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %c, ptr addrspace(1) %d, ptr addrspace(1) %extra, ptr addrspace(1) %out, i32 %length) {{
 entry:

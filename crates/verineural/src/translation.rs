@@ -163,7 +163,11 @@ impl TranslationKind {
             Self::MulAddMul { .. } => (1, 2, 0),
             Self::MulMulAddDiv { .. } => (1, 2, 0),
             Self::MulDiamondAdd { .. } => (1, 3, 0),
-            Self::DualPointwise { first_mul, second_mul, .. } => {
+            Self::DualPointwise {
+                first_mul,
+                second_mul,
+                ..
+            } => {
                 let muls = usize::from(first_mul) + usize::from(second_mul);
                 (2 - muls, muls, 0)
             }
@@ -204,7 +208,9 @@ impl TranslationKind {
             | Self::MulAddMul { .. }
             | Self::BinaryChain { .. }
             | Self::SqrtAddDiv { .. } => 3,
-            Self::MulMulAddDiv { .. } | Self::MulDiamondAdd { .. } | Self::DualPointwise { .. } => 4,
+            Self::MulMulAddDiv { .. } | Self::MulDiamondAdd { .. } | Self::DualPointwise { .. } => {
+                4
+            }
             _ => 2,
         }
     }
@@ -255,9 +261,11 @@ impl TranslationKind {
                     + 2 * usize::from(multiply_on_right)
                     + 4 * usize::from(add_on_right)
             }
-            Self::DualPointwise { first_mul, second_mul, .. } => {
-                usize::from(first_mul) + 2 * usize::from(second_mul)
-            }
+            Self::DualPointwise {
+                first_mul,
+                second_mul,
+                ..
+            } => usize::from(first_mul) + 2 * usize::from(second_mul),
             Self::MulDiamondAdd {
                 reused_source,
                 right_mul_on_right,
@@ -837,9 +845,22 @@ impl TranslationPlan {
                 ));
                 continue;
             }
-            if let TranslationKind::DualPointwise { earlier, first_mul, second_mul } = kernel.kind {
-                let first = if first_mul { "mul.rn.f32" } else { "add.rn.f32" };
-                let second = if second_mul { "mul.rn.f32" } else { "add.rn.f32" };
+            if let TranslationKind::DualPointwise {
+                earlier,
+                first_mul,
+                second_mul,
+            } = kernel.kind
+            {
+                let first = if first_mul {
+                    "mul.rn.f32"
+                } else {
+                    "add.rn.f32"
+                };
+                let second = if second_mul {
+                    "mul.rn.f32"
+                } else {
+                    "add.rn.f32"
+                };
                 let required = [
                     "ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %c, ptr addrspace(1) %d, ptr addrspace(1) %extra, ptr addrspace(1) %out, i32 %length",
                     "%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx",
@@ -869,20 +890,31 @@ impl TranslationPlan {
                     || ir.matches("store float ").count() != 2
                     || ir.contains("fcmp ")
                 {
-                    return Err(invalid(format!("DualPointwise LLVM template mismatch at node {node}")));
+                    return Err(invalid(format!(
+                        "DualPointwise LLVM template mismatch at node {node}"
+                    )));
                 }
                 audit_fp32_ptx(ir, asm)
                     .map_err(|err| invalid(format!("PTX node {node}: {err}")))?;
                 // The PTX may select registers differently, but cannot
                 // contract/reorder FP32 arithmetic or omit either store.
-                let sequence = asm.lines().filter_map(|line| {
-                    let code = line.split("//").next().unwrap_or("");
-                    if code.contains("add.rn.f32") { Some("add.rn.f32") }
-                    else if code.contains("mul.rn.f32") { Some("mul.rn.f32") }
-                    else { None }
-                }).collect::<Vec<_>>();
+                let sequence = asm
+                    .lines()
+                    .filter_map(|line| {
+                        let code = line.split("//").next().unwrap_or("");
+                        if code.contains("add.rn.f32") {
+                            Some("add.rn.f32")
+                        } else if code.contains("mul.rn.f32") {
+                            Some("mul.rn.f32")
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 if sequence != [first, second] || asm.matches("st.global.f32").count() != 2 {
-                    return Err(invalid(format!("DualPointwise PTX instruction/store order mismatch at node {node}")));
+                    return Err(invalid(format!(
+                        "DualPointwise PTX instruction/store order mismatch at node {node}"
+                    )));
                 }
                 let (add, mul, _) = kernel.kind.counts();
                 report.rounded_adds += add;

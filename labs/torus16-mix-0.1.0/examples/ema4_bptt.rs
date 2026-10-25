@@ -511,9 +511,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             None
         };
         let state_feedback_d2d_ms = timing.elapsed().as_secs_f64() * 1000.;
-        let feedback_validation_ms = feedback_details.map_or(0., |p| p.validation_d2h.as_secs_f64() * 1000.);
-        let feedback_snapshot_ms = feedback_details.map_or(0., |p| p.snapshot_d2d.as_secs_f64() * 1000.);
-        let feedback_copy_ms = feedback_details.map_or(0., |p| p.feedback_d2d.as_secs_f64() * 1000.);
+        let feedback_validation_ms =
+            feedback_details.map_or(0., |p| p.validation_d2h.as_secs_f64() * 1000.);
+        let feedback_snapshot_ms =
+            feedback_details.map_or(0., |p| p.snapshot_d2d.as_secs_f64() * 1000.);
+        let feedback_copy_ms =
+            feedback_details.map_or(0., |p| p.feedback_d2d.as_secs_f64() * 1000.);
         let feedback_sync_ms = feedback_details.map_or(0., |p| p.stream_sync.as_secs_f64() * 1000.);
         if let Some(p) = feedback_details {
             feedback_checked_values += p.checked_values;
@@ -573,9 +576,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         for (total, sample) in profile_totals.iter_mut().zip([
-            upload_inputs_ms, graph_replay_ms, read_outputs_ms, ce_ms,
-            adam_ms, state_feedback_d2d_ms, checkpoint_state_d2h_ms,
-            upload_parameters_ms, feedback_validation_ms, feedback_snapshot_ms,
+            upload_inputs_ms,
+            graph_replay_ms,
+            read_outputs_ms,
+            ce_ms,
+            adam_ms,
+            state_feedback_d2d_ms,
+            checkpoint_state_d2h_ms,
+            upload_parameters_ms,
+            feedback_validation_ms,
+            feedback_snapshot_ms,
             feedback_copy_ms + feedback_sync_ms,
         ]) {
             *total += sample;

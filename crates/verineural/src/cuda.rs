@@ -826,7 +826,9 @@ mod platform {
                 ));
             }
             let function = *self.kernels.get(name).ok_or_else(|| {
-                GpuError::Driver("kernel function must be resolved before CUDA Graph capture".into())
+                GpuError::Driver(
+                    "kernel function must be resolved before CUDA Graph capture".into(),
+                )
             })?;
             let count = i32::try_from(length)
                 .map_err(|_| GpuError::UnsupportedSize { elements: length })?;
@@ -846,8 +848,17 @@ mod platform {
             ];
             check("cuLaunchKernel", unsafe {
                 (self.functions.launch)(
-                    function, grid, 1, 1, threads, 1, 1, 0, self.stream,
-                    args.as_mut_ptr(), ptr::null_mut(),
+                    function,
+                    grid,
+                    1,
+                    1,
+                    threads,
+                    1,
+                    1,
+                    0,
+                    self.stream,
+                    args.as_mut_ptr(),
+                    ptr::null_mut(),
                 )
             })
         }
@@ -1057,7 +1068,9 @@ mod platform {
             _: usize,
             _: u32,
         ) -> Result<(), GpuError> {
-            Err(GpuError::Driver("CUDA Driver backend requires Linux".into()))
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
         }
 
         pub fn synchronize(&self) -> Result<(), GpuError> {

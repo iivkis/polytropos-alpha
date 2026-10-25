@@ -76,9 +76,9 @@ pub use consumer::{BindingError, ComponentBinder, ObligationError};
 pub use error::NeuralError;
 pub use gpu::{
     Fp32PtxAudit, GpuAssuranceBoundary, GpuAssuranceStatus, GpuBenchmark, GpuCapabilityPlan,
-    GpuEngine, GpuError, GpuExecution, GpuFeedbackProfile, GpuKernelCapability, GpuLaunchConfig, GpuMemoryContract,
-    GpuMemoryPattern, GpuOptimizationCapability, GpuOptimizationKind, GpuProgram, ReluFusion,
-    audit_fp32_ptx,
+    GpuEngine, GpuError, GpuExecution, GpuFeedbackProfile, GpuKernelCapability, GpuLaunchConfig,
+    GpuMemoryContract, GpuMemoryPattern, GpuOptimizationCapability, GpuOptimizationKind,
+    GpuProgram, ReluFusion, audit_fp32_ptx,
 };
 pub use gpu_adamw::GpuAdamWPlan;
 pub use ir::{
