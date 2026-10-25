@@ -2486,17 +2486,13 @@ impl GpuExecution {
                     });
                 }
                 let elements = old.shape.element_count();
-                let &address = output_lookup.get(&next.index()).ok_or(
-                    GpuError::InvalidInput {
+                let &address = output_lookup
+                    .get(&next.index())
+                    .ok_or(GpuError::InvalidInput {
                         node: next.index(),
                         reason: "feedback source is not a selected output",
-                    },
-                )?;
-                checked_sources.push((
-                    address,
-                    elements,
-                    old.domain == Domain::NonNegativeFinite,
-                ));
+                    })?;
+                checked_sources.push((address, elements, old.domain == Domain::NonNegativeFinite));
                 checked_requirements.push((old.domain, old.shape.clone()));
                 checked_values += elements;
             }
@@ -2593,9 +2589,7 @@ impl GpuExecution {
                 let copied = self
                     .execution_health
                     .record_io(self.session.copy_f32_batch_to_host(&buffers))?;
-                for ((required, shape), values) in
-                    plan.checked_requirements.iter().zip(copied)
-                {
+                for ((required, shape), values) in plan.checked_requirements.iter().zip(copied) {
                     Tensor::new(shape.clone(), values)?.validate_domain(*required)?;
                 }
                 return Err(GpuError::Driver(
@@ -2620,9 +2614,12 @@ impl GpuExecution {
         profile.snapshot_d2d = snapshot_started.elapsed();
         let feedback_started = Instant::now();
         if device_events {
-            profile.device_copy = Some(self.execution_health.record_io(
-                self.session.launch_feedback_copies_device_timed(&plan.transfers),
-            )?);
+            profile.device_copy = Some(
+                self.execution_health.record_io(
+                    self.session
+                        .launch_feedback_copies_device_timed(&plan.transfers),
+                )?,
+            );
         } else {
             self.execution_health
                 .record_io(self.session.launch_feedback_copies(&plan.transfers))?;

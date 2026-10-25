@@ -526,8 +526,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             None
         };
         let state_feedback_d2d_ms = timing.elapsed().as_secs_f64() * 1000.;
-        let feedback_plan_ms =
-            feedback_details.map_or(0., |p| p.plan_host.as_secs_f64() * 1000.);
+        let feedback_plan_ms = feedback_details.map_or(0., |p| p.plan_host.as_secs_f64() * 1000.);
         let feedback_validation_ms =
             feedback_details.map_or(0., |p| p.validation_d2h.as_secs_f64() * 1000.);
         let feedback_snapshot_ms =

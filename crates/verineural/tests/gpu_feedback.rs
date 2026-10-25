@@ -284,12 +284,21 @@ fn grouped_feedback_rejects_one_invalid_tensor_without_mutating_other_sizes() {
     // its freshly computed FP32 outputs rather than reusing the old verdict.
     let mut overflow = vec![2.0f32; 257];
     overflow[0] = f32::MAX;
-    gpu.update_input(tokens[1], &Tensor::from_slice(vec![257], &overflow).unwrap())
-        .unwrap();
+    gpu.update_input(
+        tokens[1],
+        &Tensor::from_slice(vec![257], &overflow).unwrap(),
+    )
+    .unwrap();
     gpu.replay().unwrap();
     gpu.feedback_state_checked(&links).unwrap();
-    assert_eq!(gpu.read_source(states[1]).unwrap().values()[0].to_bits(), f32::MAX.to_bits());
+    assert_eq!(
+        gpu.read_source(states[1]).unwrap().values()[0].to_bits(),
+        f32::MAX.to_bits()
+    );
     gpu.replay().unwrap();
     assert!(gpu.feedback_state_checked(&links).is_err());
-    assert_eq!(gpu.read_source(states[1]).unwrap().values()[0].to_bits(), f32::MAX.to_bits());
+    assert_eq!(
+        gpu.read_source(states[1]).unwrap().values()[0].to_bits(),
+        f32::MAX.to_bits()
+    );
 }
