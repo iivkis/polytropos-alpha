@@ -617,3 +617,13 @@ kernels. The benchmark reports `diamond_fusions`, distinct from
 `task verify-gpu-diamond-fusion`; also rerun `task verify-gpu-adamw`
 and `task benchmark-gpu-adamw`. CPU AdamW remains the default until
 the GPU path actually wins in sustained end-to-end tokens/s.
+
+## Тюнинг производительности EMA4-BPTT
+
+Для `examples/ema4_bptt.rs` поддерживаются независимые настройки исполнения:
+
+- `TORUS16_GPU_ADAMW=1`: экспериментальный optimizer в Semantic IR и CUDA Graph; **не гарантированно быстрее** host AdamW. На границах checkpoint параметры и моменты всё равно выгружаются. Режим входит в архитектурный fingerprint и не совместим с checkpoint CPU-режима.
+- `TORUS16_METRIC_EVERY=N` (по умолчанию 1): с GPU AdamW читать logits и выводить train CE/BPC только на первом, каждом N-м и последнем окне. Градиенты, оптимизатор, рекуррентные состояния, validation и checkpoint работают на **каждом** окне без изменений. При N>1 кривая training BPC становится *выборочной*, а не средним по всем окнам; не сравнивать её со старой полной кривой напрямую. Для CPU AdamW N>1 запрещено.
+- `TORUS16_THREADS_PER_BLOCK=64|128|256|512` (по умолчанию 256): допустимые CUDA launch-профили VeriNeural. Размер блока влияет на scheduling и должен подбираться по NVIDIA benchmark, а не по температуре.
+
+`task benchmark-torus16-throughput` измеряет один и тот же BPTT=2 / 256-window GPU AdamW на размере блока 256 с полным и редким чтением logits, затем сканирует блоки 64/128/512 при N=32. Проверяется побитовое совпадение обоих checkpoint при block=256. Это **локальная NVIDIA-приёмка**, результаты зависят от GPU/драйвера и не получены агентом. Отдельный `task benchmark-gpu-adamw` сравнивает CPU и GPU AdamW. Не принимать ускорение на основании числа CUDA kernels или процента GPU-Util: важна `training_tokens_per_second` при совпадающей математике и проверенном resume.

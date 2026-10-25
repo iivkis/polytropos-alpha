@@ -639,6 +639,32 @@ tasks:
         echo "PASS: GPU AdamW 4-step checkpoint/resume matches uninterrupted training bit-for-bit"
         echo "PASS: GPU AdamW original parameters and optimizer moments survive checkpoint/resume"
 
+  benchmark-torus16-throughput:
+    desc: GPU AdamW throughput tuning; compare optional sparse loss readback and CUDA block size, require bitwise checkpoint parity
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        bench_dir="$(mktemp -d "${TMPDIR:-/tmp}/torus16-throughput.XXXXXX")"
+        trap 'status=$?; if [ "$status" -eq 0 ]; then rm -rf "$bench_dir"; else printf "Benchmark logs retained at %s\\n" "$bench_dir" >&2; fi' EXIT
+        unset TORUS16_FRESH TORUS16_BPTT TORUS16_TRAIN_WINDOWS TORUS16_VAL_LIMIT TORUS16_TEST_LIMIT TORUS16_EVAL_EVERY TORUS16_CHECKPOINT_EVERY TORUS16_CORPUS TORUS16_MATRIX_MODE TORUS16_ROLE_INIT TORUS16_MATRIX_SEED TORUS16_BENCH_COMPARE TORUS16_VERIFY_FUSION TORUS16_BENCH_FUSED TORUS16_INITIAL_PROBE_PATH TORUS16_GPU_FEEDBACK_EVENTS
+        export TORUS16_GPU_ADAMW=1 TORUS16_BPTT=2 TORUS16_TRAIN_WINDOWS=256 TORUS16_VAL_LIMIT=2 TORUS16_TEST_LIMIT=2 TORUS16_EVAL_EVERY=256 TORUS16_CHECKPOINT_EVERY=256
+        for choice in "256 1" "256 32" "64 32" "128 32" "512 32"; do
+          set -- $choice
+          threads="$1"; metric_every="$2"
+          label="${threads}_${metric_every}"
+          printf '\\nthreads=%s metric_every=%s\\n' "$threads" "$metric_every"
+          TORUS16_FRESH=1 TORUS16_THREADS_PER_BLOCK="$threads" TORUS16_METRIC_EVERY="$metric_every" TORUS16_CHECKPOINT="$bench_dir/$label.ckpt" \\
+            cargo run --release -p torus16-mix-lab --example ema4_bptt >"$bench_dir/$label.log" 2>&1 || { cat "$bench_dir/$label.log"; exit 1; }
+          grep '^training_total_s=' "$bench_dir/$label.log"
+          grep '^training_profile_avg_ms ' "$bench_dir/$label.log"
+          grep '^cuda_graph_before=' "$bench_dir/$label.log"
+        done
+        cmp "$bench_dir/256_1.ckpt" "$bench_dir/256_32.ckpt"
+        cmp "$bench_dir/256_1.best.ckpt" "$bench_dir/256_32.best.ckpt"
+        echo "PASS: metric sampling preserves parameters, optimizer moments, states and validation selection bit-for-bit"
+        echo "NOTE: compare tokens/s, not nvidia-smi utilisation; different block sizes require their own NVIDIA parity check"
+
   benchmark-gpu-adamw:
     desc: Compare sustained host/GPU AdamW throughput on the same EMA4 four-layer BPTT graph (256 windows)
     deps: [prepare]

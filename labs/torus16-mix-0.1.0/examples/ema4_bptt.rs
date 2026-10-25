@@ -16,7 +16,8 @@ use torus16_mix_lab::ema4_checkpoint::{
     fingerprint,
 };
 use verineural::{
-    AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, Model, NodeId, Shape,
+    AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, Model, NodeId,
+    ReluFusion, Shape,
     Tensor, differentiate_with_seeds, unroll_model,
 };
 
@@ -173,6 +174,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let compile_clock = Instant::now();
     let vocab = corpus.alphabet.len();
+    // Immutable one-hot host tensors: do not allocate two fresh vectors for
+    // every BPTT token and target in the hot path.
+    let onehots = (0..vocab)
+        .map(|token| onehot(token, vocab))
+        .collect::<Result<Vec<_>, _>>()?;
     let weights = Ema4Weights::deterministic_seeded(vocab, matrix_seed)?;
     let model = architecture_model_for(vocab, matrix_mode)?;
     let initial_bindings = weights.bindings_with_init(0, matrix_mode, role_init)?;
@@ -224,6 +230,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let gpu_adamw_requested = std::env::var_os("TORUS16_GPU_ADAMW").is_some();
+    let metric_every = option_usize("TORUS16_METRIC_EVERY", 1, 1, 1_000_000)?;
+    if metric_every > 1 && !gpu_adamw_requested {
+        return Err("TORUS16_METRIC_EVERY>1 requires TORUS16_GPU_ADAMW=1: host optimizer still needs gradient readback".into());
+    }
+    let threads_per_block = option_usize("TORUS16_THREADS_PER_BLOCK", 256, 64, 512)?;
+    if !matches!(threads_per_block, 64 | 128 | 256 | 512) {
+        return Err("TORUS16_THREADS_PER_BLOCK must be one of 64,128,256,512".into());
+    }
     let verify_fusion = std::env::var_os("TORUS16_VERIFY_FUSION").is_some();
     let mut selected = window.outputs().to_vec();
     // CPU AdamW needs host gradients; the explicit fusion-parity oracle
@@ -371,7 +385,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(plan) = &gpu_optimizer {
         all_feedback.extend_from_slice(plan.feedback());
     }
-    let mut launch = GpuLaunchConfig::default()
+    let mut launch = GpuLaunchConfig::new(threads_per_block as u32, ReluFusion::Disabled)?
         .with_approximate_exp()
         .with_pointwise_fusion();
     if gpu_optimizer.is_some() {
@@ -591,6 +605,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // state feedback remains device-resident until a checkpoint boundary.
     let output_count = window.outputs().len();
     println!(
+        "throughput_policy_threads_per_block={} metric_every={} optimizer_backend={} metric_sampling=reporting_only",
+        threads_per_block,
+        metric_every,
+        if gpu_optimizer.is_some() { "GPU_IR" } else { "CPU" }
+    );
+    println!(
         "BPTT={} trainable_tensors={} trainable_values={} vocab={} IR_nodes={} CUDA_graph_kernels={}",
         window_len,
         names.len(),
@@ -614,23 +634,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Test-only probe of the first *training* BPTT replay. The inputs and
     // cotangents are identical between independently and jointly tied W.
     let initial_probe_path = std::env::var_os("TORUS16_INITIAL_PROBE_PATH").map(PathBuf::from);
-    // Training-only learning curve over fixed consecutive windows. The
-    // held-out BPC below is the generalization metric, not this moving mean.
+    // Training-only sampled learning curve (all windows at the default
+    // metric_every=1). It is never used for gradient updates or checkpoint selection.
+    // The held-out BPC below is the generalization metric, not this moving mean.
     let mut curve_bpc_sum = 0.0f64;
     let mut curve_windows = 0usize;
     for iteration in first_window..train_windows {
         let step_start = Instant::now();
         let start = iteration * window_len;
-        let tokens = (0..window_len)
-            .map(|t| onehot(corpus.train[start + t], vocab))
-            .collect::<Result<Vec<_>, _>>()?;
-        let labels = (0..window_len)
-            .map(|t| onehot(corpus.train[start + t + 1], vocab))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut input_updates = Vec::with_capacity(window_len * 2);
-        for (t, tensor) in tokens.iter().enumerate() {
-            input_updates.push((window.inputs()[t]["token"], tensor));
-            input_updates.push((window.cotangents()[t], &labels[t]));
+        let mut input_updates = Vec::with_capacity(window_len * 2 + 2);
+        for t in 0..window_len {
+            input_updates.push((window.inputs()[t]["token"], &onehots[corpus.train[start + t]]));
+            input_updates.push((window.cotangents()[t], &onehots[corpus.train[start + t + 1]]));
         }
         // Only two scalar bias corrections cross H2D on the GPU path.
         let correction_updates = gpu_optimizer
@@ -658,7 +673,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             train_output_count
         };
-        let outputs = gpu.read_outputs_selected(&selected[..read_count])?;
+        // No host-logit readback is needed for gradient/AdamW updates:
+        // the VJP and optimizer are already in the CUDA Graph. Sampling
+        // changes only reporting, never loss seeds or parameter updates.
+        let observe_loss = gpu_optimizer.is_none()
+            || iteration == first_window
+            || (iteration + 1) % metric_every == 0
+            || iteration + 1 == train_windows;
+        let outputs = if observe_loss {
+            gpu.read_outputs_selected(&selected[..read_count])?
+        } else {
+            Vec::new()
+        };
         if iteration == 0
             && let Some(path) = &initial_probe_path
         {
@@ -682,10 +708,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let read_outputs_ms = timing.elapsed().as_secs_f64() * 1000.;
         let timing = Instant::now();
-        let mut total = 0f32;
-        for (t, (_, logits)) in outputs.iter().take(window_len).enumerate() {
-            total += cross_entropy(logits.values(), corpus.train[start + t + 1])?.0;
-        }
+        let total = if observe_loss {
+            let mut loss = 0f32;
+            for (t, (_, logits)) in outputs.iter().take(window_len).enumerate() {
+                loss += cross_entropy(logits.values(), corpus.train[start + t + 1])?.0;
+            }
+            Some(loss)
+        } else {
+            None
+        };
         let ce_ms = timing.elapsed().as_secs_f64() * 1000.;
 
         let timing = Instant::now();
@@ -835,20 +866,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         ]) {
             *total += sample;
         }
-        println!(
-            "train_window={} ce_nats={:.6} train_bpc={:.6} optimizer_step={} end_to_end_step_ms={:.3}",
-            iteration,
-            total / window_len as f32,
-            total / (window_len as f32 * std::f32::consts::LN_2),
-            if gpu_optimizer.is_some() {
-                iteration as u64 + 1
-            } else {
-                optimizer.steps()
-            },
-            step_start.elapsed().as_secs_f64() * 1000.
-        );
-        curve_bpc_sum += f64::from(total / (window_len as f32 * std::f32::consts::LN_2));
-        curve_windows += 1;
+        if let Some(total) = total {
+            println!(
+                "train_window={} ce_nats={:.6} train_bpc={:.6} optimizer_step={} end_to_end_step_ms={:.3}",
+                iteration,
+                total / window_len as f32,
+                total / (window_len as f32 * std::f32::consts::LN_2),
+                if gpu_optimizer.is_some() {
+                    iteration as u64 + 1
+                } else {
+                    optimizer.steps()
+                },
+                step_start.elapsed().as_secs_f64() * 1000.
+            );
+            curve_bpc_sum += f64::from(total / (window_len as f32 * std::f32::consts::LN_2));
+            curve_windows += 1;
+        }
         if curve_windows == 1024 || iteration + 1 == train_windows {
             println!(
                 "train_curve_window={} train_bpc_mean={:.6} window_count={} matrix_mode={}",
