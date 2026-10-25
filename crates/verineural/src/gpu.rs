@@ -2006,6 +2006,9 @@ pub struct GpuFeedbackProfile {
     pub snapshot_d2d: Duration,
     pub feedback_d2d: Duration,
     pub stream_sync: Duration,
+    /// CUDA-event elapsed time for one grouped feedback graph launch.
+    /// None unless explicitly requested; this changes synchronization timing.
+    pub device_copy: Option<Duration>,
     pub checked_values: usize,
     pub feedback_values: usize,
 }
@@ -2433,7 +2436,7 @@ impl GpuExecution {
     /// Strict feedback for statically established source domains.
     /// Selected outputs aliasing state destinations are device-snapshotted.
     pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
-        self.feedback_state_impl(links, false).map(|_| ())
+        self.feedback_state_impl(links, false, false).map(|_| ())
     }
 
     /// Experimental feedback for outputs with weaker *static* domain
@@ -2453,13 +2456,24 @@ impl GpuExecution {
         &mut self,
         links: &[(NodeId, NodeId)],
     ) -> Result<GpuFeedbackProfile, GpuError> {
-        self.feedback_state_impl(links, true)
+        self.feedback_state_impl(links, true, false)
+    }
+
+    /// Diagnostic-only variant: measures the copy CUDA Graph with stream
+    /// events. This introduces an extra barrier and must never be used to
+    /// claim end-to-end speedups. Runtime domain checks remain mandatory.
+    pub fn feedback_state_checked_device_profiled(
+        &mut self,
+        links: &[(NodeId, NodeId)],
+    ) -> Result<GpuFeedbackProfile, GpuError> {
+        self.feedback_state_impl(links, true, true)
     }
 
     fn feedback_state_impl(
         &mut self,
         links: &[(NodeId, NodeId)],
         runtime_domains: bool,
+        device_events: bool,
     ) -> Result<GpuFeedbackProfile, GpuError> {
         self.execution_health.ensure_outputs_ready()?;
         let copies = self.feedback_copy_plan(links, runtime_domains)?;
@@ -2559,8 +2573,14 @@ impl GpuExecution {
             .into_iter()
             .filter(|(dst, src, _)| dst != src)
             .collect::<Vec<_>>();
-        self.execution_health
-            .record_io(self.session.launch_feedback_copies(&transfers))?;
+        if device_events {
+            profile.device_copy = Some(self.execution_health.record_io(
+                self.session.launch_feedback_copies_device_timed(&transfers),
+            )?);
+        } else {
+            self.execution_health
+                .record_io(self.session.launch_feedback_copies(&transfers))?;
+        }
         profile.feedback_d2d = feedback_started.elapsed();
         let sync_started = Instant::now();
         self.execution_health

@@ -346,6 +346,9 @@ DONE:
         context: Handle,
         module: Handle,
         allocations: Vec<(DevicePtr, usize)>,
+        // Allocations are stable for the session lifetime. Keep O(log n)
+        // preflight lookup while retaining reverse allocation-order teardown.
+        allocation_capacity: BTreeMap<DevicePtr, usize>,
         staging_pending: Vec<PinnedBuffer>,
         staging_available: Vec<PinnedBuffer>,
         kernels: BTreeMap<String, Handle>,
@@ -430,6 +433,7 @@ DONE:
                 context,
                 module: ptr::null_mut(),
                 allocations: Vec::new(),
+                allocation_capacity: BTreeMap::new(),
                 staging_pending: Vec::new(),
                 staging_available: Vec::new(),
                 kernels: BTreeMap::new(),
@@ -492,6 +496,7 @@ DONE:
                 (self.functions.mem_allocate)(&mut address, bytes)
             })?;
             self.allocations.push((address, elements));
+            self.allocation_capacity.insert(address, elements);
             Ok(address)
         }
 
@@ -504,9 +509,9 @@ DONE:
             elements: usize,
         ) -> Result<(), GpuError> {
             if !self
-                .allocations
-                .iter()
-                .any(|&(ptr, capacity)| ptr == address && capacity >= elements)
+                .allocation_capacity
+                .get(&address)
+                .is_some_and(|&capacity| capacity >= elements)
             {
                 return Err(GpuError::Driver(
                     "CUDA kernel memory contract references an unallocated or undersized buffer"
@@ -626,10 +631,16 @@ DONE:
                     "cannot validate feedback while CUDA Graph capture is active".into(),
                 ));
             }
-            for &(address, elements, _) in sources {
-                self.require_allocation(address, elements)?;
-                if elements == 0 || elements > i32::MAX as usize {
-                    return Err(GpuError::UnsupportedSize { elements });
+            // A published graph owns an immutable descriptor table, and
+            // allocations cannot be freed before CudaSession teardown.
+            // Only a changed plan needs another full host preflight.
+            let rebuild = self.guard_plan.as_slice() != sources || self.guard_graph_exec.is_null();
+            if rebuild {
+                for &(address, elements, _) in sources {
+                    self.require_allocation(address, elements)?;
+                    if elements == 0 || elements > i32::MAX as usize {
+                        return Err(GpuError::UnsupportedSize { elements });
+                    }
                 }
             }
             let _context = self.enter_context()?;
@@ -651,7 +662,7 @@ DONE:
                 })?;
                 self.guard_flag = self.allocate(1)?;
             }
-            if self.guard_plan.as_slice() != sources || self.guard_graph_exec.is_null() {
+            if rebuild {
                 self.synchronize()?;
                 if !self.guard_graph_exec.is_null() {
                     check("cuGraphExecDestroy", unsafe {
@@ -765,28 +776,33 @@ DONE:
                     "feedback is forbidden during CUDA Graph capture".into(),
                 ));
             }
-            for &(dest, src, elements) in copies {
-                self.require_allocation(dest, elements)?;
-                self.require_allocation(src, elements)?;
-                if elements == 0 || elements > i32::MAX as usize {
-                    return Err(GpuError::UnsupportedSize { elements });
+            let rebuild =
+                self.feedback_plan.as_slice() != copies || self.feedback_graph_exec.is_null();
+            if rebuild {
+                // The cached graph retains its checked descriptor table for
+                // the session lifetime. Changing even one pointer/extent
+                // requires fresh size and simultaneous-assignment checks.
+                for &(dest, src, elements) in copies {
+                    self.require_allocation(dest, elements)?;
+                    self.require_allocation(src, elements)?;
+                    if elements == 0 || elements > i32::MAX as usize {
+                        return Err(GpuError::UnsupportedSize { elements });
+                    }
                 }
-            }
-            // Independent bitwise kernels require disjoint destinations
-            // and no cross-transfer write/read dependency.
-            let destinations = copies
-                .iter()
-                .map(|&(dst, _, _)| dst)
-                .collect::<BTreeSet<_>>();
-            if destinations.len() != copies.len()
-                || copies
+                let destinations = copies
                     .iter()
-                    .any(|&(dst, src, _)| dst != src && destinations.contains(&src))
-            {
-                return Err(GpuError::InvalidInput {
-                    node: 0,
-                    reason: "grouped feedback destinations overlap another transfer",
-                });
+                    .map(|&(dst, _, _)| dst)
+                    .collect::<BTreeSet<_>>();
+                if destinations.len() != copies.len()
+                    || copies
+                        .iter()
+                        .any(|&(dst, src, _)| dst != src && destinations.contains(&src))
+                {
+                    return Err(GpuError::InvalidInput {
+                        node: 0,
+                        reason: "grouped feedback destinations overlap another transfer",
+                    });
+                }
             }
             let _context = self.enter_context()?;
             if self.feedback_module.is_null() {
@@ -806,7 +822,7 @@ DONE:
                     )
                 })?;
             }
-            if self.feedback_plan.as_slice() != copies || self.feedback_graph_exec.is_null() {
+            if rebuild {
                 self.synchronize()?;
                 if !self.feedback_graph_exec.is_null() {
                     check("cuGraphExecDestroy", unsafe {
@@ -892,6 +908,55 @@ DONE:
             check("cuGraphLaunch", unsafe {
                 (self.functions.graph_launch)(self.feedback_graph_exec, self.stream)
             })
+        }
+
+        /// Opt-in CUDA event measurement of the *same* grouped D2D graph.
+        /// This does not replay transfers a second time; it changes the
+        /// caller's synchronization point and is unsuitable for throughput
+        /// benchmarking. Events use the owned non-blocking stream only.
+        pub fn launch_feedback_copies_device_timed(
+            &mut self,
+            copies: &[(DevicePtr, DevicePtr, usize)],
+        ) -> Result<std::time::Duration, GpuError> {
+            if copies.is_empty() {
+                return Ok(std::time::Duration::ZERO);
+            }
+            let _context = self.enter_context()?;
+            let mut start = ptr::null_mut();
+            check("cuEventCreate", unsafe {
+                (self.functions.event_create)(&mut start, CU_EVENT_DEFAULT)
+            })?;
+            let mut stop = ptr::null_mut();
+            if let Err(err) = check("cuEventCreate", unsafe {
+                (self.functions.event_create)(&mut stop, CU_EVENT_DEFAULT)
+            }) {
+                unsafe { (self.functions.event_destroy)(start) };
+                return Err(err);
+            }
+            let result = (|| {
+                check("cuEventRecord", unsafe {
+                    (self.functions.event_record)(start, self.stream)
+                })?;
+                self.launch_feedback_copies(copies)?;
+                check("cuEventRecord", unsafe {
+                    (self.functions.event_record)(stop, self.stream)
+                })?;
+                check("cuEventSynchronize", unsafe {
+                    (self.functions.event_sync)(stop)
+                })?;
+                let mut elapsed_ms = 0.0f32;
+                check("cuEventElapsedTime", unsafe {
+                    (self.functions.event_elapsed)(&mut elapsed_ms, start, stop)
+                })?;
+                Ok(std::time::Duration::from_secs_f64(
+                    f64::from(elapsed_ms) / 1000.0,
+                ))
+            })();
+            unsafe {
+                (self.functions.event_destroy)(stop);
+                (self.functions.event_destroy)(start);
+            }
+            result
         }
 
         fn copy_to_host_bytes(

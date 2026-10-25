@@ -194,6 +194,18 @@ fn device_feedback_matches_host_staged_state_bitwise() {
             }
         }
     }
+    // An unchanged plan must reuse its CUDA Graph, but a different (valid)
+    // simultaneous assignment must invalidate the descriptor cache.
+    let previous = device.read_outputs_selected(&[next_a, next_b]).unwrap();
+    let swapped = [(state_a, next_b), (state_b, next_a)];
+    device.feedback_state(&swapped).unwrap();
+    let updated_a = device.read_source(state_a).unwrap();
+    let updated_b = device.read_source(state_b).unwrap();
+    for (actual, expected) in [(updated_a, &previous[1].1), (updated_b, &previous[0].1)] {
+        for (&a, &b) in actual.values().iter().zip(expected.values()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
 }
 
 #[test]
@@ -256,7 +268,10 @@ fn grouped_feedback_rejects_one_invalid_tensor_without_mutating_other_sizes() {
     )
     .unwrap();
     gpu.replay().unwrap();
-    gpu.feedback_state_checked(&links).unwrap();
+    // Optional event profiling launches exactly one feedback graph and
+    // retains the same mandatory guard/atomicity semantics.
+    let profiled = gpu.feedback_state_checked_device_profiled(&links).unwrap();
+    assert!(profiled.device_copy.is_some());
     for (i, &state) in states.iter().enumerate() {
         let updated = gpu.read_source(state).unwrap();
         assert_eq!(updated.values().len(), originals[i].len());

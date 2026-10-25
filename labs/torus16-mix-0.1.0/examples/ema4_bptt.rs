@@ -445,7 +445,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Aggregated wall times across the entire measured training loop, so a
     // single slow checkpoint or CUDA synchronization cannot disappear among
     // the three early-window samples.
-    let mut profile_totals = [0.0f64; 11];
+    let mut profile_totals = [0.0f64; 12];
+    // Event profiling modifies synchronization and is intentionally off in
+    // the authoritative end-to-end throughput benchmark.
+    let gpu_feedback_events = gpu_optimizer.is_some()
+        && std::env::var_os("TORUS16_GPU_FEEDBACK_EVENTS").is_some();
     let mut feedback_checked_values = 0usize;
     let mut feedback_copied_values = 0usize;
     for iteration in first_window..train_windows {
@@ -512,7 +516,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         // AdamW moments move simultaneously on-device after the replay.
         let timing = Instant::now();
         let feedback_details = if gpu_optimizer.is_some() {
-            Some(gpu.feedback_state_checked_profiled(&all_feedback)?)
+            Some(if gpu_feedback_events {
+                gpu.feedback_state_checked_device_profiled(&all_feedback)?
+            } else {
+                gpu.feedback_state_checked_profiled(&all_feedback)?
+            })
         } else {
             gpu.feedback_state(&all_feedback)?;
             None
@@ -525,6 +533,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let feedback_copy_ms =
             feedback_details.map_or(0., |p| p.feedback_d2d.as_secs_f64() * 1000.);
         let feedback_sync_ms = feedback_details.map_or(0., |p| p.stream_sync.as_secs_f64() * 1000.);
+        let feedback_device_ms = feedback_details
+            .and_then(|p| p.device_copy)
+            .map_or(0., |duration| duration.as_secs_f64() * 1000.);
         if let Some(p) = feedback_details {
             feedback_checked_values += p.checked_values;
             feedback_copied_values += p.feedback_values;
@@ -594,6 +605,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             feedback_validation_ms,
             feedback_snapshot_ms,
             feedback_copy_ms + feedback_sync_ms,
+            feedback_device_ms,
         ]) {
             *total += sample;
         }
@@ -611,7 +623,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         if iteration < 3 || (iteration + 1) % 128 == 0 {
             println!(
-                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} graph_replay_ms={graph_replay_ms:.3} logits_gradients_d2h_ms={read_outputs_ms:.3} ce_ms={ce_ms:.3} host_adamw_ms={adam_ms:.3} feedback_total_ms={state_feedback_d2d_ms:.3} feedback_validation_d2h_ms={feedback_validation_ms:.3} feedback_snapshot_d2d_ms={feedback_snapshot_ms:.3} feedback_copy_sync_ms={:.3} checkpoint_state_d2h_ms={checkpoint_state_d2h_ms:.3} parameters_h2d_ms={upload_parameters_ms:.3}",
+                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} graph_replay_ms={graph_replay_ms:.3} logits_gradients_d2h_ms={read_outputs_ms:.3} ce_ms={ce_ms:.3} host_adamw_ms={adam_ms:.3} feedback_total_ms={state_feedback_d2d_ms:.3} feedback_validation_d2h_ms={feedback_validation_ms:.3} feedback_snapshot_d2d_ms={feedback_snapshot_ms:.3} feedback_copy_sync_ms={:.3} feedback_device_event_ms={feedback_device_ms:.3} feedback_events={gpu_feedback_events} checkpoint_state_d2h_ms={checkpoint_state_d2h_ms:.3} parameters_h2d_ms={upload_parameters_ms:.3}",
                 iteration,
                 feedback_copy_ms + feedback_sync_ms,
             );
@@ -619,7 +631,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let profile_windows = train_windows - first_window;
     println!(
-        "training_profile_avg_ms windows={} input_h2d={:.4} graph_replay={:.4} selected_d2h={:.4} host_ce={:.4} host_adamw={:.4} feedback_total={:.4} checkpoint_state_d2h={:.4} parameters_or_checkpoint_io={:.4} feedback_validation_d2h={:.4} feedback_snapshot_d2d={:.4} feedback_copy_sync={:.4} feedback_checked_values={} feedback_copied_values={} timing=host_wall_including_sync",
+        "training_profile_avg_ms windows={} input_h2d={:.4} graph_replay={:.4} selected_d2h={:.4} host_ce={:.4} host_adamw={:.4} feedback_total={:.4} checkpoint_state_d2h={:.4} parameters_or_checkpoint_io={:.4} feedback_validation_d2h={:.4} feedback_snapshot_d2d={:.4} feedback_copy_sync={:.4} feedback_device_event_ms={:.4} feedback_events={} feedback_checked_values={} feedback_copied_values={} timing=host_wall_including_sync",
         profile_windows,
         profile_totals[0] / profile_windows as f64,
         profile_totals[1] / profile_windows as f64,
@@ -632,6 +644,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         profile_totals[8] / profile_windows as f64,
         profile_totals[9] / profile_windows as f64,
         profile_totals[10] / profile_windows as f64,
+        profile_totals[11] / profile_windows as f64,
+        gpu_feedback_events,
         feedback_checked_values,
         feedback_copied_values,
     );

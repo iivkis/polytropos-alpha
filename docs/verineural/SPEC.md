@@ -493,6 +493,8 @@ GPU Compiler переводит **любую поддерживаемую пол
 
 **Экспериментальный исполняемый срез группировки:** runtime может группировать независимые D2D feedback-копии и проверки FP32-доменов по размеру тензоров внутри отдельных CUDA Graph, используя побитовые kernel-операции над дескрипторами. Мутация feedback запрещена до успешного guard. Новая опция `GpuLaunchConfig::with_internal_pointwise_fusion()` разрешает bounded horizontal fusion двух независимых живых Add/Mul промежуточных узлов, даже если они не объявлены публичными выходами: обе записи материализуются, все ранние потребители блокируют перенос, а численный порядок операций сохраняется. Это **не** произвольный region fusion и **не** формальная сертификация CUDA/PTX/JIT. Аппаратные тесты, сравнение с unfused и benchmark необходимы перед утверждением о корректности и ускорении.
 
+**Runtime diagnostic contract:** a reusable CUDA feedback/guard graph is preflight-checked again only when its descriptor plan changes; device allocations remain owned and immutable in address/size for the whole session. `GpuExecution::feedback_state_checked_device_profiled` is an opt-in *measurement*, not an additional mathematical proof: it times one feedback CUDA Graph with events on the explicit non-blocking stream, includes an extra synchronization, and must not be enabled when comparing end-to-end throughput. Normal checked feedback retains its previous synchronous/fail-closed behavior.
+
 Оптимизации не могут свободно изменять FP32-семантику.
 
 Каждое преобразование должно иметь проверенное правило корректности, учитывающее точность арифметики.
