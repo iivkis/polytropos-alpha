@@ -656,8 +656,9 @@ impl GpuProgram {
         self.skipped_nodes().len()
     }
 
-    /// Bounded, multi-output, strict-RNE fusion of independent selected
-    /// pointwise roots. No change to user-facing IR or output identities.
+    /// Bounded, multi-output, strict-RNE fusion of independent live pointwise
+    /// roots, including non-public intermediates whose consumers occur later.
+    /// Both buffers remain materialized; IR and observable values are unchanged.
     pub fn fused_dual_outputs(&self) -> &BTreeMap<usize, usize> {
         &self.fused_dual_outputs
     }
@@ -1738,8 +1739,8 @@ impl GpuProgram {
             let left = &self.graph.nodes()[earlier];
             let right = &self.graph.nodes()[root];
             let valid = earlier < root
-                && self.outputs.contains(&left.id)
-                && self.outputs.contains(&right.id)
+                && self.live_nodes.binary_search(&earlier).is_ok()
+                && self.live_nodes.binary_search(&root).is_ok()
                 && uses[earlier] >= 1
                 && uses[root] >= 1
                 && self.live_nodes.iter().all(|&consumer| {
@@ -3269,16 +3270,17 @@ impl GpuEngine {
                 }
             }
         }
-        // Two independent selected Add/Mul roots of the same F32 shape may
-        // share a kernel even though each remains a distinct public output.
-        // Earlier roots can also have *later* consumers as long as none
-        // execute before the fused kernel. All four operands are materialized
-        // first. Do not reorder any FP32 arithmetic or feedback dependencies.
+        // Horizontal fusion of two independent live Add/Mul nodes of the same
+        // shape. Both results are materialized, even for non-public nodes.
+        // No consumer of the earlier result may run before the second node.
+        // A bounded lookback avoids quadratic compilation on large BPTT DAGs.
+        // FP32 operation order and all observable values are preserved.
         if self.launch.pointwise_fusion() {
-            let mut selected = outputs.iter().map(|id| id.index()).collect::<Vec<_>>();
-            selected.sort_unstable();
+            let candidates = live_nodes.iter().copied().filter(|&index| {
+                matches!(graph.nodes()[index].operation, Operation::Add | Operation::Mul)
+            }).collect::<Vec<_>>();
             let mut reserved = BTreeSet::new();
-            for (later_pos, &later) in selected.iter().enumerate() {
+            for (later_pos, &later) in candidates.iter().enumerate() {
                 let second = &graph.nodes()[later];
                 if !matches!(second.operation, Operation::Add | Operation::Mul)
                     || uses[later] == 0
@@ -3294,7 +3296,7 @@ impl GpuEngine {
                 {
                     continue;
                 }
-                for &earlier in &selected[..later_pos] {
+                for &earlier in candidates[..later_pos].iter().rev().take(64) {
                     let first = &graph.nodes()[earlier];
                     if reserved.contains(&earlier)
                         || skipped.contains(&earlier)
