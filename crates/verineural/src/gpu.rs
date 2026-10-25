@@ -2361,7 +2361,9 @@ impl GpuExecution {
         runtime_domains: bool,
     ) -> Result<Vec<(u64, u64, usize)>, GpuError> {
         let mut destinations = BTreeSet::new();
-        let output_lookup = self.output_addresses.iter()
+        let output_lookup = self
+            .output_addresses
+            .iter()
             .map(|(id, _, address)| (id.index(), *address))
             .collect::<BTreeMap<_, _>>();
         let mut copies = Vec::with_capacity(links.len());
@@ -2400,18 +2402,25 @@ impl GpuExecution {
                     node: state.index(),
                     reason: "feedback destination is not a live source",
                 })?;
-            let &src = output_lookup.get(&next.index()).ok_or(GpuError::InvalidInput {
-                node: next.index(),
-                reason: "feedback source is not a selected output",
-            })?;
+            let &src = output_lookup
+                .get(&next.index())
+                .ok_or(GpuError::InvalidInput {
+                    node: next.index(),
+                    reason: "feedback source is not a selected output",
+                })?;
             copies.push((dest, src, old.shape.element_count()));
         }
         // Feedback is a parallel, simultaneous assignment. Reject duplicate
         // storage roots and cross-transfer read/write aliasing in O(n log n)
         // rather than comparing every pair of hundreds of optimizer tensors.
-        let destinations = copies.iter().map(|&(dest, _, _)| dest).collect::<BTreeSet<_>>();
+        let destinations = copies
+            .iter()
+            .map(|&(dest, _, _)| dest)
+            .collect::<BTreeSet<_>>();
         if destinations.len() != copies.len()
-            || copies.iter().any(|&(dest, src, _)| dest != src && destinations.contains(&src))
+            || copies
+                .iter()
+                .any(|&(dest, src, _)| dest != src && destinations.contains(&src))
         {
             return Err(GpuError::InvalidInput {
                 node: 0,
@@ -2484,7 +2493,9 @@ impl GpuExecution {
                     .iter()
                     .map(|(_, _, _, shape)| shape.element_count())
                     .sum();
-                let output_lookup = self.output_addresses.iter()
+                let output_lookup = self
+                    .output_addresses
+                    .iter()
                     .map(|(id, _, address)| (id.index(), *address))
                     .collect::<BTreeMap<_, _>>();
                 let sources = pending
@@ -3287,9 +3298,16 @@ impl GpuEngine {
         // FP32 operation order and all observable values are preserved.
         if self.launch.pointwise_fusion() {
             let candidates = if self.launch.internal_pointwise_fusion() {
-                live_nodes.iter().copied().filter(|&index| {
-                    matches!(graph.nodes()[index].operation, Operation::Add | Operation::Mul)
-                }).collect::<Vec<_>>()
+                live_nodes
+                    .iter()
+                    .copied()
+                    .filter(|&index| {
+                        matches!(
+                            graph.nodes()[index].operation,
+                            Operation::Add | Operation::Mul
+                        )
+                    })
+                    .collect::<Vec<_>>()
             } else {
                 let mut selected = outputs.iter().map(|id| id.index()).collect::<Vec<_>>();
                 selected.sort_unstable();

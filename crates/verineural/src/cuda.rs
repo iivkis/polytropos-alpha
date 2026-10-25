@@ -147,9 +147,11 @@ DONE:
                 let x = u32::try_from(biggest.div_ceil(256))
                     .map_err(|_| GpuError::UnsupportedSize { elements: biggest })?;
                 buckets.push((
-                    u32::try_from(start).map_err(|_| GpuError::UnsupportedSize { elements: start })?,
-                    u32::try_from(stop - start)
-                        .map_err(|_| GpuError::UnsupportedSize { elements: stop - start })?,
+                    u32::try_from(start)
+                        .map_err(|_| GpuError::UnsupportedSize { elements: start })?,
+                    u32::try_from(stop - start).map_err(|_| GpuError::UnsupportedSize {
+                        elements: stop - start,
+                    })?,
                     x,
                 ));
             }
@@ -159,7 +161,10 @@ DONE:
     }
 
     fn descriptor_bytes(entries: &[[u64; 3]]) -> Vec<u8> {
-        entries.iter().flat_map(|triple| triple.iter().flat_map(|v| v.to_ne_bytes())).collect()
+        entries
+            .iter()
+            .flat_map(|triple| triple.iter().flat_map(|v| v.to_ne_bytes()))
+            .collect()
     }
 
     #[cfg(test)]
@@ -179,7 +184,11 @@ DONE:
                 assert_eq!(start as usize, covered);
                 let slice = &order[start as usize..(start + count) as usize];
                 let ceiling = lengths[slice[0]].next_power_of_two();
-                assert!(slice.iter().all(|&index| lengths[index].next_power_of_two() == ceiling));
+                assert!(
+                    slice
+                        .iter()
+                        .all(|&index| lengths[index].next_power_of_two() == ceiling)
+                );
                 assert_eq!(
                     blocks as usize,
                     lengths[*slice.last().unwrap()].div_ceil(256)
@@ -202,7 +211,10 @@ DONE:
                 .chunks_exact(8)
                 .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
                 .collect::<Vec<_>>();
-            let expected = entries.iter().flat_map(|e| e.iter().copied()).collect::<Vec<_>>();
+            let expected = entries
+                .iter()
+                .flat_map(|e| e.iter().copied())
+                .collect::<Vec<_>>();
             assert_eq!(reconstructed, expected);
         }
     }
@@ -583,7 +595,11 @@ DONE:
 
         // Packed metadata is never interpreted as f32. The transfer is
         // staged in pinned host memory until the non-blocking stream sync.
-        fn upload_descriptor_bytes(&mut self, address: DevicePtr, bytes: &[u8]) -> Result<(), GpuError> {
+        fn upload_descriptor_bytes(
+            &mut self,
+            address: DevicePtr,
+            bytes: &[u8],
+        ) -> Result<(), GpuError> {
             let _context = self.enter_context()?;
             let staging = self.staging_buffer(bytes.len())?;
             unsafe {
@@ -699,13 +715,15 @@ DONE:
                     self.guard_graph = ptr::null_mut();
                 }
                 self.guard_plan.clear();
-                let (order, batches) = transfer_buckets(
-                    &sources.iter().map(|source| source.1).collect::<Vec<_>>(),
-                )?;
-                let entries = order.iter().map(|&index| {
-                    let (address, elements, nonnegative) = sources[index];
-                    [address, elements as u64, u64::from(nonnegative)]
-                }).collect::<Vec<_>>();
+                let (order, batches) =
+                    transfer_buckets(&sources.iter().map(|source| source.1).collect::<Vec<_>>())?;
+                let entries = order
+                    .iter()
+                    .map(|&index| {
+                        let (address, elements, nonnegative) = sources[index];
+                        [address, elements as u64, u64::from(nonnegative)]
+                    })
+                    .collect::<Vec<_>>();
                 let bytes = descriptor_bytes(&entries);
                 let words = bytes.len() / std::mem::size_of::<f32>();
                 if words > self.guard_descriptor_capacity {
@@ -805,9 +823,14 @@ DONE:
             }
             // Independent bitwise kernels require disjoint destinations
             // and no cross-transfer write/read dependency.
-            let destinations = copies.iter().map(|&(dst, _, _)| dst).collect::<BTreeSet<_>>();
+            let destinations = copies
+                .iter()
+                .map(|&(dst, _, _)| dst)
+                .collect::<BTreeSet<_>>();
             if destinations.len() != copies.len()
-                || copies.iter().any(|&(dst, src, _)| dst != src && destinations.contains(&src))
+                || copies
+                    .iter()
+                    .any(|&(dst, src, _)| dst != src && destinations.contains(&src))
             {
                 return Err(GpuError::InvalidInput {
                     node: 0,
@@ -847,13 +870,15 @@ DONE:
                     self.feedback_graph = ptr::null_mut();
                 }
                 self.feedback_plan.clear();
-                let (order, batches) = transfer_buckets(
-                    &copies.iter().map(|copy| copy.2).collect::<Vec<_>>(),
-                )?;
-                let entries = order.iter().map(|&index| {
-                    let (dest, source, elements) = copies[index];
-                    [dest, source, elements as u64]
-                }).collect::<Vec<_>>();
+                let (order, batches) =
+                    transfer_buckets(&copies.iter().map(|copy| copy.2).collect::<Vec<_>>())?;
+                let entries = order
+                    .iter()
+                    .map(|&index| {
+                        let (dest, source, elements) = copies[index];
+                        [dest, source, elements as u64]
+                    })
+                    .collect::<Vec<_>>();
                 let bytes = descriptor_bytes(&entries);
                 let words = bytes.len() / std::mem::size_of::<f32>();
                 if words > self.feedback_descriptor_capacity {

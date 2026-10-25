@@ -82,7 +82,10 @@ fn internal_fusion_pairs_live_unselected_nodes_without_erasing_fanout() {
         .compile_outputs(&graph, &selected)
         .unwrap();
     assert!(base.fused_dual_outputs().get(&right.index()) != Some(&left.index()));
-    assert_eq!(fused.fused_dual_outputs().get(&right.index()), Some(&left.index()));
+    assert_eq!(
+        fused.fused_dual_outputs().get(&right.index()),
+        Some(&left.index())
+    );
     assert!(fused.kernel_count().unwrap() < base.kernel_count().unwrap());
     assert_eq!(fused.outputs(), &selected);
     let contract = fused.memory_contracts().unwrap();
@@ -110,18 +113,26 @@ fn internal_fusion_matches_unfused_ir_on_gpu() {
         .enumerate()
         .map(|(i, &node)| {
             let value = [0.125, -0.0, 1.5, -3., 2., 0.5, 1e-12, 7.];
-            (node, Tensor::from_slice(vec![1, 8], &value.map(|x| x + i as f32)).unwrap())
+            (
+                node,
+                Tensor::from_slice(vec![1, 8], &value.map(|x| x + i as f32)).unwrap(),
+            )
         })
         .collect::<Vec<_>>();
     let dir = std::env::temp_dir().join(format!("vn_internal_fusion_{}", std::process::id()));
-    let base = GpuEngine::new("llc", std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()));
-    let optimized = base.clone().with_launch_config(
-        GpuLaunchConfig::default().with_internal_pointwise_fusion()
+    let base = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     );
+    let optimized = base
+        .clone()
+        .with_launch_config(GpuLaunchConfig::default().with_internal_pointwise_fusion());
     let plain = base.compile_outputs(&graph, &selected).unwrap();
     let fused = optimized.compile_outputs(&graph, &selected).unwrap();
     let mut plain_gpu = base.prepare(&plain, &inputs, &dir.join("plain")).unwrap();
-    let mut fused_gpu = optimized.prepare(&fused, &inputs, &dir.join("fused")).unwrap();
+    let mut fused_gpu = optimized
+        .prepare(&fused, &inputs, &dir.join("fused"))
+        .unwrap();
     plain_gpu.replay().unwrap();
     fused_gpu.replay().unwrap();
     let expected = plain_gpu.read_outputs_selected(&selected).unwrap();

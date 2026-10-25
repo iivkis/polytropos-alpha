@@ -223,7 +223,11 @@ fn grouped_feedback_rejects_one_invalid_tensor_without_mutating_other_sizes() {
         tokens.push(token);
         nexts.push(next);
     }
-    let links = states.iter().copied().zip(nexts.iter().copied()).collect::<Vec<_>>();
+    let links = states
+        .iter()
+        .copied()
+        .zip(nexts.iter().copied())
+        .collect::<Vec<_>>();
     let engine = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
@@ -236,14 +240,21 @@ fn grouped_feedback_rejects_one_invalid_tensor_without_mutating_other_sizes() {
     for (i, &state) in states.iter().enumerate() {
         let unchanged = gpu.read_source(state).unwrap();
         assert_eq!(
-            unchanged.values().iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            unchanged
+                .values()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect::<Vec<_>>(),
             originals[i].iter().map(|x| x.to_bits()).collect::<Vec<_>>()
         );
     }
     let mut corrected = vec![2.0f32; 257];
     corrected[0] = -f32::MAX;
-    gpu.update_input(tokens[1], &Tensor::from_slice(vec![257], &corrected).unwrap())
-        .unwrap();
+    gpu.update_input(
+        tokens[1],
+        &Tensor::from_slice(vec![257], &corrected).unwrap(),
+    )
+    .unwrap();
     gpu.replay().unwrap();
     gpu.feedback_state_checked(&links).unwrap();
     for (i, &state) in states.iter().enumerate() {
