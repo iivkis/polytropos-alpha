@@ -62,6 +62,79 @@ fn independent_public_outputs_share_one_kernel_without_losing_observability() {
 }
 
 #[test]
+fn internal_fusion_pairs_live_unselected_nodes_without_erasing_fanout() {
+    let (mut graph, [a, b, c, d], [left, right]) = fixture();
+    let first_a = graph.add(left, c).unwrap();
+    let first_b = graph.mul(left, d).unwrap();
+    let second_a = graph.add(right, a).unwrap();
+    let second_b = graph.mul(right, b).unwrap();
+    let downstream = graph.add(first_a, first_b).unwrap();
+    let selected = [downstream, second_a, second_b];
+    assert!(!selected.contains(&left) && !selected.contains(&right));
+    let old_config = GpuLaunchConfig::default().with_pointwise_fusion();
+    let new_config = old_config.with_internal_pointwise_fusion();
+    let base = GpuEngine::default()
+        .with_launch_config(old_config)
+        .compile_outputs(&graph, &selected)
+        .unwrap();
+    let fused = GpuEngine::default()
+        .with_launch_config(new_config)
+        .compile_outputs(&graph, &selected)
+        .unwrap();
+    assert!(base.fused_dual_outputs().get(&right.index()) != Some(&left.index()));
+    assert_eq!(fused.fused_dual_outputs().get(&right.index()), Some(&left.index()));
+    assert!(fused.kernel_count().unwrap() < base.kernel_count().unwrap());
+    assert_eq!(fused.outputs(), &selected);
+    let contract = fused.memory_contracts().unwrap();
+    assert!(contract.iter().any(|c| {
+        c.kernel_node == right.index()
+            && c.additional_writes == vec![(left.index(), 8)]
+            && c.reads.len() == 4
+    }));
+    assert!(fused.capability_plan().is_ok());
+    assert!(fused.translation_plan().is_ok());
+}
+
+#[test]
+#[ignore = "requires NVIDIA CUDA Graph and LLVM NVPTX; bitwise parity of internal dual-output fusion"]
+fn internal_fusion_matches_unfused_ir_on_gpu() {
+    let (mut graph, inputs, [left, right]) = fixture();
+    let a = graph.add(left, inputs[2]).unwrap();
+    let b = graph.mul(left, inputs[3]).unwrap();
+    let c = graph.add(right, inputs[0]).unwrap();
+    let d = graph.mul(right, inputs[1]).unwrap();
+    let result = graph.add(a, b).unwrap();
+    let selected = [result, c, d];
+    let inputs = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, &node)| {
+            let value = [0.125, -0.0, 1.5, -3., 2., 0.5, 1e-12, 7.];
+            (node, Tensor::from_slice(vec![1, 8], &value.map(|x| x + i as f32)).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let dir = std::env::temp_dir().join(format!("vn_internal_fusion_{}", std::process::id()));
+    let base = GpuEngine::new("llc", std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()));
+    let optimized = base.clone().with_launch_config(
+        GpuLaunchConfig::default().with_internal_pointwise_fusion()
+    );
+    let plain = base.compile_outputs(&graph, &selected).unwrap();
+    let fused = optimized.compile_outputs(&graph, &selected).unwrap();
+    let mut plain_gpu = base.prepare(&plain, &inputs, &dir.join("plain")).unwrap();
+    let mut fused_gpu = optimized.prepare(&fused, &inputs, &dir.join("fused")).unwrap();
+    plain_gpu.replay().unwrap();
+    fused_gpu.replay().unwrap();
+    let expected = plain_gpu.read_outputs_selected(&selected).unwrap();
+    let actual = fused_gpu.read_outputs_selected(&selected).unwrap();
+    for ((expected_id, a), (actual_id, b)) in expected.iter().zip(actual.iter()) {
+        assert_eq!(expected_id, actual_id);
+        for (&x, &y) in a.values().iter().zip(b.values()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
+}
+
+#[test]
 fn dependent_or_differently_shaped_outputs_are_not_paired() {
     let (mut graph, [_, _, c, _], [left, right]) = fixture();
     let dependent = graph.mul(left, c).unwrap();
