@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use crate::translation::{LOG2_E_F32_LLVM, TranslationKernel, TranslationKind, TranslationPlan};
 use crate::{
-    DType, LeanProgram, NeuralError, NeuralGraph, NodeId, NodeStorage, Operation, Shape, Tensor,
-    TensorValue,
+    DType, Domain, LeanProgram, NeuralError, NeuralGraph, NodeId, NodeStorage, Operation, Shape,
+    Tensor, TensorValue,
 };
 
 use super::cuda::CudaSession;
