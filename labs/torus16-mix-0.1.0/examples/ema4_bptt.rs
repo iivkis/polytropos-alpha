@@ -226,15 +226,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(plan) = &gpu_optimizer {
         all_feedback.extend_from_slice(plan.feedback());
     }
+    let mut launch = GpuLaunchConfig::default()
+        .with_approximate_exp()
+        .with_pointwise_fusion();
+    if gpu_optimizer.is_some() {
+        launch = launch.with_internal_pointwise_fusion();
+    }
     let engine = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     )
-    .with_launch_config(
-        GpuLaunchConfig::default()
-            .with_approximate_exp()
-            .with_pointwise_fusion(),
-    );
+    .with_launch_config(launch);
     // Before/after reports count actual CUDA Graph kernel nodes, not the
     // number of semantic IR nodes. Baseline is compiled but NOT executed.
     let old_kernels = {
