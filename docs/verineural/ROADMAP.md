@@ -515,3 +515,36 @@ covers structural compilation, host numerical comparison, GPU bitwise
 restart and EMA4 2+2 vs 4. Numeric discrepancy relative to CPU is
 reported separately from strict GPU restart identity; CUDA/JIT/SASS and
 arbitrary FP32 equivalence remain unproved.
+
+### Independent CUDA Graph multi-stream scheduling (code; hardware acceptance pending)
+
+The architecture-neutral `GpuEngine::prepare_independent` validates every
+member of a batch of *independent* source inventories before allocating CUDA
+resources, then prepares owned `GpuExecution` instances. Each owns its
+CUDA Graph, allocations and explicit `CU_STREAM_NON_BLOCKING` stream in
+the retained shared primary context. `GpuExecution::enqueue_replay` queues
+work without a stream barrier; `complete_replay` synchronizes and publishes
+the correct output epoch. `GpuExecution::replay_independent_batch` queues
+all members before waiting, draining earlier launched sessions on enqueue
+failure and waiting for every stream after a synchronization failure. The
+single-session synchronous `replay` API remains unchanged.
+
+While a graph is queued, all input updates, output readbacks, feedback,
+benchmarks and repeat launches fail closed with `GpuError::ReplayPending`.
+A failed CUDA enqueue/synchronization still permanently poisons the affected
+session, and CUDA stream teardown synchronizes before freeing allocations.
+This is real concurrent *independent* graph submission, not shared-weight
+minibatch training, not gradient accumulation and not a guarantee of hardware
+overlap. `task verify-gpu-independent-batch` checks bitwise serial/batch
+parity, epochs, pending restrictions and new inputs; `task
+benchmark-gpu-independent-batch` reports wall-clock serial vs queued replay
+for four independent sessions. The GPU runtime remains CUDA Graph-only,
+with no legacy streams or kernel launches outside Graph. Hardware acceptance
+and throughput have not been executed by the agent.
+
+**Still open:** a verified GPU-side compact finite-domain guard (the GPU
+AdamW path still uses full D2H validation of changed Finite parameters),
+more general multi-operation/region kernel fusion, tensorized *shared-weight*
+minibatches with correct state separation and gradient aggregation, and a
+sustained EMA4 end-to-end throughput comparison. Scheduling independent
+programs does not automatically accelerate single-sequence EMA4 BPTT.

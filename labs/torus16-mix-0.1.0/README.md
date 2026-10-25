@@ -530,3 +530,21 @@ A separate `task benchmark-gpu-adamw` runs 256 windows under both
 backends with isolated checkpoints and prints actual end-to-end tokens/s
 and CUDA kernel counts. The finite-domain D2H validation is included in
 GPU-mode throughput; compilation and holdout scoring are not.
+
+### Generic independent CUDA Graph sessions (opt-in, NVIDIA acceptance pending)
+
+For unrelated programs, independent input streams or separate consumer
+models, `GpuEngine::prepare_independent` prepares multiple executions
+from one compiled `GpuProgram` and validates their source inventories
+before CUDA allocation. `GpuExecution::replay_independent_batch` queues
+their graphs on distinct non-blocking streams *before* synchronization;
+individual `enqueue_replay`/`complete_replay` methods are also available.
+A pending launch is not a completed result and rejects readback/updates.
+`task verify-gpu-independent-batch` checks bitwise parity with serial
+replay, and `task benchmark-gpu-independent-batch` measures host-wall
+latency of four independent execution streams. Both are explicit GPU gates,
+not part of normal host-only tests. This API does not yet implement
+shared-weight batched EMA4 training, gradient aggregation, or higher GPU
+utilization for a single recurrent sequence. Tensor-wise finite-domain
+validation of GPU AdamW remains D2H; no fully GPU-side finite guard is
+claimed.

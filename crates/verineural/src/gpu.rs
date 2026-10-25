@@ -127,6 +127,9 @@ pub enum GpuError {
     ExecutionPoisoned,
     /// No successful replay has produced results for the current inputs.
     OutputNotReady,
+    /// A CUDA Graph launch is queued on this execution's non-blocking stream;
+    /// no readback, feedback or input update is permitted until completion.
+    ReplayPending,
     MissingInput {
         node: usize,
     },
@@ -175,6 +178,10 @@ impl fmt::Display for GpuError {
             Self::OutputNotReady => write!(
                 f,
                 "GPU outputs are not ready; run a successful CUDA Graph replay first"
+            ),
+            Self::ReplayPending => write!(
+                f,
+                "CUDA Graph replay is pending; synchronize before accessing this execution"
             ),
             Self::Io(err) => write!(f, "GPU I/O failure: {err}"),
             Self::LlvmFailed { diagnostics } => write!(f, "NVPTX lowering failed: {diagnostics}"),
@@ -1628,14 +1635,46 @@ impl GpuBenchmark {
 struct ExecutionHealth {
     poisoned: Cell<bool>,
     outputs_ready: Cell<bool>,
+    replay_pending: Cell<bool>,
 }
 
 impl ExecutionHealth {
     fn ensure_ready(&self) -> Result<(), GpuError> {
         if self.poisoned.get() {
             Err(GpuError::ExecutionPoisoned)
+        } else if self.replay_pending.get() {
+            Err(GpuError::ReplayPending)
         } else {
             Ok(())
+        }
+    }
+
+    fn begin_replay(&self) -> Result<(), GpuError> {
+        self.ensure_ready()?;
+        self.outputs_ready.set(false);
+        self.replay_pending.set(true);
+        Ok(())
+    }
+
+    fn finish_replay(&self) -> Result<(), GpuError> {
+        if self.poisoned.get() {
+            Err(GpuError::ExecutionPoisoned)
+        } else if !self.replay_pending.get() {
+            Err(GpuError::OutputNotReady)
+        } else {
+            self.replay_pending.set(false);
+            self.outputs_ready.set(true);
+            Ok(())
+        }
+    }
+
+    fn ensure_pending(&self) -> Result<(), GpuError> {
+        if self.poisoned.get() {
+            Err(GpuError::ExecutionPoisoned)
+        } else if self.replay_pending.get() {
+            Ok(())
+        } else {
+            Err(GpuError::OutputNotReady)
         }
     }
 
@@ -1660,6 +1699,7 @@ impl ExecutionHealth {
     fn record_io<T>(&self, result: Result<T, GpuError>) -> Result<T, GpuError> {
         if result.is_err() {
             self.poisoned.set(true);
+            self.replay_pending.set(false);
             self.invalidate_outputs();
         }
         result
@@ -2112,18 +2152,80 @@ impl GpuExecution {
         Ok(Tensor::new(node.shape.clone(), values)?)
     }
 
-    pub fn replay(&self) -> Result<(), GpuError> {
-        self.execution_health.ensure_ready()?;
-        self.execution_health.invalidate_outputs();
+    /// Queue a CUDA Graph replay without synchronizing the stream.
+    ///
+    /// Other independent executions can enqueue work on their own
+    /// non-blocking streams before any synchronization. The outputs remain
+    /// inaccessible until `complete_replay` returns successfully. Every
+    /// data transfer, feedback and second replay fail closed while pending.
+    pub fn enqueue_replay(&self) -> Result<(), GpuError> {
+        self.execution_health.begin_replay()?;
         self.preserved_output_valid.set(false);
         if self.has_graph {
             self.execution_health
                 .record_io(self.session.launch_graph())?;
         }
+        Ok(())
+    }
+
+    /// Synchronize this execution's stream and publish the replay outputs.
+    pub fn complete_replay(&self) -> Result<(), GpuError> {
+        self.execution_health.ensure_pending()?;
         self.execution_health
             .record_io(self.session.synchronize())?;
-        self.execution_health.outputs_completed();
-        Ok(())
+        self.execution_health.finish_replay()
+    }
+
+    /// Legacy synchronous single-execution path, preserving its contract.
+    pub fn replay(&self) -> Result<(), GpuError> {
+        self.enqueue_replay()?;
+        self.complete_replay()
+    }
+
+    /// Launch independent CUDA Graph executions on distinct non-blocking
+    /// streams before waiting for any of them. No sharing or aliasing of
+    /// mutable source buffers between these owned executions is allowed by
+    /// their separate CUDA allocations. This is independent inference/
+    /// training-task parallelism, **not** gradient accumulation.
+    ///
+    /// Synchronize every already-launched stream even on an enqueue or
+    /// completion error, preventing a stranded pending execution. CUDA
+    /// hardware may serialize kernels; concurrency is not guaranteed.
+    pub fn replay_independent_batch(executions: &mut [Self]) -> Result<(), GpuError> {
+        if executions.is_empty() {
+            return Err(GpuError::InvalidInput {
+                node: 0,
+                reason: "independent GPU execution batch must not be empty",
+            });
+        }
+        // Fail before launching any new work when another member is still
+        // pending or has an unrecoverable CUDA failure.
+        for execution in executions.iter() {
+            execution.execution_health.ensure_ready()?;
+        }
+        let mut queued = 0usize;
+        for execution in executions.iter() {
+            if let Err(err) = execution.enqueue_replay() {
+                for previous in &executions[..queued] {
+                    let _ = previous.complete_replay();
+                }
+                return Err(err);
+            }
+            queued += 1;
+        }
+        let mut first_error = None;
+        for execution in executions.iter().take(queued) {
+            if let Err(err) = execution.complete_replay() {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+            }
+        }
+        if let Some(err) = first_error {
+            Err(err)
+        } else {
+            Ok(())
+        }
     }
 
     /// Read the primary output while preserving its Semantic IR dtype.
@@ -2922,6 +3024,36 @@ impl GpuEngine {
         })
     }
 
+    /// Prepare independent executions of one compiled graph, each with its
+    /// own CUDA allocations, non-blocking stream and source inventory.
+    /// Validate every member's source set before preparing *any* session,
+    /// so a malformed late member cannot trigger partial CUDA allocation.
+    /// Each prepared session may be fed different tokens/state independently;
+    /// this does not aggregate gradients or share trainable weights.
+    pub fn prepare_independent(
+        &self,
+        program: &GpuProgram,
+        batches: &[Vec<(NodeId, Tensor<f32>)>],
+        output_dir: &Path,
+    ) -> Result<Vec<GpuExecution>, GpuError> {
+        if batches.is_empty() {
+            return Err(GpuError::InvalidInput {
+                node: program.output.index(),
+                reason: "independent GPU batch must not be empty",
+            });
+        }
+        for inputs in batches {
+            validate_inputs(program, inputs)?;
+        }
+        batches
+            .iter()
+            .enumerate()
+            .map(|(i, inputs)| {
+                self.prepare(program, inputs, &output_dir.join(format!("instance_{i:04}")))
+            })
+            .collect()
+    }
+
     /// Evaluate all outputs with one shared CUDA Graph capture and replay,
     /// preserving each output's Semantic IR dtype.
     pub fn execute_values(
@@ -3660,6 +3792,51 @@ mod execution_health_tests {
             Err(GpuError::ExecutionPoisoned)
         ));
         assert!(ExecutionHealth::default().ensure_ready().is_ok());
+    }
+
+    #[test]
+    fn empty_parallel_replay_is_a_preflight_error() {
+        assert!(matches!(
+            GpuExecution::replay_independent_batch(&mut []),
+            Err(GpuError::InvalidInput {
+                reason: "independent GPU execution batch must not be empty",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn queued_replay_is_unobservable_until_barrier_and_errors_poison() {
+        let health = ExecutionHealth::default();
+        health.outputs_completed();
+        health.begin_replay().unwrap();
+        assert!(matches!(health.ensure_ready(), Err(GpuError::ReplayPending)));
+        assert!(matches!(
+            health.ensure_outputs_ready(),
+            Err(GpuError::ReplayPending)
+        ));
+        assert!(matches!(health.begin_replay(), Err(GpuError::ReplayPending)));
+        health.ensure_pending().unwrap();
+        health.finish_replay().unwrap();
+        health.ensure_outputs_ready().unwrap();
+        assert!(matches!(
+            health.finish_replay(),
+            Err(GpuError::OutputNotReady)
+        ));
+        health.begin_replay().unwrap();
+        let failure: Result<(), GpuError> = health.record_io(Err(GpuError::Cuda {
+            function: "cuStreamSynchronize",
+            code: 719,
+        }));
+        assert!(matches!(failure, Err(GpuError::Cuda { .. })));
+        assert!(matches!(
+            health.ensure_pending(),
+            Err(GpuError::ExecutionPoisoned)
+        ));
+        assert!(matches!(
+            health.begin_replay(),
+            Err(GpuError::ExecutionPoisoned)
+        ));
     }
 
     #[test]

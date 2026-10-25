@@ -571,6 +571,18 @@ tasks:
         echo "PASS: uninterrupted and checkpoint-resumed training match per-window CE/BPC and optimizer steps"
         echo "PASS: final EMA4 checkpoints are bit-identical, including 271 parameter tensors, recurrent states and AdamW"
 
+  verify-gpu-independent-batch:
+    desc: NVIDIA accept independent CUDA Graph session preparation, pending IO guard, and bitwise serial/parallel equivalence
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test gpu_independent_batch independent_replay_matches_serial_and_rejects_pending_access -- --ignored --nocapture
+
+  benchmark-gpu-independent-batch:
+    desc: Measure four independent CUDA Graphs serial vs queued on separate non-blocking streams
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test gpu_independent_batch independent_streams_report_serial_vs_queued_wall_time -- --ignored --nocapture
+
   verify-gpu-adamw:
     desc: Experimental generic CUDA Graph AdamW, host numeric oracle, GPU restart and EMA4 checkpoint parity
     deps: [prepare]
