@@ -295,7 +295,6 @@ fn checked_feedback_rejects_nonfinite_parameters_atomically() {
     }
 }
 
-
 #[test]
 #[ignore = "requires NVIDIA CUDA Graph; runtime domain guard must reject negative finite values before any feedback writes"]
 fn checked_feedback_gpu_guard_rejects_negative_and_recovers() {
@@ -316,8 +315,7 @@ fn checked_feedback_gpu_guard_rejects_negative_and_recovers() {
                 (state, tensor(&[0., 1., 2., 3.])),
                 (delta, tensor(&[-1., 0., 0., 0.])),
             ],
-            &std::env::temp_dir()
-                .join(format!("vn_feedback_nonnegative_{}", std::process::id())),
+            &std::env::temp_dir().join(format!("vn_feedback_nonnegative_{}", std::process::id())),
         )
         .unwrap();
     gpu.replay().unwrap();

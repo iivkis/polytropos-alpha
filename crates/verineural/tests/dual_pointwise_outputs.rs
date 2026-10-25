@@ -81,12 +81,15 @@ fn dependent_or_differently_shaped_outputs_are_not_paired() {
 fn dual_output_fusion_preserves_later_consumers_but_not_earlier_consumers() {
     let (mut graph, [_, _, _, _], [left, right]) = fixture();
     let downstream = graph.add(left, right).unwrap();
-    let engine = GpuEngine::default()
-        .with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
+    let engine =
+        GpuEngine::default().with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
     let safe = engine
         .compile_outputs(&graph, &[left, right, downstream])
         .unwrap();
-    assert_eq!(safe.fused_dual_outputs().get(&right.index()), Some(&left.index()));
+    assert_eq!(
+        safe.fused_dual_outputs().get(&right.index()),
+        Some(&left.index())
+    );
     assert_eq!(safe.kernel_count().unwrap(), 2);
     assert_eq!(safe.outputs(), &[left, right, downstream]);
 
@@ -102,7 +105,7 @@ fn dual_output_fusion_preserves_later_consumers_but_not_earlier_consumers() {
         unsafe_pair.fused_dual_outputs().get(&later.index()) != Some(&left.index()),
         "moving a producer past an existing consumer violates DAG order"
     );
- }
+}
 
 #[test]
 fn translation_checks_public_output_bindings_with_reordered_ptx_arithmetic() {
@@ -172,8 +175,12 @@ fn gpu_dual_outputs_match_independent_unfused_kernels() {
         .clone()
         .with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
     let dir = std::env::temp_dir().join(format!("vn_dual_output_{}", std::process::id()));
-    let a = base.compile_outputs(&graph, &[left, right, downstream]).unwrap();
-    let b = optimized.compile_outputs(&graph, &[left, right, downstream]).unwrap();
+    let a = base
+        .compile_outputs(&graph, &[left, right, downstream])
+        .unwrap();
+    let b = optimized
+        .compile_outputs(&graph, &[left, right, downstream])
+        .unwrap();
     let mut plain = base.prepare(&a, &bound, &dir.join("plain")).unwrap();
     let mut fused = optimized.prepare(&b, &bound, &dir.join("fused")).unwrap();
     for step in 0..2 {
@@ -188,7 +195,12 @@ fn gpu_dual_outputs_match_independent_unfused_kernels() {
             .read_outputs_selected(&[right, left, downstream])
             .unwrap()
             .iter()
-            .zip(fused.read_outputs_selected(&[right, left, downstream]).unwrap().iter())
+            .zip(
+                fused
+                    .read_outputs_selected(&[right, left, downstream])
+                    .unwrap()
+                    .iter(),
+            )
         {
             assert_eq!(want_id, got_id);
             for (&want, &got) in expected.values().iter().zip(actual.values()) {

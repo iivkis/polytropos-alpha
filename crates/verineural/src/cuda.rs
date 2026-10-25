@@ -72,7 +72,6 @@ DONE:
 }
 "#;
 
-
     struct Library(*mut c_void);
 
     impl Library {
@@ -562,8 +561,12 @@ DONE:
                     check("cuLaunchKernel", unsafe {
                         (self.functions.launch)(
                             self.guard_kernel,
-                            grid, 1, 1,
-                            threads, 1, 1,
+                            grid,
+                            1,
+                            1,
+                            threads,
+                            1,
+                            1,
                             0,
                             self.stream,
                             args.as_mut_ptr(),
@@ -1260,10 +1263,7 @@ mod platform {
                 "CUDA Driver backend requires Linux".into(),
             ))
         }
-        pub fn launch_feedback_copies(
-            &mut self,
-            _: &[(u64, u64, usize)],
-        ) -> Result<(), GpuError> {
+        pub fn launch_feedback_copies(&mut self, _: &[(u64, u64, usize)]) -> Result<(), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))
@@ -1277,7 +1277,6 @@ mod platform {
                 "CUDA Driver backend requires Linux".into(),
             ))
         }
-
 
         pub fn copy_f32_batch_to_host(
             &mut self,
