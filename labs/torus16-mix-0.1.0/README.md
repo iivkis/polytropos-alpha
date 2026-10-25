@@ -440,3 +440,15 @@ optimizer behavior and the generated CUDA code are not Lean-certified.
 Short two-token train BPC is not holdout quality; validation BPC is
 measured after the requested total training range. No Lean or
 machine-code proof of checkpointed AdamW/FP32 training is claimed.
+
+### Device-resident TBPTT state feedback (experimental)
+
+The training loop reuses VeriNeural's generic `GpuExecution::feedback_state`
+contract for all 68 recurrent buffers on the owned non-blocking CUDA stream.
+Every window transfers only logits and trainable gradients D2H and AdamW
+parameters H2D. Recurrent state is read back as a single selected-output batch
+only at checkpoint boundaries, before parameter input updates invalidate the
+outputs. Checkpoints retain the same versioned state/optimizer schema. This is
+an experimental runtime optimization, not an FP32 proof or a guaranteed GPU
+utilization/speedup claim; compare checkpoint bytes for uninterrupted and
+resumed runs and benchmark sustained throughput on the target hardware.

@@ -139,7 +139,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect::<Result<Vec<_>, _>>()?;
     let mut selected = window.outputs().to_vec();
     selected.extend(gradients.iter().copied());
-    selected.extend(window.terminal_states().values().copied());
+    let train_output_count = selected.len();
+    let terminal_outputs = window.terminal_states().values().copied().collect::<Vec<_>>();
+    // Next states are selected for device-to-device feedback, not for
+    // readback on every training window.
+    selected.extend(terminal_outputs.iter().copied());
+    let state_feedback = window
+        .initial_states()
+        .iter()
+        .map(|(name, &source)| {
+            window
+                .terminal_states()
+                .get(name)
+                .copied()
+                .map(|next| (source, next))
+                .ok_or_else(|| format!("missing terminal state for {name}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let engine = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
@@ -188,7 +204,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("missing initial recurrent state: {name}"))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let (mut params, mut states, mut optimizer, first_window) =
+    let (mut params, states, mut optimizer, first_window) =
         if !fresh && checkpoint_path.exists() {
             let ckpt = Ema4Checkpoint::read(&checkpoint_path)?;
             ckpt.validate(
@@ -292,7 +308,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             event.average().as_secs_f64() * 1000.
         );
     }
-    // Selected logits are read with gradients/states after one replay.
+    // Only logits and gradients cross D2H on every window. Recurrent
+    // state feedback remains device-resident until a checkpoint boundary.
     let output_count = window.outputs().len();
     println!(
         "BPTT={} trainable_tensors={} trainable_values={} vocab={} IR_nodes={} CUDA_graph_kernels={}",
@@ -327,8 +344,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let graph_replay_ms = timing.elapsed().as_secs_f64() * 1000.;
 
         let timing = Instant::now();
-        // Single D2H batch, after the sole replay of the training graph.
-        let outputs = gpu.read_outputs_selected(&selected)?;
+        // One D2H batch for logits and gradients, no recurrent state
+        // readback except at checkpoint boundaries.
+        let outputs = gpu.read_outputs_selected(&selected[..train_output_count])?;
         let read_outputs_ms = timing.elapsed().as_secs_f64() * 1000.;
         let timing = Instant::now();
         let mut total = 0f32;
@@ -343,45 +361,54 @@ fn main() -> Result<(), Box<dyn Error>> {
             .enumerate()
             .map(|(i, name)| (name.clone(), outputs[output_count + i].1.clone()))
             .collect::<BTreeMap<_, _>>();
-        // Host staging of all next states before the single H2D update batch
-        // preserves recurrent TBPTT semantics even with aliased GPU buffers.
-        let next_states = window
-            .terminal_states()
-            .keys()
-            .enumerate()
-            .map(|(i, name)| {
-                (
-                    name.clone(),
-                    outputs[output_count + names.len() + i].1.clone(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
         optimizer.step(&mut params, &derivative)?;
         let adam_ms = timing.elapsed().as_secs_f64() * 1000.;
 
+        // The universal GPU runtime validates the full feedback plan and
+        // copies all recurrent state tensors D2D on its non-blocking stream.
+        // This eliminates 68 D2H plus 68 H2D state transfers per window.
         let timing = Instant::now();
-        // Update ONLY AdamW's trainable inventory. window.parameters()
-        // additionally contains fixed numeric sources such as ones_column,
-        // inv_width and epsilon_scalar, which are not AdamW parameters.
-        // 'targets' was validated against 'names' before autodiff.
-        let mut updates = Vec::with_capacity(targets.len() + window.initial_states().len());
-        for (name, &id) in names.iter().zip(&targets) {
-            updates.push((id, &params[name]));
-        }
-        for (name, &id) in window.initial_states() {
-            updates.push((id, &next_states[name]));
-        }
+        gpu.feedback_state(&state_feedback)?;
+        let state_feedback_d2d_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        // Only save recurrent values to host at a durable checkpoint. Read
+        // the terminal states before parameter updates invalidate outputs.
+        let checkpoint_due =
+            (iteration + 1) % checkpoint_every == 0 || iteration + 1 == train_windows;
+        let timing = Instant::now();
+        let checkpoint_states = if checkpoint_due {
+            let copied = gpu.read_outputs_selected(&terminal_outputs)?;
+            Some(
+                window
+                    .terminal_states()
+                    .keys()
+                    .cloned()
+                    .zip(copied.into_iter().map(|(_, value)| value))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        } else {
+            None
+        };
+        let checkpoint_state_d2h_ms = timing.elapsed().as_secs_f64() * 1000.;
+
+        let timing = Instant::now();
+        // The only host-to-device updates are AdamW's trainable tensors.
+        // Fixed numerical sources and recurrent states stay unchanged here.
+        let updates = names
+            .iter()
+            .zip(&targets)
+            .map(|(name, &id)| (id, &params[name]))
+            .collect::<Vec<_>>();
         gpu.update_input_subset(&updates)?;
-        let upload_parameters_states_ms = timing.elapsed().as_secs_f64() * 1000.;
-        states = next_states;
-        if (iteration + 1) % checkpoint_every == 0 || iteration + 1 == train_windows {
+        let upload_parameters_ms = timing.elapsed().as_secs_f64() * 1000.;
+        if let Some(states) = checkpoint_states {
             Ema4Checkpoint {
                 completed_windows: iteration + 1,
                 bptt: window_len,
                 vocab,
                 corpus_fingerprint: corpus_hash,
                 parameters: params.clone(),
-                states: states.clone(),
+                states,
                 optimizer: optimizer.checkpoint(),
             }
             .write_atomic(&checkpoint_path)?;
@@ -397,7 +424,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         if iteration < 3 || (iteration + 1) % 128 == 0 {
             println!(
-                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} graph_replay_ms={graph_replay_ms:.3} logits_gradients_states_d2h_ms={read_outputs_ms:.3} ce_ms={ce_ms:.3} host_adamw_ms={adam_ms:.3} parameters_states_h2d_ms={upload_parameters_states_ms:.3}",
+                "step_profile_window={} input_h2d_ms={upload_inputs_ms:.3} graph_replay_ms={graph_replay_ms:.3} logits_gradients_d2h_ms={read_outputs_ms:.3} ce_ms={ce_ms:.3} host_adamw_ms={adam_ms:.3} state_feedback_d2d_ms={state_feedback_d2d_ms:.3} checkpoint_state_d2h_ms={checkpoint_state_d2h_ms:.3} parameters_h2d_ms={upload_parameters_ms:.3}",
                 iteration
             );
         }
