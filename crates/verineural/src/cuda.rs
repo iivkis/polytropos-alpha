@@ -27,50 +27,140 @@ mod platform {
     // Runtime-only binary32 domain check; never advertised as a Lean proof.
     // Integer bit tests avoid FTZ and preserve the host's signed-zero rule.
     // The kernel launches exclusively during capture into a CUDA Graph.
+    // A single CUDA Graph kernel checks one bucket of arbitrarily shaped
+    // tensors. Entries are (device pointer, element count, domain mask) in
+    // unsigned 64-bit words; all FP32 classification is bitwise.
     const DOMAIN_GUARD_PTX: &str = r#"
 .version 7.0
 .target sm_52
 .address_size 64
 
 .visible .entry vn_domain_guard(
-    .param .u64 input,
+    .param .u64 descriptors,
     .param .u64 flag,
-    .param .u32 length,
-    .param .u32 check_nonnegative
+    .param .u32 first
 )
 {
     .reg .pred %p<10>;
-    .reg .b32 %r<14>;
-    .reg .b64 %rd<5>;
-    ld.param.u64 %rd1, [input];
+    .reg .b32 %r<16>;
+    .reg .b64 %rd<14>;
+    ld.param.u64 %rd1, [descriptors];
     ld.param.u64 %rd2, [flag];
-    ld.param.u32 %r11, [length];
-    ld.param.u32 %r12, [check_nonnegative];
-    mov.u32 %r1, %tid.x;
-    mov.u32 %r2, %ctaid.x;
-    mov.u32 %r3, %ntid.x;
-    mad.lo.u32 %r4, %r2, %r3, %r1;
-    setp.ge.u32 %p1, %r4, %r11;
-    @%p1 bra DONE;
-    mul.wide.u32 %rd3, %r4, 4;
+    ld.param.u32 %r1, [first];
+    mov.u32 %r2, %ctaid.y;
+    add.u32 %r3, %r1, %r2;
+    mul.wide.u32 %rd3, %r3, 24;
     add.u64 %rd4, %rd1, %rd3;
-    ld.global.u32 %r5, [%rd4];
-    and.b32 %r6, %r5, 0x7f800000;
-    setp.eq.u32 %p2, %r6, 0x7f800000;
-    and.b32 %r7, %r5, 0x80000000;
-    and.b32 %r8, %r5, 0x7fffffff;
-    setp.ne.u32 %p3, %r7, 0;
-    setp.ne.u32 %p4, %r8, 0;
+    ld.global.u64 %rd5, [%rd4];
+    add.u64 %rd6, %rd4, 8;
+    ld.global.u64 %rd7, [%rd6];
+    add.u64 %rd8, %rd4, 16;
+    ld.global.u64 %rd9, [%rd8];
+    mov.u32 %r4, %tid.x;
+    mov.u32 %r5, %ctaid.x;
+    mov.u32 %r6, %ntid.x;
+    mad.lo.u32 %r7, %r5, %r6, %r4;
+    cvt.u64.u32 %rd10, %r7;
+    setp.ge.u64 %p1, %rd10, %rd7;
+    @%p1 bra DONE;
+    mul.wide.u32 %rd11, %r7, 4;
+    add.u64 %rd12, %rd5, %rd11;
+    ld.global.u32 %r8, [%rd12];
+    and.b32 %r9, %r8, 0x7f800000;
+    setp.eq.u32 %p2, %r9, 0x7f800000;
+    and.b32 %r10, %r8, 0x80000000;
+    and.b32 %r11, %r8, 0x7fffffff;
+    setp.ne.u32 %p3, %r10, 0;
+    setp.ne.u32 %p4, %r11, 0;
     and.pred %p5, %p3, %p4;
-    setp.ne.u32 %p6, %r12, 0;
+    setp.ne.u64 %p6, %rd9, 0;
     and.pred %p7, %p5, %p6;
     or.pred %p8, %p2, %p7;
-    mov.u32 %r10, 1;
-    @%p8 atom.global.or.b32 %r9, [%rd2], %r10;
+    mov.u32 %r12, 1;
+    @%p8 atom.global.or.b32 %r13, [%rd2], %r12;
 DONE:
     ret;
 }
 "#;
+
+    // An architecture-neutral transfer kernel: 2D grid's Y selects a
+    // descriptor, X copies FP32 *bits* without arithmetic or conversion.
+    // Only plans without read/write aliasing are permitted by the caller.
+    const FEEDBACK_BATCH_PTX: &str = r#"
+.version 7.0
+.target sm_52
+.address_size 64
+
+.visible .entry vn_feedback_batch(
+    .param .u64 descriptors,
+    .param .u32 first
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<7>;
+    .reg .b64 %rd<14>;
+    ld.param.u64 %rd1, [descriptors];
+    ld.param.u32 %r1, [first];
+    mov.u32 %r2, %ctaid.y;
+    add.u32 %r3, %r1, %r2;
+    mul.wide.u32 %rd2, %r3, 24;
+    add.u64 %rd3, %rd1, %rd2;
+    ld.global.u64 %rd4, [%rd3];
+    add.u64 %rd5, %rd3, 8;
+    ld.global.u64 %rd6, [%rd5];
+    add.u64 %rd7, %rd3, 16;
+    ld.global.u64 %rd8, [%rd7];
+    mov.u32 %r4, %tid.x;
+    mov.u32 %r5, %ctaid.x;
+    mov.u32 %r6, %ntid.x;
+    mad.lo.u32 %r2, %r5, %r6, %r4;
+    cvt.u64.u32 %rd9, %r2;
+    setp.ge.u64 %p1, %rd9, %rd8;
+    @%p1 bra DONE;
+    mul.wide.u32 %rd10, %r2, 4;
+    add.u64 %rd11, %rd6, %rd10;
+    ld.global.u32 %r3, [%rd11];
+    add.u64 %rd12, %rd4, %rd10;
+    st.global.u32 [%rd12], %r3;
+DONE:
+    ret;
+}
+"#;
+
+    // Bucket dissimilar sizes so tiny tensors never inherit the launch
+    // width of the largest tensor. Groups are disjoint; starts index the
+    // packed descriptor table. Kernel launches remain inside CUDA Graph.
+    fn transfer_buckets(lengths: &[usize]) -> Result<(Vec<usize>, Vec<(u32, u32, u32)>), GpuError> {
+        let mut order = (0..lengths.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&i| lengths[i].next_power_of_two());
+        let mut buckets = Vec::new();
+        let mut first = 0;
+        while first < order.len() {
+            let key = lengths[order[first]].next_power_of_two();
+            let mut end = first + 1;
+            while end < order.len() && lengths[order[end]].next_power_of_two() == key {
+                end += 1;
+            }
+            for start in (first..end).step_by(65_535) {
+                let stop = end.min(start + 65_535);
+                let biggest = lengths[order[stop - 1]];
+                let x = u32::try_from(biggest.div_ceil(256))
+                    .map_err(|_| GpuError::UnsupportedSize { elements: biggest })?;
+                buckets.push((
+                    u32::try_from(start).map_err(|_| GpuError::UnsupportedSize { elements: start })?,
+                    u32::try_from(stop - start)
+                        .map_err(|_| GpuError::UnsupportedSize { elements: stop - start })?,
+                    x,
+                ));
+            }
+            first = end;
+        }
+        Ok((order, buckets))
+    }
+
+    fn descriptor_bytes(entries: &[[u64; 3]]) -> Vec<u8> {
+        entries.iter().flat_map(|triple| triple.iter().flat_map(|v| v.to_ne_bytes())).collect()
+    }
 
     struct Library(*mut c_void);
 
@@ -259,6 +349,10 @@ DONE:
         feedback_graph: Handle,
         feedback_graph_exec: Handle,
         feedback_plan: Vec<(DevicePtr, DevicePtr, usize)>,
+        feedback_module: Handle,
+        feedback_kernel: Handle,
+        feedback_descriptors: DevicePtr,
+        feedback_descriptor_capacity: usize,
         // A separate, reusable guard Graph checks all runtime-domain
         // obligations before any state-feedback copies are launched.
         guard_module: Handle,
@@ -267,6 +361,8 @@ DONE:
         guard_graph: Handle,
         guard_graph_exec: Handle,
         guard_plan: Vec<(DevicePtr, usize, bool)>,
+        guard_descriptors: DevicePtr,
+        guard_descriptor_capacity: usize,
         capturing: bool,
         _library: Library,
     }
@@ -335,12 +431,18 @@ DONE:
                 feedback_graph: ptr::null_mut(),
                 feedback_graph_exec: ptr::null_mut(),
                 feedback_plan: Vec::new(),
+                feedback_module: ptr::null_mut(),
+                feedback_kernel: ptr::null_mut(),
+                feedback_descriptors: 0,
+                feedback_descriptor_capacity: 0,
                 guard_module: ptr::null_mut(),
                 guard_kernel: ptr::null_mut(),
                 guard_flag: 0,
                 guard_graph: ptr::null_mut(),
                 guard_graph_exec: ptr::null_mut(),
                 guard_plan: Vec::new(),
+                guard_descriptors: 0,
+                guard_descriptor_capacity: 0,
                 capturing: false,
                 _library: library,
             };
@@ -431,6 +533,21 @@ DONE:
             Ok(PinnedBuffer {
                 address,
                 capacity: bytes,
+            })
+        }
+
+        // Packed metadata is never interpreted as f32. The transfer is
+        // staged in pinned host memory until the non-blocking stream sync.
+        fn upload_descriptor_bytes(&mut self, address: DevicePtr, bytes: &[u8]) -> Result<(), GpuError> {
+            let _context = self.enter_context()?;
+            let staging = self.staging_buffer(bytes.len())?;
+            unsafe {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), staging.address.cast::<u8>(), bytes.len())
+            };
+            let pinned = staging.address;
+            self.staging_pending.push(staging);
+            check("cuMemcpyHtoDAsync_v2", unsafe {
+                (self.functions.host_to_device)(address, pinned, bytes.len(), self.stream)
             })
         }
 
@@ -1206,6 +1323,9 @@ DONE:
             }
             if !self.guard_module.is_null() {
                 unsafe { (self.functions.module_unload)(self.guard_module) };
+            }
+            if !self.feedback_module.is_null() {
+                unsafe { (self.functions.module_unload)(self.feedback_module) };
             }
             if !self.module.is_null() {
                 unsafe { (self.functions.module_unload)(self.module) };
