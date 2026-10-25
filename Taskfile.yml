@@ -804,15 +804,36 @@ tasks:
     cmds:
       - |
         set -eu
-        source_dir="${TORUS16_FINETUNE_SOURCE_DIR:-target/torus16-pilot}"
-        out="${TORUS16_FINETUNE_DIR:-target/torus16-finetune-lr5-seed0}"
+        # Match checkpoint fingerprints: BPTT, validation frequency and
+        # training budget are set as one consistent preset, not independent
+        # inherited environment variables. BPTT=2 remains the default.
+        bptt="${TORUS16_FINETUNE_BPTT:-2}"
+        case "$bptt" in
+          2)
+            source_default=target/torus16-pilot
+            out_default=target/torus16-finetune-lr5-seed0
+            eval_every=2048
+            checkpoint_every=1024
+            default_windows=98304
+            ;;
+          4)
+            source_default=target/torus16-bptt4-seed0
+            out_default=target/torus16-bptt4-finetune-lr5-seed0
+            eval_every=1024
+            checkpoint_every=512
+            default_windows=65536
+            ;;
+          *) echo "TORUS16_FINETUNE_BPTT must be 2 or 4" >&2; exit 1 ;;
+        esac
+        source_dir="${TORUS16_FINETUNE_SOURCE_DIR:-$source_default}"
+        out="${TORUS16_FINETUNE_DIR:-$out_default}"
         if [ "$source_dir" = "$out" ]; then echo "Source and finetune directories must differ" >&2; exit 1; fi
         mkdir -p "$out"
         unset TORUS16_FRESH TORUS16_CORPUS TORUS16_INITIAL_PROBE_PATH TORUS16_VERIFY_FUSION TORUS16_BENCH_COMPARE TORUS16_BENCH_FUSED TORUS16_GPU_FEEDBACK_EVENTS
-        export TORUS16_GPU_ADAMW=1 TORUS16_LR_DECAY_5X=1 TORUS16_REUSE_HOLDOUT=1 TORUS16_BPTT=2
-        export TORUS16_VAL_LIMIT=512 TORUS16_TEST_LIMIT=512 TORUS16_EVAL_EVERY=2048 TORUS16_CHECKPOINT_EVERY=1024
+        export TORUS16_GPU_ADAMW=1 TORUS16_LR_DECAY_5X=1 TORUS16_REUSE_HOLDOUT=1 TORUS16_BPTT="$bptt"
+        export TORUS16_VAL_LIMIT=512 TORUS16_TEST_LIMIT=512 TORUS16_EVAL_EVERY="$eval_every" TORUS16_CHECKPOINT_EVERY="$checkpoint_every"
         export TORUS16_METRIC_EVERY=32 TORUS16_LLC_OPT=0 TORUS16_THREADS_PER_BLOCK=256
-        export TORUS16_TRAIN_WINDOWS="${TORUS16_FINETUNE_WINDOWS:-98304}"
+        export TORUS16_TRAIN_WINDOWS="${TORUS16_FINETUNE_WINDOWS:-$default_windows}"
         for mode in torus_shared independent; do
           tag="$mode-matched-seed0"
           source_best="$source_dir/$tag.best.ckpt"
@@ -827,7 +848,7 @@ tasks:
             echo "Incomplete finetune checkpoint pair: $destination / $best" >&2
             exit 1
           fi
-          echo "Fine-tune: $tag target_windows=$TORUS16_TRAIN_WINDOWS AdamW_LR=0.0004 (best-checkpoint source)"
+          echo "Fine-tune: $tag bptt=$TORUS16_BPTT target_windows=$TORUS16_TRAIN_WINDOWS AdamW_LR=0.0004 (best-checkpoint source)"
           TORUS16_MATRIX_MODE="$mode" TORUS16_ROLE_INIT=matched TORUS16_MATRIX_SEED=0 \
             TORUS16_CHECKPOINT="$destination" \
             cargo run --release -p torus16-mix-lab --example ema4_bptt >>"$log" 2>&1 || {
