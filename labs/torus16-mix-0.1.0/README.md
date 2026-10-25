@@ -489,3 +489,44 @@ CUDA JIT/SASS or general training-convergence guarantees. The optional
 `TORUS16_VERIFY_FUSION=1` environment setting can also be used with
 `task train-lab-torus16-ema4-bptt` to compare all training outputs on
 the first pending window before continuing ordinary training.
+
+### Experimental generic GPU AdamW through Semantic IR (opt-in, GPU acceptance pending)
+
+`TORUS16_GPU_ADAMW=1 task train-lab-torus16-ema4-bptt` uses
+`GpuAdamWPlan`, an architecture-neutral graph extension in
+`crates/verineural/src/gpu_adamw.rs`. It assembles AdamW update
+expressions out of the existing public graph primitives (Mul/Add/Sub/Div,
+IEEE sqrt and scalar broadcast), rather than installing lab-specific
+CUDA kernels or launching compute outside CUDA Graph. Only the two FP32
+bias-correction scalars and the next one-hot training inputs are uploaded
+per window. First and second moments, trainable weights, and recurrent
+states are retained as persistent GPU inputs and are fed back D2D.
+
+Important safety/performance boundary: model weights are declared
+`Domain::Finite`, whereas unchecked FP32 arithmetic does not establish
+a finite result. The generic `GpuExecution::feedback_state_checked`
+therefore reads the *updated weights only* D2H as one pinned batch and
+checks the original finite domain **before** any D2D feedback copy.
+No gradient or AdamW moment tensors are read each window. At each
+checkpoint boundary, weights and both moment tensors are read, checked,
+then serialized in the existing checkpoint format. GPU-resident here
+means no host optimizer or parameter H2D each step, **not** literally
+zero D2H traffic or a guarantee of better throughput. Additional
+optimizer IR kernels may erase the saved transfer time; compare sustained
+tokens/sec against the default CPU path on the same machine.
+
+The default remains the prior host AdamW until `task verify-gpu-adamw`
+passes on NVIDIA hardware. That gate compares GPU AdamW with a host
+numeric oracle for several steps (tolerance explicitly reported in
+the test), verifies GPU checkpoint/resume **bit-for-bit**, and exercises
+the full EMA4 training loop over 2+2 versus 4 uninterrupted windows.
+This is hardware testing, not a Lean/IEEE/PTX/SASS proof. An AdamW
+result is checked for finite parameters before any state update, but
+moment tensors are validated on checkpoint export rather than on every
+step. An invalid GPU optimizer output can stop training without a
+durable checkpoint for the current window.
+
+A separate `task benchmark-gpu-adamw` runs 256 windows under both
+backends with isolated checkpoints and prints actual end-to-end tokens/s
+and CUDA kernel counts. The finite-domain D2H validation is included in
+GPU-mode throughput; compilation and holdout scoring are not.

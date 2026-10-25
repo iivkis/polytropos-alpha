@@ -47,6 +47,7 @@ mod consumer;
 mod cuda;
 mod error;
 mod gpu;
+mod gpu_adamw;
 mod ir;
 mod model;
 mod model_execution;
@@ -73,6 +74,7 @@ pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage
 pub use certified::{CertifiedBuildConfig, certified_example_main};
 pub use consumer::{BindingError, ComponentBinder, ObligationError};
 pub use error::NeuralError;
+pub use gpu_adamw::GpuAdamWPlan;
 pub use gpu::{
     Fp32PtxAudit, GpuAssuranceBoundary, GpuAssuranceStatus, GpuBenchmark, GpuCapabilityPlan,
     GpuEngine, GpuError, GpuExecution, GpuKernelCapability, GpuLaunchConfig, GpuMemoryContract,

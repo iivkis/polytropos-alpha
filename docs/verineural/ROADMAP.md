@@ -497,3 +497,21 @@ reuse the user's primary checkpoint or infer any hardware result before the
 actual NVIDIA run. This verifies a bounded numerical execution fixture,
 not a formal FP32/PTX/JIT/SASS theorem; longer-horizon and
 architecture-agnostic equivalence remain open.
+
+### P3 experimental GPU AdamW (code only, NVIDIA acceptance pending)
+
+`GpuAdamWPlan` composes the existing graph's gradient nodes with universal
+tensor arithmetic for AdamW, creates explicit first/second moment sources
+and bias-correction scalar inputs, and exposes D2D feedback plans. EMA4
+opt-in `TORUS16_GPU_ADAMW=1` appends the optimizer to the same reverse
+Semantic IR/CUDA Graph, eliminating per-window host AdamW, gradient
+readback and trainable parameter uploads. One batched D2H finite-domain
+validation of updated weights remains compulsory, because model parameter
+sources require `Domain::Finite` and current FP32 graph operations cannot
+prove it statically. Checkpoints preserve the legacy durable schema,
+including moment tensors and cursor. No measured speedup or GPU utilization
+claim; there are extra optimizer IR kernels. `task verify-gpu-adamw`
+covers structural compilation, host numerical comparison, GPU bitwise
+restart and EMA4 2+2 vs 4. Numeric discrepancy relative to CPU is
+reported separately from strict GPU restart identity; CUDA/JIT/SASS and
+arbitrary FP32 equivalence remain unproved.

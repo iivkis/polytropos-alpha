@@ -1793,8 +1793,17 @@ impl GpuExecution {
         public_outputs: &[NodeId],
         links: &[(NodeId, NodeId)],
     ) -> Result<(), GpuError> {
+        self.configure_feedback(public_outputs, links, false)
+    }
+
+    fn configure_feedback(
+        &mut self,
+        public_outputs: &[NodeId],
+        links: &[(NodeId, NodeId)],
+        runtime_domains: bool,
+    ) -> Result<(), GpuError> {
         self.execution_health.ensure_ready()?;
-        self.feedback_copy_plan(links)?;
+        self.feedback_copy_plan(links, runtime_domains)?;
         let destinations = links
             .iter()
             .map(|&(state, _)| self.input_addresses[&state.index()])
@@ -1928,6 +1937,7 @@ impl GpuExecution {
     fn feedback_copy_plan(
         &self,
         links: &[(NodeId, NodeId)],
+        runtime_domains: bool,
     ) -> Result<Vec<(u64, u64, usize)>, GpuError> {
         let mut destinations = BTreeSet::new();
         let mut copies = Vec::with_capacity(links.len());
@@ -1953,7 +1963,7 @@ impl GpuExecution {
                     actual: new.dtype,
                 }));
             }
-            if !new.domain.satisfies(old.domain) {
+            if !runtime_domains && !new.domain.satisfies(old.domain) {
                 return Err(GpuError::InvalidGraph(NeuralError::DomainNotEstablished {
                     required: old.domain,
                     actual: new.domain,
@@ -1993,18 +2003,76 @@ impl GpuExecution {
         Ok(copies)
     }
 
-    /// Copy completed selected outputs to next-step state inputs on-device.
-    ///
-    /// Requires a successful replay or benchmark after the most recent source
-    /// update. All links are validated before DMA. Observable outputs aliasing
-    /// feedback destinations are snapshotted before being overwritten.
-    /// ModelExecution preserves only named public outputs; raw GpuExecution
-    /// preserves every selected output. An invalid request leaves state intact.
+    /// Strict feedback for statically established source domains.
+    /// Selected outputs aliasing state destinations are device-snapshotted.
     pub fn feedback_state(&mut self, links: &[(NodeId, NodeId)]) -> Result<(), GpuError> {
+        self.feedback_state_impl(links, false)
+    }
+
+    /// Experimental feedback for outputs with weaker *static* domain
+    /// contracts. Reads only the affected output tensors in a single pinned
+    /// D2H batch, validates the actual values against destination domains,
+    /// and copies **no** state before the entire batch passes. No assumption
+    /// that arbitrary FP32 arithmetic remains finite is smuggled into IR.
+    /// This retains D2H numerical validation cost; it avoids gradient D2H,
+    /// host AdamW and parameter H2D on each training step.
+    pub fn feedback_state_checked(
+        &mut self,
+        links: &[(NodeId, NodeId)],
+    ) -> Result<(), GpuError> {
+        self.feedback_state_impl(links, true)
+    }
+
+    fn feedback_state_impl(
+        &mut self,
+        links: &[(NodeId, NodeId)],
+        runtime_domains: bool,
+    ) -> Result<(), GpuError> {
         self.execution_health.ensure_outputs_ready()?;
-        let copies = self.feedback_copy_plan(links)?;
+        let copies = self.feedback_copy_plan(links, runtime_domains)?;
         if copies.is_empty() {
             return Ok(());
+        }
+        if runtime_domains {
+            let pending = links
+                .iter()
+                .filter_map(|&(state, next)| {
+                    let old = self.program.graph.node(state).ok()?;
+                    let new = self.program.graph.node(next).ok()?;
+                    if new.domain.satisfies(old.domain) {
+                        None
+                    } else {
+                        Some((state, next, old.domain, old.shape.clone()))
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !pending.is_empty() {
+                let sources = pending
+                    .iter()
+                    .map(|&(_, next, _, ref shape)| {
+                        let address = self
+                            .output_addresses
+                            .iter()
+                            .find(|(node, _, _)| *node == next)
+                            .expect("feedback plan already validated source")
+                            .2;
+                        (address, shape.element_count())
+                    })
+                    .collect::<Vec<_>>();
+                let copied = self
+                    .execution_health
+                    .record_io(self.session.copy_f32_batch_to_host(&sources))?;
+                for ((state, _, required, shape), values) in pending.iter().zip(copied) {
+                    if self.program.graph.node(*state)?.dtype != DType::F32 {
+                        return Err(GpuError::InvalidInput {
+                            node: state.index(),
+                            reason: "runtime feedback domain check requires F32",
+                        });
+                    }
+                    let tensor = Tensor::new(shape.clone(), values)?;
+                    tensor.validate_domain(*required)?;
+                }
+            }
         }
         if copies
             .iter()
@@ -2014,9 +2082,8 @@ impl GpuExecution {
                 .feedback_observable_outputs
                 .clone()
                 .unwrap_or_else(|| self.program.outputs().to_vec());
-            self.configure_model_feedback(&observable, links)?;
+            self.configure_feedback(&observable, links, runtime_domains)?;
         }
-        // Refresh any earlier snapshots after a newer replay, too.
         self.snapshot_outputs()?;
         for (dst, src, elements) in copies {
             if dst != src {

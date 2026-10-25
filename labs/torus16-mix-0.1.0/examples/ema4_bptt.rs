@@ -13,7 +13,7 @@ use torus16_mix_lab::ema4::{Ema4Weights, architecture_model};
 use torus16_mix_lab::ema4_checkpoint::{Ema4Checkpoint, fingerprint};
 use verineural::{
     AdamW, ArgMaxTieBreak, Domain, GpuEngine, GpuLaunchConfig, NodeId, Shape, Tensor,
-    differentiate_with_seeds, unroll_model,
+    differentiate_with_seeds, unroll_model, GpuAdamWPlan,
 };
 
 fn onehot(token: usize, width: usize) -> Result<Tensor<f32>, Box<dyn Error>> {
@@ -160,44 +160,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or_else(|| format!("missing terminal state for {name}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let engine = GpuEngine::new(
-        "llc",
-        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
-    )
-    .with_launch_config(
-        GpuLaunchConfig::default()
-            .with_approximate_exp()
-            .with_pointwise_fusion(),
-    );
-    // Before/after reports count actual CUDA Graph kernel nodes, not the
-    // number of semantic IR nodes. Baseline is compiled but NOT executed.
-    let old_kernels = {
-        let baseline = GpuEngine::new(
-            "llc",
-            std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
-        )
-        .with_launch_config(GpuLaunchConfig::default().with_approximate_exp())
-        .compile_outputs(reverse.graph(), &selected)?;
-        baseline.kernel_count()?
-    };
-    // Release the unfused program before constructing the GPU execution:
-    // large BPTT graphs should not retain two IR/LLVM copies simultaneously.
-    let program = engine.compile_outputs(reverse.graph(), &selected)?;
-    let new_kernels = program.kernel_count()?;
-    if new_kernels > old_kernels {
-        return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
-    }
-    println!(
-        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} reduction_percent={:.2}",
-        old_kernels,
-        new_kernels,
-        old_kernels - new_kernels,
-        program.fused_mul_adds().len(),
-        program.fused_mul_add_muls().len(),
-        program.fused_binary_pairs().len(),
-        100. * (old_kernels - new_kernels) as f64 / old_kernels as f64
-    );
-
     let all = weights.bindings(0)?;
     let expected_states = window
         .initial_states()
@@ -234,6 +196,69 @@ fn main() -> Result<(), Box<dyn Error>> {
             0usize,
         )
     };
+    // Experimental architecture-neutral GPU optimizer; defaults to the
+    // proven host path until parity and end-to-end throughput are checked.
+    let mut execution_graph = reverse.graph().clone();
+    let gpu_optimizer = if std::env::var_os("TORUS16_GPU_ADAMW").is_some() {
+        let pairs = names
+            .iter()
+            .cloned()
+            .zip(targets.iter().copied().zip(gradients.iter().copied()))
+            .collect::<BTreeMap<_, _>>();
+        Some(GpuAdamWPlan::append(
+            &mut execution_graph,
+            &pairs,
+            &params,
+            &optimizer.checkpoint(),
+        )?)
+    } else {
+        None
+    };
+    if let Some(plan) = &gpu_optimizer {
+        selected.extend(plan.outputs());
+    }
+    let mut all_feedback = state_feedback.clone();
+    if let Some(plan) = &gpu_optimizer {
+        all_feedback.extend_from_slice(plan.feedback());
+    }
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    )
+    .with_launch_config(
+        GpuLaunchConfig::default()
+            .with_approximate_exp()
+            .with_pointwise_fusion(),
+    );
+    // Before/after reports count actual CUDA Graph kernel nodes, not the
+    // number of semantic IR nodes. Baseline is compiled but NOT executed.
+    let old_kernels = {
+        let baseline = GpuEngine::new(
+            "llc",
+            std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+        )
+        .with_launch_config(GpuLaunchConfig::default().with_approximate_exp())
+        .compile_outputs(&execution_graph, &selected)?;
+        baseline.kernel_count()?
+    };
+    // Release the unfused program before constructing the GPU execution:
+    // large BPTT graphs should not retain two IR/LLVM copies simultaneously.
+    let program = engine.compile_outputs(&execution_graph, &selected)?;
+    let new_kernels = program.kernel_count()?;
+    if new_kernels > old_kernels {
+        return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
+    }
+    println!(
+        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} reduction_percent={:.2}",
+        old_kernels,
+        new_kernels,
+        old_kernels - new_kernels,
+        program.fused_mul_adds().len(),
+        program.fused_mul_add_muls().len(),
+        program.fused_binary_pairs().len(),
+        100. * (old_kernels - new_kernels) as f64 / old_kernels as f64
+    );
+
     let base = all
         .into_iter()
         .filter(|(name, _)| name != "token")
@@ -260,6 +285,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let supplied = window.bindings(&base, &step_tokens, &blank_seeds)?;
     let mut supplied = supplied;
     supplied.extend(reverse.constants().iter().cloned());
+    if let Some(plan) = &gpu_optimizer {
+        supplied.extend(plan.bindings().iter().cloned());
+    }
     supplied.push((ones_id, Tensor::from_vec(vec![vocab, 1], vec![1.; vocab])?));
     supplied.push((
         scale_id,
@@ -289,6 +317,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 onehot(corpus.train[start + t + 1], vocab)?,
             ));
         }
+        if let Some(plan) = &gpu_optimizer {
+            updates.extend(plan.correction_inputs(first_window as u64 + 1)?);
+        }
         Some(updates)
     } else {
         None
@@ -299,7 +330,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
         )
         .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
-        let baseline = baseline_engine.compile_outputs(reverse.graph(), &selected)?;
+        let baseline = baseline_engine.compile_outputs(&execution_graph, &selected)?;
         let baseline_sources = supplied
             .iter()
             .filter(|(id, _)| baseline.source_inputs().contains(id))
@@ -397,7 +428,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         names.len(),
         parameter_count,
         vocab,
-        reverse.graph().nodes().len(),
+        execution_graph.nodes().len(),
         program.kernel_count()?
     );
     let train_start = Instant::now();
@@ -415,6 +446,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             input_updates.push((window.inputs()[t]["token"], tensor));
             input_updates.push((window.cotangents()[t], &labels[t]));
         }
+        // Only two scalar bias corrections cross H2D on the GPU path.
+        let correction_updates = gpu_optimizer
+            .as_ref()
+            .map(|plan| plan.correction_inputs(iteration as u64 + 1))
+            .transpose()?;
+        if let Some(inputs) = &correction_updates {
+            for (id, tensor) in inputs {
+                input_updates.push((*id, tensor));
+            }
+        }
         let timing = Instant::now();
         gpu.update_input_subset(&input_updates)?;
         let upload_inputs_ms = timing.elapsed().as_secs_f64() * 1000.;
@@ -426,7 +467,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         let timing = Instant::now();
         // One D2H batch for logits and gradients, no recurrent state
         // readback except at checkpoint boundaries.
-        let outputs = gpu.read_outputs_selected(&selected[..train_output_count])?;
+        let read_count = if gpu_optimizer.is_some() {
+            output_count
+        } else {
+            train_output_count
+        };
+        let outputs = gpu.read_outputs_selected(&selected[..read_count])?;
         let read_outputs_ms = timing.elapsed().as_secs_f64() * 1000.;
         let timing = Instant::now();
         let mut total = 0f32;
@@ -436,23 +482,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         let ce_ms = timing.elapsed().as_secs_f64() * 1000.;
 
         let timing = Instant::now();
-        let derivative = names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), outputs[output_count + i].1.clone()))
-            .collect::<BTreeMap<_, _>>();
-        optimizer.step(&mut params, &derivative)?;
+        if gpu_optimizer.is_none() {
+            let derivative = names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), outputs[output_count + i].1.clone()))
+                .collect::<BTreeMap<_, _>>();
+            optimizer.step(&mut params, &derivative)?;
+        }
         let adam_ms = timing.elapsed().as_secs_f64() * 1000.;
 
-        // The universal GPU runtime validates the full feedback plan and
-        // copies all recurrent state tensors D2D on its non-blocking stream.
-        // This eliminates 68 D2H plus 68 H2D state transfers per window.
+        // All recurrent states and, in GPU mode, trainable weights and
+        // AdamW moments move simultaneously on-device after the replay.
         let timing = Instant::now();
-        gpu.feedback_state(&state_feedback)?;
+        if gpu_optimizer.is_some() {
+            gpu.feedback_state_checked(&all_feedback)?;
+        } else {
+            gpu.feedback_state(&all_feedback)?;
+        }
         let state_feedback_d2d_ms = timing.elapsed().as_secs_f64() * 1000.;
 
-        // Only save recurrent values to host at a durable checkpoint. Read
-        // the terminal states before parameter updates invalidate outputs.
         let checkpoint_due =
             (iteration + 1) % checkpoint_every == 0 || iteration + 1 == train_windows;
         let timing = Instant::now();
@@ -472,14 +521,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         let checkpoint_state_d2h_ms = timing.elapsed().as_secs_f64() * 1000.;
 
         let timing = Instant::now();
-        // The only host-to-device updates are AdamW's trainable tensors.
-        // Fixed numerical sources and recurrent states stay unchanged here.
-        let updates = names
-            .iter()
-            .zip(&targets)
-            .map(|(name, &id)| (id, &params[name]))
-            .collect::<Vec<_>>();
-        gpu.update_input_subset(&updates)?;
+        let checkpoint_optimizer = if let Some(plan) = &gpu_optimizer {
+            if checkpoint_due {
+                let (updated, saved) = plan.checkpoint(&mut gpu, iteration as u64 + 1)?;
+                params = updated;
+                Some(saved)
+            } else {
+                None
+            }
+        } else {
+            // Legacy host AdamW needs to upload every named trainable tensor.
+            // The GPU optimizer needs no such transfers between checkpoints.
+            let updates = names
+                .iter()
+                .zip(&targets)
+                .map(|(name, &id)| (id, &params[name]))
+                .collect::<Vec<_>>();
+            gpu.update_input_subset(&updates)?;
+            None
+        };
         let upload_parameters_ms = timing.elapsed().as_secs_f64() * 1000.;
         if let Some(states) = checkpoint_states {
             Ema4Checkpoint {
@@ -489,7 +549,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 corpus_fingerprint: corpus_hash,
                 parameters: params.clone(),
                 states,
-                optimizer: optimizer.checkpoint(),
+                optimizer: checkpoint_optimizer.unwrap_or_else(|| optimizer.checkpoint()),
             }
             .write_atomic(&checkpoint_path)?;
         }
@@ -499,7 +559,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             iteration,
             total / window_len as f32,
             total / (window_len as f32 * std::f32::consts::LN_2),
-            optimizer.steps(),
+            if gpu_optimizer.is_some() {
+                iteration as u64 + 1
+            } else {
+                optimizer.steps()
+            },
             step_start.elapsed().as_secs_f64() * 1000.
         );
         if iteration < 3 || (iteration + 1) % 128 == 0 {
@@ -511,10 +575,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let train_elapsed = train_start.elapsed().as_secs_f64();
     println!(
-        "training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} scope=GPU_replay_plus_host_CE_AdamW_transfers",
+        "training_total_s={:.6} training_tokens={} training_tokens_per_second={:.2} scope=GPU_replay_plus_host_CE_AdamW_transfers optimizer_backend={}",
         train_elapsed,
         (train_windows - first_window) * window_len,
-        ((train_windows - first_window) * window_len) as f64 / train_elapsed
+        ((train_windows - first_window) * window_len) as f64 / train_elapsed,
+        if gpu_optimizer.is_some() { "GPU_IR" } else { "CPU" }
     );
     // Real holdout: chronological final 10% only. One recurrent inference
     // step per symbol, with state reset to zero at the validation boundary.
@@ -542,7 +607,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         validation_start.elapsed().as_secs_f64()
     );
     println!(
-        "NOTE: GPU approximate-exp softmax CE seed + VJP, host CE metric and AdamW; no formal FP32 gradient proof."
+        "NOTE: GPU approximate-exp softmax CE seed + VJP, host CE metric; GPU AdamW experimental when opted in; no formal FP32 gradient/optimizer proof."
     );
     Ok(())
 }
