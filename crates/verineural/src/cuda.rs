@@ -508,10 +508,10 @@ DONE:
             address: DevicePtr,
             elements: usize,
         ) -> Result<(), GpuError> {
-            if !self
+            if self
                 .allocation_capacity
                 .get(&address)
-                .is_some_and(|&capacity| capacity >= elements)
+                .is_none_or(|&capacity| capacity < elements)
             {
                 return Err(GpuError::Driver(
                     "CUDA kernel memory contract references an unallocated or undersized buffer"
