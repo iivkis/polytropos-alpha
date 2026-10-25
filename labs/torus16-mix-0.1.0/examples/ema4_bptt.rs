@@ -16,7 +16,8 @@ use torus16_mix_lab::ema4_checkpoint::{
     fingerprint,
 };
 use verineural::{
-    AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, Model, NodeId,
+    AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuCodegenOptLevel, GpuEngine, GpuLaunchConfig,
+    Model, NodeId,
     ReluFusion, Shape, Tensor, differentiate_with_seeds, unroll_model,
 };
 
@@ -233,6 +234,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     if metric_every > 1 && !gpu_adamw_requested {
         return Err("TORUS16_METRIC_EVERY>1 requires TORUS16_GPU_ADAMW=1: host optimizer still needs gradient readback".into());
     }
+    let llc_opt = option_usize("TORUS16_LLC_OPT", 0, 0, 2)?;
+    let codegen_opt_level = match llc_opt {
+        0 => GpuCodegenOptLevel::O0,
+        2 => GpuCodegenOptLevel::O2,
+        _ => return Err("TORUS16_LLC_OPT supports only 0 or 2".into()),
+    };
     let threads_per_block = option_usize("TORUS16_THREADS_PER_BLOCK", 256, 64, 512)?;
     if !matches!(threads_per_block, 64 | 128 | 256 | 512) {
         return Err("TORUS16_THREADS_PER_BLOCK must be one of 64,128,256,512".into());
@@ -394,7 +401,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     )
-    .with_launch_config(launch);
+    .with_launch_config(launch)
+    .with_codegen_opt_level(codegen_opt_level);
     let holdout = HoldoutContext {
         engine: &engine,
         model: &model,
@@ -603,6 +611,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Only logits and gradients cross D2H on every window. Recurrent
     // state feedback remains device-resident until a checkpoint boundary.
     let output_count = window.outputs().len();
+    println!("llc_codegen_optimization={} translation_validation=required numeric_equivalence=not_proven", codegen_opt_level.llc_flag());
     println!(
         "throughput_policy_threads_per_block={} metric_every={} optimizer_backend={} metric_sampling=reporting_only",
         threads_per_block,

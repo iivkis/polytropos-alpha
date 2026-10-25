@@ -38,6 +38,26 @@ impl ReluFusion {
     }
 }
 
+/// LLVM NVPTX code-generation optimization level. This is deliberately
+/// independent of the graph's FP32 policy: optimizing machine instructions
+/// does not constitute a proof of numeric or hardware equivalence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuCodegenOptLevel {
+    #[default]
+    O0,
+    /// Experimental: only use after translation validation and a GPU parity run.
+    O2,
+}
+
+impl GpuCodegenOptLevel {
+    pub const fn llc_flag(self) -> &'static str {
+        match self {
+            Self::O0 => "-O0",
+            Self::O2 => "-O2",
+        }
+    }
+}
+
 /// One-dimensional CUDA launch policy, validated before compilation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuLaunchConfig {
@@ -2881,6 +2901,7 @@ pub struct GpuEngine {
     llc: PathBuf,
     arch: String,
     launch: GpuLaunchConfig,
+    codegen_opt_level: GpuCodegenOptLevel,
 }
 
 impl Default for GpuEngine {
@@ -2896,12 +2917,20 @@ impl GpuEngine {
             llc: llc.into(),
             arch: arch.into(),
             launch: GpuLaunchConfig::default(),
+            codegen_opt_level: GpuCodegenOptLevel::O0,
         }
     }
 
     /// Select a checked launch policy. Fusion remains experimental.
     pub fn with_launch_config(mut self, launch: GpuLaunchConfig) -> Self {
         self.launch = launch;
+        self
+    }
+
+    /// Experimental NVPTX codegen profile; O0 remains the safe default.
+    /// The emitted PTX must still pass translation validation before execution.
+    pub fn with_codegen_opt_level(mut self, level: GpuCodegenOptLevel) -> Self {
+        self.codegen_opt_level = level;
         self
     }
 
@@ -3624,7 +3653,7 @@ impl GpuEngine {
         let output = Command::new(&self.llc)
             .arg("-march=nvptx64")
             .arg(format!("-mcpu={}", self.arch))
-            .arg("-O0")
+            .arg(self.codegen_opt_level.llc_flag())
             .arg("-o")
             .arg(&ptx)
             .arg(&ir)
