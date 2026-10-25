@@ -130,7 +130,10 @@ DONE:
     // Bucket dissimilar sizes so tiny tensors never inherit the launch
     // width of the largest tensor. Groups are disjoint; starts index the
     // packed descriptor table. Kernel launches remain inside CUDA Graph.
-    fn transfer_buckets(lengths: &[usize]) -> Result<(Vec<usize>, Vec<(u32, u32, u32)>), GpuError> {
+    type TransferBucket = (u32, u32, u32);
+    type TransferPlan = (Vec<usize>, Vec<TransferBucket>);
+
+    fn transfer_buckets(lengths: &[usize]) -> Result<TransferPlan, GpuError> {
         let mut order = (0..lengths.len()).collect::<Vec<_>>();
         order.sort_by_key(|&i| lengths[i].next_power_of_two());
         let mut buckets = Vec::new();
@@ -165,58 +168,6 @@ DONE:
             .iter()
             .flat_map(|triple| triple.iter().flat_map(|v| v.to_ne_bytes()))
             .collect()
-    }
-
-    #[cfg(test)]
-    mod batching_tests {
-        use super::{descriptor_bytes, transfer_buckets};
-
-        #[test]
-        fn buckets_preserve_every_copy_and_bound_wasted_threads() {
-            let lengths = [1024, 1, 257, 2, 513, 128, 1025, 4];
-            let (order, buckets) = transfer_buckets(&lengths).unwrap();
-            assert_eq!(order.len(), lengths.len());
-            let mut unique = order.clone();
-            unique.sort_unstable();
-            assert_eq!(unique, (0..lengths.len()).collect::<Vec<_>>());
-            let mut covered = 0;
-            for (start, count, blocks) in buckets {
-                assert_eq!(start as usize, covered);
-                let slice = &order[start as usize..(start + count) as usize];
-                let ceiling = lengths[slice[0]].next_power_of_two();
-                assert!(
-                    slice
-                        .iter()
-                        .all(|&index| lengths[index].next_power_of_two() == ceiling)
-                );
-                assert_eq!(
-                    blocks as usize,
-                    lengths[*slice.last().unwrap()].div_ceil(256)
-                );
-                assert!(count <= 65_535);
-                covered += count as usize;
-            }
-            assert_eq!(covered, lengths.len());
-        }
-
-        #[test]
-        fn descriptors_keep_full_pointer_bits_and_exact_lengths() {
-            let entries = [
-                [0xfeed_beef_dead_cafe, 0x1234_5678_ffff_0000, 4],
-                [0, 0x8000_0000_0000_0000, 1025],
-            ];
-            let bytes = descriptor_bytes(&entries);
-            assert_eq!(bytes.len(), entries.len() * 24);
-            let reconstructed = bytes
-                .chunks_exact(8)
-                .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
-                .collect::<Vec<_>>();
-            let expected = entries
-                .iter()
-                .flat_map(|e| e.iter().copied())
-                .collect::<Vec<_>>();
-            assert_eq!(reconstructed, expected);
-        }
     }
 
     struct Library(*mut c_void);
@@ -1481,6 +1432,57 @@ DONE:
             if !self.context.is_null() {
                 unsafe { (self.functions.primary_release)(self.device) };
             }
+        }
+    }
+    #[cfg(test)]
+    mod batching_tests {
+        use super::{descriptor_bytes, transfer_buckets};
+
+        #[test]
+        fn buckets_preserve_every_copy_and_bound_wasted_threads() {
+            let lengths = [1024, 1, 257, 2, 513, 128, 1025, 4];
+            let (order, buckets) = transfer_buckets(&lengths).unwrap();
+            assert_eq!(order.len(), lengths.len());
+            let mut unique = order.clone();
+            unique.sort_unstable();
+            assert_eq!(unique, (0..lengths.len()).collect::<Vec<_>>());
+            let mut covered = 0;
+            for (start, count, blocks) in buckets {
+                assert_eq!(start as usize, covered);
+                let slice = &order[start as usize..(start + count) as usize];
+                let ceiling = lengths[slice[0]].next_power_of_two();
+                assert!(
+                    slice
+                        .iter()
+                        .all(|&index| lengths[index].next_power_of_two() == ceiling)
+                );
+                assert_eq!(
+                    blocks as usize,
+                    lengths[*slice.last().unwrap()].div_ceil(256)
+                );
+                assert!(count <= 65_535);
+                covered += count as usize;
+            }
+            assert_eq!(covered, lengths.len());
+        }
+
+        #[test]
+        fn descriptors_keep_full_pointer_bits_and_exact_lengths() {
+            let entries = [
+                [0xfeed_beef_dead_cafe, 0x1234_5678_ffff_0000, 4],
+                [0, 0x8000_0000_0000_0000, 1025],
+            ];
+            let bytes = descriptor_bytes(&entries);
+            assert_eq!(bytes.len(), entries.len() * 24);
+            let reconstructed = bytes
+                .chunks_exact(8)
+                .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            let expected = entries
+                .iter()
+                .flat_map(|e| e.iter().copied())
+                .collect::<Vec<_>>();
+            assert_eq!(reconstructed, expected);
         }
     }
 }
