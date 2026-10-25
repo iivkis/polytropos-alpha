@@ -195,3 +195,63 @@ fn device_feedback_matches_host_staged_state_bitwise() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires NVIDIA CUDA Graph; grouped guard must reject before any grouped feedback write"]
+fn grouped_feedback_rejects_one_invalid_tensor_without_mutating_other_sizes() {
+    let mut graph = NeuralGraph::default();
+    let mut bindings = Vec::new();
+    let mut states = Vec::new();
+    let mut tokens = Vec::new();
+    let mut nexts = Vec::new();
+    let mut originals = Vec::new();
+    for &length in &[1usize, 257, 1025] {
+        let shape = Shape::new(vec![length]).unwrap();
+        let state = graph.input(shape.clone(), Domain::Finite);
+        let token = graph.input(shape, Domain::Finite);
+        let next = graph.add(state, token).unwrap();
+        let mut initial = vec![1.0f32; length];
+        let mut update = vec![2.0f32; length];
+        if length == 257 {
+            initial[0] = f32::MAX;
+            update[0] = f32::MAX;
+        }
+        originals.push(initial.clone());
+        bindings.push((state, Tensor::from_slice(vec![length], &initial).unwrap()));
+        bindings.push((token, Tensor::from_slice(vec![length], &update).unwrap()));
+        states.push(state);
+        tokens.push(token);
+        nexts.push(next);
+    }
+    let links = states.iter().copied().zip(nexts.iter().copied()).collect::<Vec<_>>();
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    );
+    let program = engine.compile_outputs(&graph, &nexts).unwrap();
+    let dir = std::env::temp_dir().join(format!("vn_grouped_feedback_{}", std::process::id()));
+    let mut gpu = engine.prepare(&program, &bindings, &dir).unwrap();
+    gpu.replay().unwrap();
+    assert!(gpu.feedback_state_checked(&links).is_err());
+    for (i, &state) in states.iter().enumerate() {
+        let unchanged = gpu.read_source(state).unwrap();
+        assert_eq!(
+            unchanged.values().iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            originals[i].iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+    }
+    let mut corrected = vec![2.0f32; 257];
+    corrected[0] = -f32::MAX;
+    gpu.update_input(tokens[1], &Tensor::from_slice(vec![257], &corrected).unwrap())
+        .unwrap();
+    gpu.replay().unwrap();
+    gpu.feedback_state_checked(&links).unwrap();
+    for (i, &state) in states.iter().enumerate() {
+        let updated = gpu.read_source(state).unwrap();
+        assert_eq!(updated.values().len(), originals[i].len());
+        for (lane, &value) in updated.values().iter().enumerate() {
+            let want = if i == 1 && lane == 0 { 0.0 } else { 3.0 };
+            assert_eq!(value.to_bits(), (want as f32).to_bits());
+        }
+    }
+}
