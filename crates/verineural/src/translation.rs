@@ -40,6 +40,12 @@ pub enum TranslationKind {
         multiply_on_right: bool,
         add_on_right: bool,
     },
+    /// Independent left Mul and repeated right Mul, then rounded Add.
+    MulDiamondAdd {
+        reused_source: u8,
+        right_mul_on_right: bool,
+        left_mul_on_right: bool,
+    },
     MulAddMul {
         add_mul_on_right: bool,
         mul_add_on_right: bool,
@@ -108,6 +114,7 @@ impl TranslationKind {
             Self::BinaryChain { .. } => "binary_chain",
             Self::SqrtAddDiv { .. } => "sqrt_add_div",
             Self::MulMulAddDiv { .. } => "mul_mul_add_div",
+            Self::MulDiamondAdd { .. } => "mul_diamond_add",
             Self::MulAddMul { .. } => "mul_add_mul",
             Self::Sub => "sub_rn",
             Self::DivRne => "div_rn",
@@ -147,6 +154,7 @@ impl TranslationKind {
             }
             Self::MulAddMul { .. } => (1, 2, 0),
             Self::MulMulAddDiv { .. } => (1, 2, 0),
+            Self::MulDiamondAdd { .. } => (1, 3, 0),
             Self::SqrtAddDiv { .. } => (1, 0, 0),
             Self::Sub | Self::DivRne | Self::SqrtRne => (0, 0, 0),
             Self::ExpApprox => (0, 1, 0),
@@ -184,7 +192,8 @@ impl TranslationKind {
             | Self::MulAddMul { .. }
             | Self::BinaryChain { .. }
             | Self::SqrtAddDiv { .. } => 3,
-            Self::MulMulAddDiv { .. } => 4,
+            Self::MulMulAddDiv { .. }
+            | Self::MulDiamondAdd { .. } => 4,
             _ => 2,
         }
     }
@@ -234,6 +243,15 @@ impl TranslationKind {
                     + 2 * usize::from(multiply_on_right)
                     + 4 * usize::from(add_on_right)
             }
+            Self::MulDiamondAdd {
+                reused_source,
+                right_mul_on_right,
+                left_mul_on_right,
+            } => {
+                usize::from(reused_source)
+                    + 2 * usize::from(right_mul_on_right)
+                    + 4 * usize::from(left_mul_on_right)
+            }
             Self::MulAddMul {
                 add_mul_on_right,
                 mul_add_on_right,
@@ -266,6 +284,11 @@ impl TranslationKind {
                 reused_source: (inner & 1) as u8,
                 multiply_on_right: inner & 2 != 0,
                 add_on_right: inner & 4 != 0,
+            },
+            "mul_diamond_add" if inner < 8 => Self::MulDiamondAdd {
+                reused_source: (inner & 1) as u8,
+                right_mul_on_right: inner & 2 != 0,
+                left_mul_on_right: inner & 4 != 0,
             },
             "mul_add_mul" if inner < 12 => Self::MulAddMul {
                 add_mul_on_right: inner & 1 != 0,
@@ -420,9 +443,15 @@ impl TranslationPlan {
                     | TranslationKind::BinaryChain { .. }
                     | TranslationKind::SqrtAddDiv { .. }
                     | TranslationKind::MulMulAddDiv { .. }
+                    | TranslationKind::MulDiamondAdd { .. }
             ) {
                 if kernel.reads.iter().any(|&(_, size)| size != kernel.writes) {
                     return Err(invalid("mul-add source shape mismatch"));
+                }
+                if let TranslationKind::MulDiamondAdd { reused_source, .. } = kernel.kind {
+                    if reused_source > 1 {
+                        return Err(invalid("MulDiamondAdd source selector must be 0..=1"));
+                    }
                 }
                 if let TranslationKind::MulMulAddDiv { reused_source, .. } = kernel.kind {
                     if reused_source > 1 {
@@ -774,6 +803,87 @@ impl TranslationPlan {
                 report.details.push_str(&format!(
                     "node={node} kind={} reads={reads} writes={} add.rn.f32=0 mul.rn.f32=0 relu=0 status=structural-pass\n",
                     kernel.kind.name(), kernel.writes
+                ));
+                continue;
+            }
+            if let TranslationKind::MulDiamondAdd {
+                reused_source,
+                right_mul_on_right,
+                left_mul_on_right,
+            } = kernel.kind
+            {
+                if reused_source > 1 {
+                    return Err(invalid("invalid MulDiamondAdd source selector"));
+                }
+                let repeated = if reused_source == 0 { "%z" } else { "%w" };
+                let repeat_args = if right_mul_on_right {
+                    format!("(float {repeated}, float %right)")
+                } else {
+                    format!("(float %right, float {repeated})")
+                };
+                let add_args = if left_mul_on_right {
+                    "(float %repeated, float %left)"
+                } else {
+                    "(float %left, float %repeated)"
+                };
+                let first = "%left = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %x, float %y)";
+                let second = "%right = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"(float %z, float %w)";
+                let third = format!(
+                    "%repeated = call float asm sideeffect \"mul.rn.f32 $0, $1, $2;\", \"=f,f,f\"{repeat_args}"
+                );
+                let fourth = format!(
+                    "%value = call float asm sideeffect \"add.rn.f32 $0, $1, $2;\", \"=f,f,f\"{add_args}"
+                );
+                let required = [
+                    "%ap = getelementptr float, ptr addrspace(1) %a, i32 %idx",
+                    "%bp = getelementptr float, ptr addrspace(1) %b, i32 %idx",
+                    "%cp = getelementptr float, ptr addrspace(1) %c, i32 %idx",
+                    "%dp = getelementptr float, ptr addrspace(1) %d, i32 %idx",
+                    "%x = load float, ptr addrspace(1) %ap, align 4",
+                    "%y = load float, ptr addrspace(1) %bp, align 4",
+                    "%z = load float, ptr addrspace(1) %cp, align 4",
+                    "%w = load float, ptr addrspace(1) %dp, align 4",
+                    "icmp ult i32 %idx, %length",
+                    "br i1 %valid, label %compute, label %done",
+                    "store float %value, ptr addrspace(1) %op, align 4",
+                ];
+                if required.iter().any(|&x| !ir.contains(x))
+                    || !matches!(
+                        (ir.find(first), ir.find(second), ir.find(&third), ir.find(&fourth)),
+                        (Some(a), Some(b), Some(c), Some(d)) if a < b && b < c && c < d
+                    )
+                    || ir.matches("call float asm sideeffect").count() != 4
+                    || ir.contains("fcmp ")
+                {
+                    return Err(invalid(format!(
+                        "MulDiamondAdd LLVM template mismatch at node {node}"
+                    )));
+                }
+                audit_fp32_ptx(ir, asm)
+                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                let sequence = asm
+                    .lines()
+                    .map(|line| line.split("//").next().unwrap_or(""))
+                    .filter_map(|line| {
+                        if line.contains("mul.rn.f32") {
+                            Some("mul")
+                        } else if line.contains("add.rn.f32") {
+                            Some("add")
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if sequence != ["mul", "mul", "mul", "add"] {
+                    return Err(invalid(format!(
+                        "MulDiamondAdd PTX instruction order mismatch at node {node}"
+                    )));
+                }
+                report.rounded_muls += 3;
+                report.rounded_adds += 1;
+                report.details.push_str(&format!(
+                    "node={node} kind=mul_diamond_add reads={:?} writes={} FP32=mul-mul-mul-add.rn hardware=trusted\n",
+                    kernel.reads, kernel.writes
                 ));
                 continue;
             }
@@ -1347,6 +1457,7 @@ impl TranslationPlan {
                 | TranslationKind::BinaryChain { .. }
                 | TranslationKind::SqrtAddDiv { .. }
                 | TranslationKind::MulMulAddDiv { .. }
+                | TranslationKind::MulDiamondAdd { .. }
                 | TranslationKind::MulAdd { .. }
                 | TranslationKind::MulAddMul { .. } => None,
             };

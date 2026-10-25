@@ -571,6 +571,13 @@ tasks:
         echo "PASS: uninterrupted and checkpoint-resumed training match per-window CE/BPC and optimizer steps"
         echo "PASS: final EMA4 checkpoints are bit-identical, including 271 parameter tensors, recurrent states and AdamW"
 
+  verify-gpu-diamond-fusion:
+    desc: Structural and NVIDIA bitwise acceptance for four-op rounded diamond fusion with selected output
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test mul_diamond_add_fusion
+      - cargo test -p verineural --test mul_diamond_add_fusion -- --ignored --nocapture
+
   verify-gpu-four-op-fusion:
     desc: Structural and NVIDIA bitwise acceptance for generic rounded four-operation pointwise fusion
     deps: [prepare]
@@ -647,6 +654,10 @@ tasks:
         echo "GPU result:"
         grep '^training_total_s=' "$bench_dir/gpu.log"
         grep '^cuda_graph_before=' "$bench_dir/gpu.log"
+        if ! grep -Eq '^cuda_graph_before=.* diamond_fusions=[1-9][0-9]* ' "$bench_dir/gpu.log"; then
+          echo "FAIL: GPU AdamW did not activate the required observable-output diamond fusion" >&2
+          exit 1
+        fi
         echo "NOTE: end-to-end throughput is authoritative; GPU optimizer adds IR kernels and may be slower."
 
   autodiff-stage:

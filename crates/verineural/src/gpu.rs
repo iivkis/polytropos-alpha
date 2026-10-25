@@ -327,6 +327,7 @@ pub enum GpuOptimizationKind {
     BinaryPointwiseFusion,
     SqrtAddDivFusion,
     MulMulAddDivFusion,
+    MulDiamondAddFusion,
 }
 
 impl GpuOptimizationKind {
@@ -339,6 +340,7 @@ impl GpuOptimizationKind {
             Self::BinaryPointwiseFusion => "binary-pointwise-fusion",
             Self::SqrtAddDivFusion => "sqrt-add-div-fusion",
             Self::MulMulAddDivFusion => "mul-mul-add-div-fusion",
+            Self::MulDiamondAddFusion => "mul-diamond-add-fusion",
         }
     }
 }
@@ -567,6 +569,9 @@ pub struct GpuProgram {
     // Div root -> (first Mul, second Mul, Add, reused first input
     // selector 0/1, second Mul internal slot 0/1, Add internal slot 0/1).
     fused_mul_mul_add_divs: BTreeMap<usize, (usize, usize, usize, usize, usize, usize)>,
+    // Add root -> (left Mul, right-first Mul, right-second Mul,
+    // reused first-input slot, right internal slot, Add left slot).
+    fused_mul_diamond_adds: BTreeMap<usize, (usize, usize, usize, usize, usize, usize)>,
 }
 
 impl GpuProgram {
@@ -630,6 +635,13 @@ impl GpuProgram {
         &self.fused_mul_mul_add_divs
     }
 
+    /// Four-op pointwise DAG fusion which preserves the selected Add root.
+    pub fn fused_mul_diamond_adds(
+        &self,
+    ) -> &BTreeMap<usize, (usize, usize, usize, usize, usize, usize)> {
+        &self.fused_mul_diamond_adds
+    }
+
     pub fn removed_kernel_count(&self) -> usize {
         self.skipped_nodes().len()
     }
@@ -656,6 +668,9 @@ impl GpuProgram {
         for &(inner, middle, add, _, _, _) in self.fused_mul_mul_add_divs.values() {
             skipped.extend([inner, middle, add]);
         }
+        for &(left, first, second, _, _, _) in self.fused_mul_diamond_adds.values() {
+            skipped.extend([left, first, second]);
+        }
         skipped
     }
 
@@ -675,7 +690,19 @@ impl GpuProgram {
             }
             let writes = node.shape.element_count();
             let (read_nodes, pattern): (Vec<usize>, GpuMemoryPattern) =
-                if let Some(&(inner, _, add, _, _, add_slot)) =
+                if let Some(&(left, first, _, _, _, _)) =
+                    self.fused_mul_diamond_adds.get(&index)
+                {
+                    let lhs = &self.graph.nodes()[left];
+                    let rhs = &self.graph.nodes()[first];
+                    (
+                        vec![
+                            lhs.inputs[0].index(), lhs.inputs[1].index(),
+                            rhs.inputs[0].index(), rhs.inputs[1].index(),
+                        ],
+                        GpuMemoryPattern::Pointwise,
+                    )
+                } else if let Some(&(inner, _, add, _, _, add_slot)) =
                     self.fused_mul_mul_add_divs.get(&index)
                 {
                     let first = &self.graph.nodes()[inner];
@@ -1031,7 +1058,15 @@ impl GpuProgram {
         let mut kernels = Vec::new();
         for contract in self.memory_contracts()? {
             let node = &self.graph.nodes()[contract.kernel_node];
-            let kind = if let Some(&(_, _, _, reused, middle_slot, add_slot)) =
+            let kind = if let Some(&(_, _, _, reused, right_slot, left_slot)) =
+                self.fused_mul_diamond_adds.get(&contract.kernel_node)
+            {
+                TranslationKind::MulDiamondAdd {
+                    reused_source: reused as u8,
+                    right_mul_on_right: right_slot == 1,
+                    left_mul_on_right: left_slot == 1,
+                }
+            } else if let Some(&(_, _, _, reused, middle_slot, add_slot)) =
                 self.fused_mul_mul_add_divs.get(&contract.kernel_node)
             {
                 TranslationKind::MulMulAddDiv {
@@ -1458,6 +1493,52 @@ impl GpuProgram {
                 root,
                 kind: GpuOptimizationKind::MulAddFusion,
                 removed_nodes: vec![mul],
+                exclusive_reachable_use: true,
+                selected_outputs_preserved: true,
+            });
+        }
+
+        for (&root, &(left, right_first, right_second, reused, right_slot, left_slot))
+            in &self.fused_mul_diamond_adds
+        {
+            if reused > 1 || right_slot > 1 || left_slot > 1 {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid MulDiamondAdd selectors at node {root}"),
+                });
+            }
+            let output = &self.graph.nodes()[root];
+            let lhs = &self.graph.nodes()[left];
+            let rhs = &self.graph.nodes()[right_first];
+            let repeated = &self.graph.nodes()[right_second];
+            let compatible = matches!(output.operation, Operation::Add)
+                && matches!(lhs.operation, Operation::Mul)
+                && matches!(rhs.operation, Operation::Mul)
+                && matches!(repeated.operation, Operation::Mul)
+                && output.inputs[left_slot].index() == left
+                && output.inputs[1 - left_slot].index() == right_second
+                && repeated.inputs[right_slot].index() == right_first
+                && repeated.inputs[1 - right_slot] == rhs.inputs[reused]
+                && [left, right_first, right_second].iter().all(|&id| uses[id] == 1)
+                && [left, right_first, right_second].iter().all(|id| !selected.contains(id))
+                && [left, right_first, right_second].iter().all(|id| !covered_removed.contains(id))
+                && lhs.shape == output.shape
+                && rhs.shape == output.shape
+                && repeated.shape == output.shape
+                && lhs.inputs.iter().chain(&rhs.inputs)
+                    .all(|&id| self.graph.nodes()[id.index()].shape == output.shape)
+                && !self.fused_mul_adds.contains_key(&root)
+                && !self.fused_binary_pairs.contains_key(&root)
+                && !self.fused_mul_add_muls.contains_key(&root);
+            if !compatible {
+                return Err(GpuError::Fp32PtxRejected {
+                    reason: format!("invalid MulDiamondAdd fusion at node {root}"),
+                });
+            }
+            covered_removed.extend([left, right_first, right_second]);
+            optimizations.push(GpuOptimizationCapability {
+                root,
+                kind: GpuOptimizationKind::MulDiamondAddFusion,
+                removed_nodes: vec![left, right_first, right_second],
                 exclusive_reachable_use: true,
                 selected_outputs_preserved: true,
             });
@@ -2678,6 +2759,7 @@ impl GpuEngine {
         let mut fused_binary_pairs = BTreeMap::new();
         let mut fused_sqrt_add_divs = BTreeMap::new();
         let mut fused_mul_mul_add_divs = BTreeMap::new();
+        let mut fused_mul_diamond_adds = BTreeMap::new();
         if self.launch.relu_fusion == ReluFusion::Experimental {
             for &index in &live_nodes {
                 let node = &graph.nodes()[index];
@@ -2824,6 +2906,60 @@ impl GpuEngine {
                     break;
                 }
             }
+            // Four-stage pointwise diamond: Add(Mul(a,b), Mul(Mul(c,d), c|d)).
+            // The root Add may be selected, unlike its three Mul producers.
+            for &index in live_nodes.iter().rev() {
+                let root = &graph.nodes()[index];
+                if !matches!(root.operation, Operation::Add) || skipped.contains(&index) {
+                    continue;
+                }
+                'diamond: for left_slot in 0..2 {
+                    let left = graph.node(root.inputs[left_slot])?;
+                    let second = graph.node(root.inputs[1 - left_slot])?;
+                    if !matches!(left.operation, Operation::Mul)
+                        || !matches!(second.operation, Operation::Mul)
+                        || uses[left.id.index()] != 1
+                        || uses[second.id.index()] != 1
+                        || skipped.contains(&left.id.index())
+                        || skipped.contains(&second.id.index())
+                        || left.id == second.id
+                        || left.shape != root.shape
+                        || second.shape != root.shape
+                    {
+                        continue;
+                    }
+                    for right_slot in 0..2 {
+                        let first = graph.node(second.inputs[right_slot])?;
+                        if !matches!(first.operation, Operation::Mul)
+                            || uses[first.id.index()] != 1
+                            || skipped.contains(&first.id.index())
+                            || first.id == left.id
+                            || first.shape != root.shape
+                        {
+                            continue;
+                        }
+                        let sources = [
+                            left.inputs[0], left.inputs[1],
+                            first.inputs[0], first.inputs[1],
+                        ];
+                        if sources.iter().any(|&id| graph.nodes()[id.index()].shape != root.shape) {
+                            continue;
+                        }
+                        if let Some(reused) = first.inputs.iter().position(
+                            |&id| id == second.inputs[1 - right_slot]
+                        ) {
+                            fused_mul_diamond_adds.insert(index, (
+                                left.id.index(), first.id.index(), second.id.index(),
+                                reused, right_slot, left_slot,
+                            ));
+                            skipped.extend([
+                                left.id.index(), first.id.index(), second.id.index(),
+                            ]);
+                            break 'diamond;
+                        }
+                    }
+                }
+            }
             // Longer chains take priority, but never cross observed values,
             // shared nodes or existing ReLU fusion boundaries.
             for &index in live_nodes.iter().rev() {
@@ -2957,7 +3093,13 @@ impl GpuEngine {
             {
                 continue;
             }
-            if let Some(&(_, _, _, reused, middle_slot, add_slot)) =
+            if let Some(&(_, _, _, reused, right_slot, left_slot)) =
+                fused_mul_diamond_adds.get(&index)
+            {
+                llvm_ir.push_str(&mul_diamond_add_kernel_ir(
+                    index, reused, right_slot == 1, left_slot == 1,
+                ));
+            } else if let Some(&(_, _, _, reused, middle_slot, add_slot)) =
                 fused_mul_mul_add_divs.get(&index)
             {
                 llvm_ir.push_str(&mul_mul_add_div_kernel_ir(
@@ -3109,6 +3251,7 @@ impl GpuEngine {
             fused_binary_pairs,
             fused_sqrt_add_divs,
             fused_mul_mul_add_divs,
+            fused_mul_diamond_adds,
         };
         // Fail closed unless every launched kernel has matching memory and
         // translation evidence and every applied optimization has valid
@@ -3521,6 +3664,59 @@ fn kernel_ir(index: usize, op: &Operation, columns: usize, fuse_relu: bool) -> S
 /// Never contract, reorder the Add operands, or skip intermediate rounding.
 /// Four sequential, individually rounded FP32 operations. Operand reuse
 /// is explicit and cannot be replaced with reassociation or FMA.
+/// Four separate RN operations on a full-shape, four-source pointwise
+/// diamond with explicit repeated input. No reassociation or FMA.
+fn mul_diamond_add_kernel_ir(
+    index: usize,
+    reused: usize,
+    right_mul_on_right: bool,
+    left_mul_on_right: bool,
+) -> String {
+    let factor = if reused == 0 { "%z" } else { "%w" };
+    let repeat_args = if right_mul_on_right {
+        format!("(float {factor}, float %right)")
+    } else {
+        format!("(float %right, float {factor})")
+    };
+    let add_args = if left_mul_on_right {
+        "(float %repeated, float %left)"
+    } else {
+        "(float %left, float %repeated)"
+    };
+    format!(
+        r#"define ptx_kernel void @vn_node_{index}(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %c, ptr addrspace(1) %d, ptr addrspace(1) %out, i32 %length) {{
+entry:
+  %tid = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %block = call i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()
+  %width = call i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
+  %base = mul i32 %block, %width
+  %idx = add i32 %base, %tid
+  %valid = icmp ult i32 %idx, %length
+  br i1 %valid, label %compute, label %done
+compute:
+  %ap = getelementptr float, ptr addrspace(1) %a, i32 %idx
+  %bp = getelementptr float, ptr addrspace(1) %b, i32 %idx
+  %cp = getelementptr float, ptr addrspace(1) %c, i32 %idx
+  %dp = getelementptr float, ptr addrspace(1) %d, i32 %idx
+  %x = load float, ptr addrspace(1) %ap, align 4
+  %y = load float, ptr addrspace(1) %bp, align 4
+  %z = load float, ptr addrspace(1) %cp, align 4
+  %w = load float, ptr addrspace(1) %dp, align 4
+  %left = call float asm sideeffect "mul.rn.f32 $0, $1, $2;", "=f,f,f"(float %x, float %y)
+  %right = call float asm sideeffect "mul.rn.f32 $0, $1, $2;", "=f,f,f"(float %z, float %w)
+  %repeated = call float asm sideeffect "mul.rn.f32 $0, $1, $2;", "=f,f,f"{repeat_args}
+  %value = call float asm sideeffect "add.rn.f32 $0, $1, $2;", "=f,f,f"{add_args}
+  %op = getelementptr float, ptr addrspace(1) %out, i32 %idx
+  store float %value, ptr addrspace(1) %op, align 4
+  br label %done
+done:
+  ret void
+}}
+
+"#
+    )
+}
+
 fn mul_mul_add_div_kernel_ir(
     index: usize,
     reused: usize,

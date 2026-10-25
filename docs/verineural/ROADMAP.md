@@ -640,3 +640,34 @@ count is not proof of faster execution; do not select GPU mode by default
 unless measured sustained throughput improves. Full arbitrary-size
 pointwise region fusion, source-sharing across arbitrary fanout, and
 formal IEEE/SASS equivalence remain unsupported.
+
+### Four-source selected-root diamond fusion after hardware regression (code, GPU pending)
+
+The developer's first run of the bounded linear `Mul→Mul→Add→Div` fusion
+passed its standalone NVIDIA FP32 parity test, but `task test` and the GPU
+AdamW structural test failed: it expected one linear fusion while observing
+zero. EMA4 reported `four_op_fusions=0` for both paths. The cause was
+structural, not a CUDA rounding failure: the intermediate updated
+second-moment `v` is a selected output for device feedback/checkpoints.
+The linear rule must not erase that observable value. Measured on that
+same run: CPU AdamW 158.17 tokens/s (3.236955 s/512 tokens, 6892 kernels);
+GPU AdamW 66.05 tokens/s (7.752278 s, 9638 kernels). The GPU mode
+remained significantly slower and is not recommended by default.
+
+A separate architecture-neutral `MulDiamondAdd` rewrite now fuses
+`Add(Mul(a,b), Mul(Mul(c,d), c|d))` when exactly three Mul values are
+exclusive and full-shape. Unlike the linear Div-root rewrite, its Add
+root remains a live output even if selected and can feed both the
+next graph operation and feedback/checkpoint. The capability plan
+checks the complete four-source memory contract and each removed
+Mul producer; the versioned translation plan and LLVM/PTX audit
+check every intermediate RN instruction and both operand orders.
+The new kernel is captured via the existing four-input nonblocking
+CUDA Graph API, with no standalone launch or lab-specific kernel.
+`task verify-gpu-diamond-fusion` checks all eight selector combinations
+plus selected/shared intermediate negative cases and NVIDIA bit parity.
+GPU AdamW's structural fixture now requires exactly one diamond fusion
+and **zero** linear Div-root fusion. EMA4 reports `diamond_fusions`.
+The GPU AdamW acceptance and end-to-end benchmark must be rerun
+after this change; no speedup is claimed yet. GPU-side finite-domain
+validation without D2H remains open.

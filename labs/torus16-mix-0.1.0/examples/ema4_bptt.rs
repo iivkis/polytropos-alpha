@@ -249,7 +249,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
     }
     println!(
-        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} four_op_fusions={} reduction_percent={:.2}",
+        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} four_op_fusions={} diamond_fusions={} reduction_percent={:.2}",
         old_kernels,
         new_kernels,
         old_kernels - new_kernels,
@@ -257,6 +257,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         program.fused_mul_add_muls().len(),
         program.fused_binary_pairs().len(),
         program.fused_mul_mul_add_divs().len(),
+        program.fused_mul_diamond_adds().len(),
         100. * (old_kernels - new_kernels) as f64 / old_kernels as f64
     );
 

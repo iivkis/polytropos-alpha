@@ -602,3 +602,18 @@ Only a fresh `task benchmark-gpu-adamw` can establish throughput;
 the previous GPU AdamW measured 61.17 tokens/s against CPU AdamW at
 132.83 tokens/s, so the CPU remains the default. No performance or
 hardware result is claimed for this new rule before that run.
+
+### GPU AdamW diamond-fusion follow-up (pending NVIDIA verification)
+
+The first four-op linear fusion passed its standalone NVIDIA GPU parity
+test but produced `four_op_fusions=0` in EMA4, because the second
+moment's `Add` output is public and must survive D2D feedback and
+checkpoint export. The developer measured CPU AdamW **158.17 tokens/s**
+and GPU AdamW **66.05 tokens/s** (256 BPTT=2 windows) in that run.
+The library now has a second, bounded pointwise `MulDiamondAdd` rule
+that preserves this observable output while fusing three internal Mul
+kernels. The benchmark reports `diamond_fusions`, distinct from
+`four_op_fusions`. New structural and GPU bitwise acceptance is
+`task verify-gpu-diamond-fusion`; also rerun `task verify-gpu-adamw`
+and `task benchmark-gpu-adamw`. CPU AdamW remains the default until
+the GPU path actually wins in sustained end-to-end tokens/s.
