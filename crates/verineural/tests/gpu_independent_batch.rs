@@ -27,8 +27,7 @@ fn independent_replay_matches_serial_and_rejects_pending_access() {
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".to_owned()),
     );
     let program = engine.compile_outputs(&graph, &[sum, product]).unwrap();
-    let directory = std::env::temp_dir()
-        .join(format!("vn_parallel_graph_{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("vn_parallel_graph_{}", std::process::id()));
     let batches = (0..3usize)
         .map(|i| {
             let values = inputs(i as f32 + 1., 32768);
@@ -70,10 +69,7 @@ fn independent_replay_matches_serial_and_rejects_pending_access() {
         sessions[0].update_input(x, &inputs(1., 32768)[0]),
         Err(GpuError::ReplayPending)
     ));
-    assert!(matches!(
-        sessions[0].replay(),
-        Err(GpuError::ReplayPending)
-    ));
+    assert!(matches!(sessions[0].replay(), Err(GpuError::ReplayPending)));
     sessions[0].complete_replay().unwrap();
     assert!(matches!(
         sessions[0].complete_replay(),
@@ -96,8 +92,15 @@ fn independent_replay_matches_serial_and_rejects_pending_access() {
         for ((id, actual), (expected_id, want)) in result.iter().zip(expected) {
             assert_eq!(*id, *expected_id);
             assert_eq!(
-                actual.values().iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
-                want.values().iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                actual
+                    .values()
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                want.values()
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -116,7 +119,10 @@ fn independent_replay_matches_serial_and_rejects_pending_access() {
         let outputs = gpu.read_outputs_selected(&[sum, product]).unwrap();
         for &lane in &[0, 1, 4095, 32767] {
             assert_eq!(outputs[0].1.values()[lane].to_bits(), want_sum.to_bits());
-            assert_eq!(outputs[1].1.values()[lane].to_bits(), want_product.to_bits());
+            assert_eq!(
+                outputs[1].1.values()[lane].to_bits(),
+                want_product.to_bits()
+            );
         }
     }
 }
@@ -136,8 +142,8 @@ fn independent_streams_report_serial_vs_queued_wall_time() {
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".to_owned()),
     );
     let program = engine.compile(&graph, result).unwrap();
-    let directory = std::env::temp_dir()
-        .join(format!("vn_concurrent_bench_{}", std::process::id()));
+    let directory =
+        std::env::temp_dir().join(format!("vn_concurrent_bench_{}", std::process::id()));
     let batches = (0..4usize)
         .map(|i| {
             let values = inputs(i as f32 + 1., 131072);
@@ -165,6 +171,8 @@ fn independent_streams_report_serial_vs_queued_wall_time() {
     let queued_ms = queued_start.elapsed().as_secs_f64() * 1000.;
     println!(
         "independent_replay_serial_ms={serial_ms:.3} queued_ms={queued_ms:.3} executions={} rounds={} speedup={:.3} scope=host_wall_GPU_graphs_only",
-        sessions.len(), REPEATS, serial_ms / queued_ms
+        sessions.len(),
+        REPEATS,
+        serial_ms / queued_ms
     );
 }

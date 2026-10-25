@@ -55,8 +55,8 @@ impl GpuAdamWPlan {
                 "GPU AdamW requires the exact nonempty parameter inventory",
             ));
         }
-        let scalar_shape = Shape::new(vec![])
-            .map_err(|e| OptimizerError::Parameter(e.to_string()))?;
+        let scalar_shape =
+            Shape::new(vec![]).map_err(|e| OptimizerError::Parameter(e.to_string()))?;
         let constants = [
             checkpoint.beta1,
             1. - checkpoint.beta1,
@@ -122,19 +122,18 @@ impl GpuAdamWPlan {
                 Tensor::new(shape.clone(), saved_second)
                     .map_err(|e| OptimizerError::Parameter(e.to_string()))?,
             ));
-            let mut scalar = |index: usize,
-                              graph: &mut NeuralGraph|
-             -> Result<NodeId, OptimizerError> {
-                let key = (shape.dims().to_vec(), index);
-                if let Some(&id) = broadcasts.get(&key) {
-                    return Ok(id);
-                }
-                let id = graph
-                    .broadcast_to(scalar_nodes[index], shape.clone())
-                    .map_err(|e| OptimizerError::Parameter(e.to_string()))?;
-                broadcasts.insert(key, id);
-                Ok(id)
-            };
+            let mut scalar =
+                |index: usize, graph: &mut NeuralGraph| -> Result<NodeId, OptimizerError> {
+                    let key = (shape.dims().to_vec(), index);
+                    if let Some(&id) = broadcasts.get(&key) {
+                        return Ok(id);
+                    }
+                    let id = graph
+                        .broadcast_to(scalar_nodes[index], shape.clone())
+                        .map_err(|e| OptimizerError::Parameter(e.to_string()))?;
+                    broadcasts.insert(key, id);
+                    Ok(id)
+                };
             let b1 = scalar(0, graph)?;
             let b1_rest = scalar(1, graph)?;
             let b2 = scalar(2, graph)?;
@@ -145,10 +144,12 @@ impl GpuAdamWPlan {
             let c1 = scalar(7, graph)?;
             let c2 = scalar(8, graph)?;
             let mul = |g: &mut NeuralGraph, a, b| {
-                g.mul(a, b).map_err(|e| OptimizerError::Parameter(e.to_string()))
+                g.mul(a, b)
+                    .map_err(|e| OptimizerError::Parameter(e.to_string()))
             };
             let add = |g: &mut NeuralGraph, a, b| {
-                g.add(a, b).map_err(|e| OptimizerError::Parameter(e.to_string()))
+                g.add(a, b)
+                    .map_err(|e| OptimizerError::Parameter(e.to_string()))
             };
             let step_m_left = mul(graph, b1, m)?;
             let step_m_right = mul(graph, b1_rest, gradient)?;
@@ -158,19 +159,24 @@ impl GpuAdamWPlan {
             let step_v_right_first = mul(graph, b2_rest, gradient)?;
             let step_v_right = mul(graph, step_v_right_first, gradient)?;
             let step_v = add(graph, step_v_left, step_v_right)?;
-            let m_hat = graph.div(step_m, c1)
+            let m_hat = graph
+                .div(step_m, c1)
                 .map_err(|e| OptimizerError::Parameter(e.to_string()))?;
-            let v_hat = graph.div(step_v, c2)
+            let v_hat = graph
+                .div(step_v, c2)
                 .map_err(|e| OptimizerError::Parameter(e.to_string()))?;
-            let sqrt_v = graph.sqrt_ieee(v_hat)
+            let sqrt_v = graph
+                .sqrt_ieee(v_hat)
                 .map_err(|e| OptimizerError::Parameter(e.to_string()))?;
             let denom = add(graph, sqrt_v, epsilon)?;
-            let update = graph.div(m_hat, denom)
+            let update = graph
+                .div(m_hat, denom)
                 .map_err(|e| OptimizerError::Parameter(e.to_string()))?;
             let wd = mul(graph, decay, parameter)?;
             let total_update = add(graph, update, wd)?;
             let scaled = mul(graph, lr, total_update)?;
-            let next = graph.sub(parameter, scaled)
+            let next = graph
+                .sub(parameter, scaled)
                 .map_err(|e| OptimizerError::Parameter(e.to_string()))?;
             feedback.extend([(parameter, next), (m, step_m), (v, step_v)]);
             parameters.insert(name.clone(), next);
@@ -211,7 +217,9 @@ impl GpuAdamWPlan {
         let b1 = 1. - self.config.beta1.powf(next_step as f32);
         let b2 = 1. - self.config.beta2.powf(next_step as f32);
         if !b1.is_finite() || !b2.is_finite() || b1 <= 0. || b2 <= 0. {
-            return Err(OptimizerError::Invalid("GPU AdamW bias correction underflow"));
+            return Err(OptimizerError::Invalid(
+                "GPU AdamW bias correction underflow",
+            ));
         }
         Ok([
             (
@@ -237,11 +245,16 @@ impl GpuAdamWPlan {
     ) -> Result<(BTreeMap<String, Tensor<f32>>, AdamWCheckpoint), GpuError> {
         let outputs = self.outputs();
         let read = gpu.read_outputs_selected(&outputs)?;
-        let mut values = read.into_iter().map(|(id, value)| (id.index(), value)).collect::<BTreeMap<_, _>>();
+        let mut values = read
+            .into_iter()
+            .map(|(id, value)| (id.index(), value))
+            .collect::<BTreeMap<_, _>>();
         let mut params = BTreeMap::new();
         let mut moments = BTreeMap::new();
         for (name, &id) in &self.parameters {
-            let value = values.remove(&id.index()).expect("selected parameter update");
+            let value = values
+                .remove(&id.index())
+                .expect("selected parameter update");
             if value.values().iter().any(|v| !v.is_finite()) {
                 return Err(GpuError::InvalidInput {
                     node: id.index(),
@@ -251,8 +264,12 @@ impl GpuAdamWPlan {
             params.insert(name.clone(), value);
         }
         for (name, &(first, second)) in &self.moments {
-            let a = values.remove(&first.index()).expect("selected first moment");
-            let b = values.remove(&second.index()).expect("selected second moment");
+            let a = values
+                .remove(&first.index())
+                .expect("selected first moment");
+            let b = values
+                .remove(&second.index())
+                .expect("selected second moment");
             if a.values().iter().chain(b.values()).any(|v| !v.is_finite())
                 || b.values().iter().any(|&v| v < 0.)
             {

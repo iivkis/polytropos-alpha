@@ -12,8 +12,8 @@ use torus16_mix_lab::corpus::CharCorpus;
 use torus16_mix_lab::ema4::{Ema4Weights, architecture_model};
 use torus16_mix_lab::ema4_checkpoint::{Ema4Checkpoint, fingerprint};
 use verineural::{
-    AdamW, ArgMaxTieBreak, Domain, GpuEngine, GpuLaunchConfig, NodeId, Shape, Tensor,
-    differentiate_with_seeds, unroll_model, GpuAdamWPlan,
+    AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuEngine, GpuLaunchConfig, NodeId, Shape, Tensor,
+    differentiate_with_seeds, unroll_model,
 };
 
 fn onehot(token: usize, width: usize) -> Result<Tensor<f32>, Box<dyn Error>> {
@@ -579,7 +579,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         train_elapsed,
         (train_windows - first_window) * window_len,
         ((train_windows - first_window) * window_len) as f64 / train_elapsed,
-        if gpu_optimizer.is_some() { "GPU_IR" } else { "CPU" }
+        if gpu_optimizer.is_some() {
+            "GPU_IR"
+        } else {
+            "CPU"
+        }
     );
     // Real holdout: chronological final 10% only. One recurrent inference
     // step per symbol, with state reset to zero at the validation boundary.

@@ -782,8 +782,7 @@ impl TranslationPlan {
                         "SqrtAddDiv LLVM operand/order mismatch at node {node}"
                     )));
                 }
-                audit_fp32_ptx(ir, asm)
-                    .map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
+                audit_fp32_ptx(ir, asm).map_err(|e| invalid(format!("PTX node {node}: {e}")))?;
                 let operations = asm
                     .lines()
                     .map(|line| line.split("//").next().unwrap_or(""))

@@ -52,9 +52,8 @@ fn optimizer_is_a_generic_ir_extension_and_excludes_other_sources() {
     assert_eq!(plan.feedback().len(), 3);
     assert_eq!(plan.outputs().len(), 3);
     assert_eq!(plan.correction_inputs(1).unwrap().len(), 2);
-    let engine = GpuEngine::default().with_launch_config(
-        GpuLaunchConfig::default().with_pointwise_fusion(),
-    );
+    let engine =
+        GpuEngine::default().with_launch_config(GpuLaunchConfig::default().with_pointwise_fusion());
     let program = engine.compile_outputs(&graph, &plan.outputs()).unwrap();
     assert!(program.kernel_count().unwrap() > 0);
     assert!(program.capability_plan().is_ok());
@@ -95,7 +94,9 @@ fn gpu_adamw_matches_host_and_resumes_bitwise() {
     bindings.push((p, initial["weights"].clone()));
     bindings.push((grad, tensor(&[0.; 4])));
     let dir = std::env::temp_dir().join(format!("vn_gpu_adamw_{}", std::process::id()));
-    let mut device = engine.prepare(&program, &bindings, &dir.join("first")).unwrap();
+    let mut device = engine
+        .prepare(&program, &bindings, &dir.join("first"))
+        .unwrap();
     let mut cpu_params = initial;
     let mut cpu_adam = adam;
     let gradients = [
@@ -122,7 +123,11 @@ fn gpu_adamw_matches_host_and_resumes_bitwise() {
                 &BTreeMap::from([("weights".into(), derivative.clone())]),
             )
             .unwrap();
-        check_close(params["weights"].values(), cpu_params["weights"].values(), "param");
+        check_close(
+            params["weights"].values(),
+            cpu_params["weights"].values(),
+            "param",
+        );
         compare_checkpoints(&moments, &cpu_adam.checkpoint());
         if step == 1 {
             snapshot = Some((params, moments));
@@ -203,7 +208,8 @@ fn checked_feedback_rejects_nonfinite_parameters_atomically() {
     {
         assert_eq!(original.to_bits(), actual.to_bits());
     }
-    gpu.update_input(denominator, &tensor(&[2., 2., 2., 2.])).unwrap();
+    gpu.update_input(denominator, &tensor(&[2., 2., 2., 2.]))
+        .unwrap();
     gpu.replay().unwrap();
     gpu.feedback_state_checked(&[(parameter, next)]).unwrap();
     for (&expected, &actual) in [0.5, 1., 1.5, 2.]

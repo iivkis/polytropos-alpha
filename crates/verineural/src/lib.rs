@@ -74,13 +74,13 @@ pub use certificate::{CertificateEngine, CertificateError, EvidenceStatus, Stage
 pub use certified::{CertifiedBuildConfig, certified_example_main};
 pub use consumer::{BindingError, ComponentBinder, ObligationError};
 pub use error::NeuralError;
-pub use gpu_adamw::GpuAdamWPlan;
 pub use gpu::{
     Fp32PtxAudit, GpuAssuranceBoundary, GpuAssuranceStatus, GpuBenchmark, GpuCapabilityPlan,
     GpuEngine, GpuError, GpuExecution, GpuKernelCapability, GpuLaunchConfig, GpuMemoryContract,
     GpuMemoryPattern, GpuOptimizationCapability, GpuOptimizationKind, GpuProgram, ReluFusion,
     audit_fp32_ptx,
 };
+pub use gpu_adamw::GpuAdamWPlan;
 pub use ir::{
     ArgMaxTieBreak, ContractClaim, DType, Domain, FP32Policy, FixedScan, FmaMode, GpuSemantics,
     MathContract, ModuleInstanceRef, ModuleInvocation, MultiModuleInvocation, MultiOutputContract,
