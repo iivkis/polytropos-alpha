@@ -3727,8 +3727,7 @@ impl GpuEngine {
                                 && node.shape.dims()[0] == 1) =>
                     {
                         let left = &graph.nodes()[node.inputs[0].index()];
-                        llvm_ir
-                            .push_str(&concat_axis0_kernel_ir(index, left.shape.element_count()));
+                        body.push_str(&concat_axis0_kernel_ir(index, left.shape.element_count()));
                     }
                     Operation::SliceAxis { axis: 1, start, .. } => {
                         body.push_str(&slice_last_row_kernel_ir(index, *start));
