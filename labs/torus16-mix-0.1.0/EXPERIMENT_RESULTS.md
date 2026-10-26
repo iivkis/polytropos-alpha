@@ -268,3 +268,53 @@ TORUS16_FINETUNE_BPTT=4 TORUS16_FINETUNE_WINDOWS=98304 task finetune-torus16-bes
 - Локальное `task benchmark-torus16-holdout-reuse` завершилось `PASS: fresh and reused holdout BPC/checkpoints match bit-for-bit`; эти результаты относятся к проверенной конфигурации, а не к формальному Lean-сертификату на GPU исполнение.
 
 **Источник новых измерений (разделы 9–14):** переданные пользователем stdout-логи отдельных успешных локальных запусков в диалоге. Изолированные численные паритеты и обучающие эксперименты не заменяют независимую проверку на новом тестовом корпусе.
+
+## 15. Packed CUDA Graph transfers и temporal hoisting: контроль перед 0.2.0
+
+**Источник:** переданные разработчиком stdout-логи `task
+verify-gpu-batch-transfers`, `benchmark-torus16-packed-d2h`,
+`benchmark-torus16-packed-h2d`, `verify-gpu-temporal-bptt`,
+`benchmark-torus16-packed-hoisting` от 26 октября 2026.
+Все benchmark-режимы ниже: Role-Delta rank 4, BPTT=4, 256 окон
+(1024 обучающих символа), CPU AdamW, `llc -O0`, seed=0,
+validation-only на **64 символах**.
+
+### Изолированные I/O-оптимизации
+
+| Сравнение | Baseline, токенов/с | Оптимизированный, токенов/с | Проверка |
+|---|---:|---:|---|
+| Обычный D2H против Packed D2H | 173.28 | 212.99 | Final/best checkpoint `cmp` прошёл |
+| Обычный H2D против Packed H2D, оба с Packed D2H | 208.34 | 244.94 | Final/best checkpoint `cmp` прошёл |
+
+Packed D2H передаёт ту же полезную нагрузку **150 448 байт**
+через один вызов D2H вместо 339 отдельных вызовов.
+`selected_d2h` снизился с 4.1330 до 0.5299 мс/окно (−87.2%).
+При Packed H2D метрика `parameters_or_checkpoint_io` снизилась
+с 3.5709 до 0.3594 мс/окно, но эта метрика включает не только H2D.
+GPU batch-transfer parity тест прошёл после исправления
+`CUDA_ERROR_INVALID_CONTEXT` в экспериментальном packed-readback.
+
+### Hoisting поверх двух Packed-путей
+
+| Вариант | Trial 1, токенов/с | Trial 2, токенов/с | CUDA replay 1/2, мс | CUDA kernels |
+|---|---:|---:|---|---:|
+| BPTT4, baseline IR | 259.15 | 254.63 | 13.3087 / 13.3365 | 16 239 |
+| BPTT4, parameter hoisting | 271.09 | 271.12 | 12.7602 / 12.7782 | 15 865 |
+
+Порядок запусков: baseline → hoisted → hoisted → baseline.
+Средние throughput: **256.89** и **271.105** символов/с
+(около **+5.53%** hoisted относительно baseline).
+IR nodes: 7510 → 7279. У каждого режима конечный/best checkpoint
+совпал побитово между повторениями *того же режима*.
+Во всех четырёх прогонах Validation BPC = 1.970608, но на 64
+символах это **не демонстрирует улучшение качества**; Test был отключён.
+GPU temporal VJP и hoisting parity (короткий горизонт) прошли.
+
+**Ограничения:** короткие прогоны, два повторения, один GPU,
+один corpus/seed, не независимые длинные траектории обучения.
+Различные Semantic IR fingerprints/порядок FP32 редукций не
+обязывают hoisted и baseline checkpoint совпадать побитово.
+GPU numerical acceptance не является доказательством Lean корректности
+аппаратного исполнения. Перед переходом к новой архитектуре
+используется [v0.2 transition gate](V0.2_TRANSITION.md) с длинной
+validation и BPTT=4/8; его результаты пока **отсутствуют**.

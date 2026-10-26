@@ -200,15 +200,26 @@ fn temporal_parameter_hoisting_gpu_forward_and_gradients_match_baseline() {
         Tensor::from_slice(vec![1, 2], &[-0.2, 0.75]).unwrap(),
         Tensor::from_slice(vec![1, 2], &[0.1, 0.6]).unwrap(),
     ];
+    // Run the same GPU forward/VJP parity at the historical three-step
+    // horizon and at the first v0.2 target horizon of eight timesteps.
+    // Repeated step values are deterministic; state carries through all eight.
+    let short_steps = steps.clone();
+    let short_seeds = seeds.clone();
+    let mut steps = steps;
+    let mut seeds = seeds;
+    for i in 3..8 {
+        steps.push(short_steps[i % short_steps.len()].clone());
+        seeds.push(short_seeds[i % short_seeds.len()].clone());
+    }
     let gpu = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     );
-    let evaluate = |hoisted: bool| {
+    let evaluate = |hoisted: bool, horizon: usize| {
         let window = if hoisted {
-            unroll_model_hoisted(&model, "y", 3).unwrap()
+            unroll_model_hoisted(&model, "y", horizon).unwrap()
         } else {
-            unroll_model(&model, "y", 3).unwrap()
+            unroll_model(&model, "y", horizon).unwrap()
         };
         let wrt = [window.parameters()["w"], window.parameters()["b"]];
         let reverse = differentiate(window.graph(), window.objective(), &wrt).unwrap();
@@ -217,7 +228,9 @@ fn temporal_parameter_hoisting_gpu_forward_and_gradients_match_baseline() {
             roots.push(reverse.gradient_of(id).unwrap());
         }
         let program = gpu.compile_outputs(reverse.graph(), &roots).unwrap();
-        let bindings = window.bindings(&base, &steps, &seeds).unwrap();
+        let bindings = window
+            .bindings(&base, &steps[..horizon], &seeds[..horizon])
+            .unwrap();
         let bindings = reverse
             .bindings(&bindings, Tensor::from_slice(vec![1, 1], &[1.0]).unwrap())
             .unwrap();
@@ -226,8 +239,9 @@ fn temporal_parameter_hoisting_gpu_forward_and_gradients_match_baseline() {
             .filter(|(id, _)| program.source_inputs().contains(id))
             .collect::<Vec<_>>();
         let path = std::env::temp_dir().join(format!(
-            "vn_temporal_hoist_{}_{}",
+            "vn_temporal_hoist_{}_{}_{}",
             std::process::id(),
+            horizon,
             if hoisted { "shared" } else { "baseline" },
         ));
         gpu.execute_outputs(&program, &sources, &path)
@@ -236,16 +250,29 @@ fn temporal_parameter_hoisting_gpu_forward_and_gradients_match_baseline() {
             .map(|(_, tensor)| tensor)
             .collect::<Vec<_>>()
     };
-    let original = evaluate(false);
-    let hoisted = evaluate(true);
-    assert_eq!(original.len(), 5);
-    for (index, (expected, found)) in original.iter().zip(&hoisted).enumerate() {
-        assert_eq!(expected.shape(), found.shape());
-        for (&a, &b) in expected.values().iter().zip(found.values()) {
-            if index < 3 {
-                assert_eq!(a.to_bits(), b.to_bits(), "forward timestep {index}");
-            } else {
-                assert!((a - b).abs() <= 1e-4, "parameter VJP {index}: {a} vs {b}");
+    for horizon in [3usize, 8] {
+        let original = evaluate(false, horizon);
+        let hoisted = evaluate(true, horizon);
+        assert_eq!(original.len(), horizon + 2);
+        assert_eq!(original.len(), hoisted.len());
+        for (index, (expected, found)) in original.iter().zip(&hoisted).enumerate() {
+            assert_eq!(expected.shape(), found.shape());
+            for (&a, &b) in expected.values().iter().zip(found.values()) {
+                if index < horizon {
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "horizon={horizon} forward timestep {index}"
+                    );
+                } else {
+                    // Floating-point reverse reduction topology can change
+                    // under hoisting, so compare VJPs numerically, not bitwise.
+                    let tolerance = if horizon == 3 { 1e-4 } else { 1e-3 };
+                    assert!(
+                        (a - b).abs() <= tolerance,
+                        "horizon={horizon} parameter VJP {index}: {a} vs {b}"
+                    );
+                }
             }
         }
     }

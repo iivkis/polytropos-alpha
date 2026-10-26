@@ -1177,6 +1177,69 @@ tasks:
         grep '^setup_compile_and_cuda_prepare_ms=' "$dir/fast.log"
         echo "Evidence: $dir"
 
+  benchmark-torus16-v02-horizon:
+    desc: v0.2 transition gate - Role-Delta rank 4/8 x BPTT 4/8 with packed I/O and long validation
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        if [ ! -f "$source" ]; then
+          echo "Missing TorusShared warm-start checkpoint: $source" >&2
+          exit 1
+        fi
+        # Equal training characters, NOT equal optimizer updates.
+        train_tokens="${TORUS16_V02_TRAIN_TOKENS:-4096}"
+        case "$train_tokens" in
+          ''|*[!0-9]*) echo "TORUS16_V02_TRAIN_TOKENS must be an integer" >&2; exit 1 ;;
+        esac
+        if [ "$train_tokens" -lt 8 ] || [ "$train_tokens" -gt 32768 ] || [ "$((train_tokens % 8))" -ne 0 ]; then
+          echo "TORUS16_V02_TRAIN_TOKENS must be 8..32768 and divisible by 8" >&2
+          exit 1
+        fi
+        out="${TORUS16_V02_DIR:-target/torus16-v02-horizon}"
+        mkdir -p "$out"
+        export TORUS16_WARM_START_SHARED="$source"
+        export TORUS16_ROLE_INIT=matched TORUS16_MATRIX_SEED=0 TORUS16_DELTA_SCALE=1
+        export TORUS16_VAL_LIMIT=8192 TORUS16_TEST_LIMIT=8192
+        export TORUS16_SKIP_TEST=1 TORUS16_SKIP_FUSION_BASELINE=1
+        export TORUS16_REUSE_HOLDOUT=1 TORUS16_METRIC_EVERY=16
+        export TORUS16_LLC_OPT=0 TORUS16_THREADS_PER_BLOCK=256 TORUS16_FRESH=1
+        export TORUS16_PACKED_D2H=1 TORUS16_PACKED_H2D=1 TORUS16_HOIST_PARAMETER_ONLY=1
+        export TORUS16_CHECKPOINT_EVERY=1024
+        unset TORUS16_GPU_ADAMW TORUS16_LR_DECAY_5X TORUS16_VERIFY_FUSION
+        unset TORUS16_BENCH_COMPARE TORUS16_BENCH_FUSED TORUS16_GPU_FEEDBACK_EVENTS
+        unset TORUS16_INITIAL_PROBE_PATH TORUS16_CORPUS
+        for rank in 4 8; do
+          for bptt in 4 8; do
+            windows="$((train_tokens / bptt))"
+            export TORUS16_MATRIX_MODE="role_delta_$rank"
+            export TORUS16_BPTT="$bptt" TORUS16_TRAIN_WINDOWS="$windows"
+            # Evaluate only after the same number of trained characters.
+            export TORUS16_EVAL_EVERY="$windows"
+            label="rank$rank-bptt$bptt"
+            echo "v0.2 gate $label training_characters=$train_tokens windows=$windows validation_characters=8192"
+            TORUS16_CHECKPOINT="$out/$label.ckpt" \
+              cargo run --release -p torus16-mix-lab --example ema4_bptt >"$out/$label.log" 2>&1 || {
+                tail -n 100 "$out/$label.log"
+                echo "FAIL: v0.2 gate $label ($out/$label.log)" >&2
+                exit 1
+              }
+            grep '^temporal_parameter_only_hoisting=enabled ' "$out/$label.log" | tail -n 1
+            grep '^cuda_graph_baseline=SKIPPED ' "$out/$label.log" | tail -n 1
+            grep '^setup_compile_and_cuda_prepare_ms=' "$out/$label.log" | tail -n 1
+            grep '^training_parameter_upload_mode=packed_true' "$out/$label.log"
+            grep '^training_d2h_profile_avg_ms .*packed=true' "$out/$label.log"
+            grep '^training_profile_avg_ms ' "$out/$label.log" | tail -n 1
+            grep '^training_total_s=' "$out/$label.log" | tail -n 1
+            grep '^holdout_reset_streaming_bpc=.*scored_characters=8192 ' "$out/$label.log" | tail -n 1
+            grep '^test_evaluation=SKIPPED ' "$out/$label.log" | tail -n 1
+          done
+        done
+        echo "PASS: four long-validation runs completed, test withheld; no claims of architecture superiority."
+        echo "Important: BPTT changes optimizer update count; different ranks/BPTT have different checkpoint identities."
+        echo "Evidence and checkpoints: $out"
+
   benchmark-torus16-packed-hoisting:
     desc: Paired and reversed-order BPTT hoisting benchmark with both packed CUDA Graph transfers enabled
     deps: [prepare]
