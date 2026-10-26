@@ -1178,40 +1178,38 @@ tasks:
         echo "Evidence: $dir"
 
   benchmark-torus16-v02-bptt16:
-    desc: Opt-in BPTT16 acceptance smoke, rank4, fixed 64 train symbols, CUDA setup/tensor budget logging and test held out
+    desc: SAFE BPTT16 graph preflight only; never start blocking driver PTX JIT or a CUDA Graph
     deps: [prepare]
     cmds:
       - |
         set -eu
-        # This is an explicit risk-bounded GPU acceptance run, not a
-        # hyperparameter selection or a 8192-character quality benchmark.
-        base="${TORUS16_V02_BPTT16_DIR:-target/torus16-v02-bptt16-smoke}"
+        # Compatibility with the old task name. The previous task generated
+        # 63,707 CUDA kernels and hung in CUDA module loading with no GPU load.
+        # This task now does CPU graph analysis ONLY, not GPU benchmarking.
+        base="${TORUS16_V02_BPTT16_DIR:-target/torus16-v02-bptt16-preflight}"
         mkdir -p "$base"
-        export VERINEURAL_GPU_PREPARE_PROFILE=1
-        export TORUS16_GPU_ALLOCATION_SLAB=1
-        export TORUS16_V02_RANKS=4 TORUS16_V02_BPTTS="8 16"
+        export TORUS16_BPTT16_PREFLIGHT_ONLY=1
+        export TORUS16_V02_RANKS=4 TORUS16_V02_BPTTS=16
         export TORUS16_V02_TRAIN_TOKENS=64 TORUS16_V02_VALIDATION_CHARS=64
-        export TORUS16_BPTT16_MAX_KERNELS="${TORUS16_BPTT16_MAX_KERNELS:-70000}"
-        export TORUS16_BPTT16_MAX_TENSOR_MIB="${TORUS16_BPTT16_MAX_TENSOR_MIB:-512}"
+        export TORUS16_BPTT16_MAX_KERNELS=40000
+        export TORUS16_BPTT16_MAX_TENSOR_MIB=512
+        unset TORUS16_BPTT16_ENABLE_SLOW_JIT
+        echo "BPTT16 safety: CPU-only resource preflight, no CUDA driver JIT, no training or evaluation."
         TORUS16_V02_DIR="$base" task benchmark-torus16-v02-horizon >"$base/summary.log" 2>&1 || {
           tail -n 120 "$base/summary.log"
-          echo "BPTT16 smoke failed; raw training logs retained under $base" >&2
+          echo "FAIL: BPTT16 preflight; logs under $base" >&2
           exit 1
         }
-        for bptt in 8 16; do
-          raw="$base/rank4-bptt$bptt.log"
-          grep -Fx 'gpu_allocation_mode=slab' "$raw"
-          grep '^gpu_prepare_allocations mode=slab .*artifact_dir=.*vn_ema4_bptt_' "$raw"
-          grep '^setup_compile_and_cuda_prepare_ms=' "$raw"
-          grep '^training_total_s=' "$raw"
-          grep '^test_evaluation=SKIPPED ' "$raw"
-          if [ "$bptt" -eq 16 ]; then
-            grep '^bptt16_resource_preflight ' "$raw"
-          fi
-        done
-        echo "PASS: BPTT8 and BPTT16 rank4 smoke completed with 64 train/validation chars, test held out."
-        echo "Do not compare checkpoint bits across different BPTT IR fingerprints."
-        echo "Not a quality gate. Logs: $base/summary.log $base/rank4-bptt8.log $base/rank4-bptt16.log"
+        raw="$base/rank4-bptt16.log"
+        grep '^bptt16_resource_preflight ' "$raw"
+        grep -Fx 'bptt16_preflight_only=PASS cuda_jit=SKIPPED gpu_graph=NOT_CREATED training=SKIPPED validation=SKIPPED test=SKIPPED' "$raw"
+        if grep -Eq '^(gpu_nvptx_stage=|gpu_prepare_phase=|training_total_s=)' "$raw"; then
+          echo "FAIL: BPTT16 preflight unexpectedly entered LLVM/CUDA or training" >&2
+          exit 1
+        fi
+        echo "PASS: CPU-only BPTT16 preflight completed without launching CUDA JIT."
+        echo "BLOCKED: Full BPTT16 GPU replay is not approved until the module/kernel count is reduced."
+        echo "Logs: $base/summary.log $raw"
 
   benchmark-torus16-v02-allocation-slab:
     desc: Compare separate CUDA tensor allocations against a single bounded slab and require bitwise checkpoint parity
@@ -1360,6 +1358,15 @@ tasks:
                 echo "FAIL: v0.2 gate $label ($out/$label.log)" >&2
                 exit 1
               }
+            # A BPTT16 CPU-only inspection returns successfully before
+            # llc and cuModuleLoadData. Do not require training metrics or
+            # final/best checkpoints from a preflight-only execution.
+            if [ "$bptt" -eq 16 ] && [ "${TORUS16_BPTT16_PREFLIGHT_ONLY:-0}" = 1 ]; then
+              grep '^bptt16_resource_preflight ' "$out/$label.log"
+              grep '^bptt16_preflight_only=PASS ' "$out/$label.log"
+              echo "BPTT16 training=SKIPPED because this is CPU-only JIT preflight."
+              continue
+            fi
             grep '^temporal_parameter_only_hoisting=enabled ' "$out/$label.log" | tail -n 1
             grep '^cuda_graph_baseline=SKIPPED ' "$out/$label.log" | tail -n 1
             grep '^setup_compile_and_cuda_prepare_ms=' "$out/$label.log" | tail -n 1
@@ -1375,7 +1382,11 @@ tasks:
             grep '^test_evaluation=SKIPPED ' "$out/$label.log" | tail -n 1
           done
         done
-        echo "PASS: selected runs completed, validation_characters=$validation_chars, test withheld."
+        if [ "${TORUS16_BPTT16_PREFLIGHT_ONLY:-0}" = "1" ]; then
+          echo "PASS: BPTT16 CPU-only graph inspection finished; training/validation/test and CUDA JIT were NOT run."
+        else
+          echo "PASS: selected runs completed, validation_characters=$validation_chars, test withheld."
+        fi
         if [ "$validation_chars" != 8192 ]; then
           echo "DIAGNOSTIC ONLY: validation is too short to rank architectures."
         fi

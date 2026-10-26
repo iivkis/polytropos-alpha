@@ -415,3 +415,33 @@ validation символа; CPU AdamW, Packed H2D/D2H, hoisting.
 включать по умолчанию. Следующий отдельный smoke проверяет
 BPTT=16 с лимитом числа kernels и расчётным размером основных
 GPU tensor allocations; результат ещё неизвестен.
+
+## 19. BPTT16 driver PTX JIT: прерванный запуск и fail-fast
+
+**Источник:** лог пользователя `task verify-gpu-temporal-bptt`;
+`task benchmark-torus16-v02-bptt16` от 26 октября 2026.
+Малые NVIDIA BPTT16 temporal/VJP тесты: **2/2 PASS**.
+На полном rank4/BPTT8 тренировочном graph setup:
+13.847 с, 31 759 kernels, 64 обучающих токена, 64 validation
+символа; validation BPC = 1.527281; test был пропущен.
+
+Rank4/BPTT16: 27 643 IR nodes, **63 707 CUDA kernels**,
+`tensor_bytes=26971644`. `llc=17.852472` с,
+translation audit `2.658773` с,
+`lower_and_audit=20.601983` с.
+**Не появилось** `gpu_prepare_phase=cuda_module_load` до
+прерывания Ctrl+C. GPU не выполнял replay; подготовка
+модуля внутри драйвера блокировала дальнейшее исполнение.
+Точное внутреннее состояние драйвера по host-журналу неизвестно.
+
+Дефект предыдущего gate: порог 70 000 CUDA kernels
+пропустил 63 707 отдельных PTX entrypoints, а 512-MiB
+ограничение на основные тензоры не связано с объёмом
+host/JIT работы. Новая безопасная конфигурация
+`benchmark-torus16-v02-bptt16` выполняет **только CPU
+graph/resource preflight** и завершает работу до
+`GpuEngine::lower`/CUDA JIT. Реальное BPTT16 обучение
+остаётся **не проверено и отключено по умолчанию**.
+Для явного запуска нужны `TORUS16_BPTT16_ENABLE_SLOW_JIT=1`
+и соответствующий бюджет. До устранения тысяч уникальных
+PTX-функций такой запуск не рекомендован.

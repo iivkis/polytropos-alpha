@@ -721,20 +721,56 @@ fn main() -> Result<(), Box<dyn Error>> {
     // This does not account for JIT, CUDA Graph or staging overhead.
     if window_len == 16 {
         let tensor_bytes = program.tensor_allocation_bytes()?;
-        let max_kernels = option_usize("TORUS16_BPTT16_MAX_KERNELS", 70_000, 1, 1_000_000)?;
+        // Kernel *count* is a rough guard on PTX module/JIT complexity,
+        // not only on CUDA Graph replay. 63,707 generated entry points
+        // stalled in driver module loading before the first GPU replay.
+        // Do not silently permit this through a large VRAM-only budget.
+        let max_kernels = option_usize("TORUS16_BPTT16_MAX_KERNELS", 40_000, 1, 1_000_000)?;
         let max_tensor_mib = option_usize("TORUS16_BPTT16_MAX_TENSOR_MIB", 512, 1, 65_536)?;
         let max_tensor_bytes = max_tensor_mib
             .checked_mul(1024 * 1024)
             .ok_or("BPTT16 tensor allocation limit overflow")?;
+        let over_budget = new_kernels > max_kernels || tensor_bytes > max_tensor_bytes;
         println!(
-            "bptt16_resource_preflight kernels={} kernel_limit={} tensor_bytes={} tensor_limit_bytes={} scope=graph_tensors_only",
-            new_kernels, max_kernels, tensor_bytes, max_tensor_bytes
+            "bptt16_resource_preflight kernels={} kernel_limit={} tensor_bytes={} tensor_limit_bytes={} over_budget={} scope=graph_tensors_only",
+            new_kernels, max_kernels, tensor_bytes, max_tensor_bytes, over_budget
         );
-        if new_kernels > max_kernels || tensor_bytes > max_tensor_bytes {
+        let preflight_only = match std::env::var("TORUS16_BPTT16_PREFLIGHT_ONLY").as_deref() {
+            Ok("1") => true,
+            Ok("0") | Err(std::env::VarError::NotPresent) => false,
+            _ => return Err("TORUS16_BPTT16_PREFLIGHT_ONLY must be 0 or 1".into()),
+        };
+        if preflight_only {
+            // The safe diagnostic stops BEFORE GpuEngine::lower() and,
+            // crucially, before blocking cuModuleLoadData / driver PTX JIT.
+            // No training, GPU allocation, checkpoint or holdout evaluation.
+            println!(
+                "bptt16_preflight_only=PASS cuda_jit=SKIPPED gpu_graph=NOT_CREATED training=SKIPPED validation=SKIPPED test=SKIPPED"
+            );
+            return Ok(());
+        }
+        if over_budget {
             return Err(format!(
-                "BPTT16 preflight rejected: kernels={new_kernels}/{max_kernels}, graph_tensor_bytes={tensor_bytes}/{max_tensor_bytes}; no CUDA JIT or graph allocation attempted"
+                "BPTT16 CUDA JIT blocked: kernels={new_kernels}/{max_kernels}, graph_tensor_bytes={tensor_bytes}/{max_tensor_bytes}. The previous 63707-kernel PTX module stalled in driver JIT. Run the safe BPTT16 preflight instead; raising the limit alone does not bypass the explicit JIT opt-in."
             )
             .into());
+        }
+        // The CUDA driver module-load call can block without progress output.
+        // Require explicit opt-in even for a future BPTT16 graph whose kernel
+        // count falls below the conservative threshold.
+        match std::env::var("TORUS16_BPTT16_ENABLE_SLOW_JIT").as_deref() {
+            Ok("1") => {
+                eprintln!(
+                    "WARNING: BPTT16 driver PTX JIT explicitly enabled; cuModuleLoadData may block on CPU without GPU activity."
+                );
+            }
+            Ok("0") | Err(std::env::VarError::NotPresent) => {
+                return Err(
+                    "BPTT16 GPU preparation is disabled by default: driver PTX JIT can stall for minutes without GPU load. Use TORUS16_BPTT16_PREFLIGHT_ONLY=1 to inspect the graph. Real BPTT16 execution requires TORUS16_BPTT16_ENABLE_SLOW_JIT=1 and an explicit kernel budget."
+                        .into(),
+                );
+            }
+            _ => return Err("TORUS16_BPTT16_ENABLE_SLOW_JIT must be 0 or 1".into()),
         }
     }
     println!(
