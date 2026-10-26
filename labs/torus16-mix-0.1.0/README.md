@@ -694,3 +694,39 @@ VeriNeural Semantic IR и CUDA Graph, отдельно для чётной/не�
 GPU-parity проверки 26.10.2026 в Nix devShell. Новые тесты с
 градиентами добавлены, но **ещё не запускались**. Численная GPU-проверка
 не равнозначна формальному Lean-доказательству и не удостоверяет SASS.
+
+### TorusShared → Role-Delta: явный weight-only warm-start
+
+Для сравнения fresh и предобученного старта используйте
+`TORUS16_WARM_START_SHARED=/path/to/torus_shared.best.ckpt` вместе с
+`TORUS16_MATRIX_MODE=role_delta_4` (или `_2`/`_8`).
+Источник должен быть существующим checkpoint v3 исходного TorusShared
+со строго совпадающими именами/формами весов, словарём и fingerprint
+**сырых данных корпуса**, корректными AdamW-моментами и схемой EMA/Conv9
+состояния, а также хотя бы одним шагом обучения и валидированной метрикой.
+Допускается иной BPTT и другая частота validation **источника**:
+это новая траектория, не продолжение прежнего обучения.
+
+Переносятся только общие обученные параметры (в том числе embedding,
+нормировки и shared W). Матрицы A и B не импортируются: A инициализируется
+от `TORUS16_MATRIX_SEED`, B остаётся строго нулевой. Recurrent state,
+AdamW moments, step counter, train cursor и лучшая validation BPC
+**не наследуются**. Новый optimizer начинает с первого шага и заново
+выбирает лучший checkpoint. Полученный initial-binding fingerprint
+включает перенесённые значения, поэтому resume нового checkpoint требует
+того же источника и настроек либо завершается ошибкой. Существующие
+checkpoint TorusShared никогда не переписываются.
+
+Пример из devShell (пути к реальным checkpoint выбираются явно):
+
+```bash
+TORUS16_MATRIX_MODE=role_delta_4 TORUS16_WARM_START_SHARED=target/torus16-pilot/torus_shared-seed0.best.ckpt TORUS16_BPTT=4 TORUS16_TRAIN_WINDOWS=2 TORUS16_VAL_LIMIT=64 TORUS16_TEST_LIMIT=64 TORUS16_EVAL_EVERY=2 TORUS16_CHECKPOINT_EVERY=2 TORUS16_CHECKPOINT=target/torus16-role-delta-r4-warmstart.ckpt TORUS16_FRESH=1 task train-lab-torus16-ema4-bptt
+```
+
+*Замените путь исходного checkpoint на существующий.* Это пробный запуск,
+не сопоставимый по качеству с длительными экспериментами. Ветка `dev`
+сохраняет старый v3-формат; checkpoint source mode проверяется по строгой
+схеме, поскольку старый формат не содержит криптографически проверенного
+тега архитектуры. Проверка в новом тесте подтверждает перенос и
+отклонение несовместимых источников, но не доказывает GPU-семантику,
+качество генерации или корректность полного длительного resume.

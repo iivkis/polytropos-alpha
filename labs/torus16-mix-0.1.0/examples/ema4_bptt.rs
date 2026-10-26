@@ -309,9 +309,44 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else if std::env::var_os("TORUS16_DELTA_SCALE").is_some() {
         return Err("TORUS16_DELTA_SCALE is only supported in Role-Delta modes".into());
     }
+    // A migration is an explicit NEW run, not a cross-architecture resume.
+    // Existing target checkpoints still use the ordinary fail-closed resume.
+    let warm_start_path = std::env::var_os("TORUS16_WARM_START_SHARED").map(PathBuf::from);
+    if warm_start_path.is_some() && matrix_mode.role_delta_rank().is_none() {
+        return Err("TORUS16_WARM_START_SHARED requires a Role-Delta matrix mode".into());
+    }
     let model = architecture_model_for(vocab, matrix_mode)?;
-    let initial_bindings = weights.bindings_with_init(0, matrix_mode, role_init)?;
-    let trainable_initial = weights.trainable_parameters_with_init(matrix_mode, role_init)?;
+    let mut initial_bindings = weights.bindings_with_init(0, matrix_mode, role_init)?;
+    let mut trainable_initial = weights.trainable_parameters_with_init(matrix_mode, role_init)?;
+    if let Some(path) = warm_start_path.as_ref() {
+        // Do not overwrite the warm-start source through a target checkpoint
+        // alias, including an existing symlink or the validation-best path.
+        let target_best = checkpoint_path.with_extension("best.ckpt");
+        let source = fs::canonicalize(path)?;
+        for destination in [&checkpoint_path, &target_best] {
+            if destination.exists() && source == fs::canonicalize(destination)? {
+                return Err("warm-start source must not be a target checkpoint".into());
+            }
+        }
+        let saved = Ema4Checkpoint::read(path)?;
+        trainable_initial =
+            saved.role_delta_warm_start(&weights, matrix_mode, corpus_hash)?;
+        // Fingerprint the *effective* initial parameters. Resume therefore
+        // rejects absent/changed warm-start sources, not just changed shapes.
+        for (name, tensor) in &mut initial_bindings {
+            if let Some(imported) = trainable_initial.get(name) {
+                *tensor = imported.clone();
+            }
+        }
+        println!(
+            "role_delta_warm_start_source={} source_completed_windows={} source_bptt={} source_architecture_fingerprint={} transferred_tensors={} optimizer_reset=true states_reset=true cursor_reset=true",
+            path.display(),
+            saved.completed_windows,
+            saved.bptt,
+            saved.architecture_fingerprint,
+            saved.parameters.len()
+        );
+    }
     let parameter_count: usize = trainable_initial.values().map(|v| v.values().len()).sum();
     let window = unroll_model(&model, "logits", window_len)?;
     let named_parameter = window.parameters();

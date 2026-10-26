@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Cursor, Read, Write};
 use std::path::Path;
+use crate::ema4::{Ema4Weights, MatrixMode};
 use verineural::{AdamW, AdamWCheckpoint, Model, NeuralGraph, Tensor};
 
 const MAGIC: &[u8] = b"VN-EMA4-BPTT-CKPT-v3\0";
@@ -249,6 +250,79 @@ pub struct CheckpointRequirements<'a> {
 }
 
 impl Ema4Checkpoint {
+    /// Explicit weight-only migration from a trained TorusShared checkpoint
+    /// into a new Role-Delta run. The caller must start a NEW optimizer and
+    /// reset recurrent state and training cursor. This deliberately does not
+    /// convert a resumable checkpoint, its moments or its train progress.
+    ///
+    /// v3 checkpoint files have no trusted architecture-mode tag: the strict
+    /// TorusShared parameter inventory is checked, but source provenance
+    /// beyond that cannot be cryptographically authenticated.
+    pub fn role_delta_warm_start(
+        &self,
+        weights: &Ema4Weights,
+        mode: MatrixMode,
+        expected_corpus: u64,
+    ) -> io::Result<BTreeMap<String, Tensor<f32>>> {
+        if mode.role_delta_rank().is_none() {
+            return Err(invalid("warm-start target must be a Role-Delta mode"));
+        }
+        if self.vocab != weights.vocabulary
+            || self.corpus_fingerprint != expected_corpus
+            || self.completed_windows == 0
+            || self.optimizer.steps != self.completed_windows as u64
+            || !(2..=8).contains(&self.bptt)
+            || self.validation_limit == 0
+            || self.validation_every == 0
+            || !self.best_validation_bpc.is_some_and(|v| v.is_finite() && v >= 0.0)
+        {
+            return Err(invalid("incompatible or untrained TorusShared warm-start source"));
+        }
+
+        let shared = weights
+            .trainable_parameters_for(MatrixMode::TorusShared)
+            .map_err(|_| invalid("cannot construct TorusShared parameter inventory"))?;
+        if !same_schema(&self.parameters, &shared) {
+            return Err(invalid("warm-start source must have the exact TorusShared parameter schema"));
+        }
+        // Reject malformed or stale optimizer moments, even though no moments
+        // are transferred into the new Role-Delta optimizer.
+        AdamW::from_checkpoint(self.optimizer.clone(), &self.parameters)
+            .map_err(|_| invalid("warm-start source has invalid AdamW state"))?;
+        let expected_states = weights
+            .bindings_for(0, MatrixMode::TorusShared)
+            .map_err(|_| invalid("cannot construct TorusShared state inventory"))?
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("history_") || name.starts_with("mem_"))
+            .collect::<BTreeMap<_, _>>();
+        if !same_schema(&self.states, &expected_states) {
+            return Err(invalid("warm-start source has incompatible recurrent state schema"));
+        }
+
+        let mut target = weights
+            .trainable_parameters_for(mode)
+            .map_err(|_| invalid("cannot construct Role-Delta parameter inventory"))?;
+        // The Role-Delta source must start with exactly zero B, guaranteeing
+        // no correction to the imported shared forward at initialization.
+        if target
+            .iter()
+            .filter(|(name, _)| name.starts_with("delta_b_"))
+            .any(|(_, value)| value.values().iter().any(|&x| x.to_bits() != 0.0f32.to_bits()))
+        {
+            return Err(invalid("Role-Delta B must be initially zero"));
+        }
+        for (name, value) in &self.parameters {
+            let destination = target
+                .get_mut(name)
+                .ok_or_else(|| invalid("TorusShared parameter missing from Role-Delta target"))?;
+            if destination.shape() != value.shape() {
+                return Err(invalid("warm-start parameter shape mismatch"));
+            }
+            *destination = value.clone();
+        }
+        Ok(target)
+    }
+
     pub fn validate(&self, requirements: CheckpointRequirements<'_>) -> io::Result<()> {
         self.validate_with_learning_rate(requirements, 0.002)
     }
@@ -1017,5 +1091,121 @@ mod tests {
         let loaded = Ema4Checkpoint::read(&path).unwrap();
         assert_eq!(loaded.parameters, params);
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn role_delta_warm_start_accepts_shared_and_rejects_incompatible_sources() {
+        use crate::ema4::{Ema4Weights, MatrixMode, architecture_model_for};
+        let corpus = fingerprint(b"same-dataset");
+        let weights = Ema4Weights::deterministic_seeded(16, 19).unwrap();
+        let mut trained = weights.trainable_parameters_for(MatrixMode::TorusShared).unwrap();
+        trained.insert(
+            "weight_0".into(),
+            Tensor::from_vec(vec![48, 48], vec![0.125; 48 * 48]).unwrap(),
+        );
+        let zero_gradients = trained
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    Tensor::zeros(value.shape().dims().to_vec()).unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut optimizer = AdamW::new(0.002, 0.01).unwrap();
+        optimizer.step(&mut trained, &zero_gradients).unwrap();
+        let states = weights
+            .bindings_for(0, MatrixMode::TorusShared)
+            .unwrap()
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("history_") || name.starts_with("mem_"))
+            .collect::<BTreeMap<_, _>>();
+        let source = Ema4Checkpoint {
+            completed_windows: 1,
+            bptt: 4,
+            vocab: 16,
+            corpus_fingerprint: corpus,
+            architecture_fingerprint: 771,
+            validation_limit: 512,
+            test_limit: 512,
+            validation_every: 64,
+            best_validation_bpc: Some(2.1),
+            parameters: trained.clone(),
+            states,
+            optimizer: optimizer.checkpoint(),
+        };
+        let source = Ema4Checkpoint::decode(&source.encode().unwrap()).unwrap();
+        for mode in [
+            MatrixMode::RoleDelta2,
+            MatrixMode::RoleDelta4,
+            MatrixMode::RoleDelta8,
+        ] {
+            let target = source.role_delta_warm_start(&weights, mode, corpus).unwrap();
+            let fresh = weights.trainable_parameters_for(mode).unwrap();
+            assert_eq!(target.len(), trained.len() + 2 * 4 * 8);
+            for (name, value) in &trained {
+                assert_eq!(&target[name], value, "imported shared tensor {name}");
+            }
+            for (name, value) in &fresh {
+                if name.starts_with("delta_a_") || name.starts_with("delta_b_") {
+                    assert_eq!(&target[name], value, "fresh adapter {name}");
+                }
+            }
+            assert!(target
+                .iter()
+                .filter(|(name, _)| name.starts_with("delta_b_"))
+                .all(|(_, value)| value.values().iter().all(|value| value.to_bits() == 0)));
+        }
+        // Changes in imported pretrained weights must change the new
+        // experiment fingerprint, independently of the source checkpoint's
+        // previous optimizer state and cursor.
+        let mode = MatrixMode::RoleDelta4;
+        let model = architecture_model_for(16, mode).unwrap();
+        let mut imported_bindings = weights.bindings_for(0, mode).unwrap();
+        let transfer = source.role_delta_warm_start(&weights, mode, corpus).unwrap();
+        for (name, value) in &mut imported_bindings {
+            if let Some(imported) = transfer.get(name) {
+                *value = imported.clone();
+            }
+        }
+        let pristine = weights.bindings_for(0, mode).unwrap();
+        let identity = |initial: &[(String, Tensor<f32>)]| {
+            architecture_fingerprint(
+                &model,
+                model.graph(),
+                FingerprintContext {
+                    seed: 19,
+                    role_init: "matched",
+                    initial,
+                    val_limit: 512,
+                    test_limit: 512,
+                    eval_every: 64,
+                    optimizer_backend: "HOST_ADAMW_V1",
+                },
+            )
+        };
+        assert_ne!(identity(&pristine), identity(&imported_bindings));
+        assert_eq!(AdamW::new(0.002, 0.01).unwrap().steps(), 0);
+
+        assert!(source.role_delta_warm_start(&weights, MatrixMode::TorusShared, corpus).is_err());
+        assert!(source.role_delta_warm_start(&weights, mode, fingerprint(b"other")).is_err());
+        assert!(source
+            .role_delta_warm_start(&Ema4Weights::deterministic(17).unwrap(), mode, corpus)
+            .is_err());
+        let mut invalid = source.clone();
+        invalid.optimizer.moments.remove("weight_0");
+        assert!(invalid.role_delta_warm_start(&weights, mode, corpus).is_err());
+        let mut invalid = source.clone();
+        invalid.completed_windows += 1;
+        assert!(invalid.role_delta_warm_start(&weights, mode, corpus).is_err());
+        let mut invalid = source.clone();
+        invalid.states.remove("mem_0");
+        assert!(invalid.role_delta_warm_start(&weights, mode, corpus).is_err());
+        let mut invalid = source.clone();
+        invalid.best_validation_bpc = None;
+        assert!(invalid.role_delta_warm_start(&weights, mode, corpus).is_err());
+        let mut invalid = source.clone();
+        invalid.parameters = weights.trainable_parameters_for(MatrixMode::Independent).unwrap();
+        assert!(invalid.role_delta_warm_start(&weights, mode, corpus).is_err());
     }
 }
