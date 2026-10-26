@@ -67,6 +67,33 @@ fn identical_templates_share_entrypoints_without_removing_graph_nodes() {
 }
 
 #[test]
+fn structural_concat_reuses_only_identical_addressing_templates() {
+    let mut graph = NeuralGraph::default();
+    let x = graph.input(Shape::new(vec![1, 3]).unwrap(), Domain::Finite);
+    let y = graph.input(Shape::new(vec![1, 3]).unwrap(), Domain::Finite);
+    let z = graph.input(Shape::new(vec![1, 4]).unwrap(), Domain::Finite);
+    let first = graph.concat(1, &[x, y]).unwrap();
+    let second = graph.concat(1, &[x, z]).unwrap();
+    let different_offset = graph.concat(1, &[z, x]).unwrap();
+    let program = GpuEngine::default()
+        .compile_outputs(&graph, &[first, second, different_offset])
+        .unwrap();
+    assert_eq!(program.kernel_count().unwrap(), 3);
+    assert_eq!(program.unique_kernel_count(), 2);
+    assert_eq!(program.kernel_entry(first.index()), Some(first.index()));
+    assert_eq!(program.kernel_entry(second.index()), Some(first.index()));
+    assert_eq!(
+        program.kernel_entry(different_offset.index()),
+        Some(different_offset.index())
+    );
+    let plan = program.translation_plan().unwrap();
+    assert_eq!(plan.kernels[0].writes, 6);
+    assert_eq!(plan.kernels[1].writes, 7);
+    assert_eq!(plan.kernels[2].writes, 7);
+    assert_eq!(TranslationPlan::from_text(&plan.to_text()).unwrap(), plan);
+}
+
+#[test]
 fn specialization_key_preserves_shape_dependent_constants_and_abi() {
     let mut graph = NeuralGraph::default();
     let lhs1 = graph.input(Shape::new(vec![2, 3]).unwrap(), Domain::Finite);
