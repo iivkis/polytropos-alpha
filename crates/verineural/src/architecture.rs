@@ -664,7 +664,7 @@ pub fn snapshot_architecture(
                 ("vn_gpu_lowering", lowering.into()),
                 (
                     "vn_gpu_kernel",
-                    kernel.map_or_else(|| "none".into(), |k| format!("vn_node_{}", k.node)),
+                    kernel.map_or_else(|| "none".into(), |k| format!("vn_node_{}", k.entry_node)),
                 ),
                 (
                     "vn_gpu_memory",
@@ -1428,6 +1428,31 @@ mod tests {
         changed.input_roles.insert(20, "parameter".into());
         assert!(snapshot_architecture(&g1, o1, &p1, &changed).is_err());
     }
+    #[test]
+    fn snapshot_reports_shared_entrypoint_for_distinct_logical_nodes() {
+        let mut graph = NeuralGraph::default();
+        let x = graph.input(Shape::new(vec![4]).unwrap(), Domain::Finite);
+        let y = graph.input(Shape::new(vec![4]).unwrap(), Domain::Finite);
+        let first = graph.add(x, y).unwrap();
+        let second = graph.add(first, y).unwrap();
+        let program = GpuEngine::default().compile(&graph, second).unwrap();
+        assert_eq!(program.kernel_entry(second.index()), Some(first.index()));
+        let metadata = ArchitectureMetadata {
+            id: "interned-producers".into(),
+            version: "0.1.0".into(),
+            input_roles: BTreeMap::from([
+                (x.index(), "input".into()),
+                (y.index(), "parameter".into()),
+            ]),
+            global_property: "architecture_global_nonnegative".into(),
+        };
+        let snapshot = snapshot_architecture(&graph, second, &program, &metadata).unwrap();
+        let entry = format!("vn_gpu_kernel=\"vn_node_{}\"", first.index());
+        let orphan = format!("vn_gpu_kernel=\"vn_node_{}\"", second.index());
+        assert_eq!(snapshot.dot.matches(&entry).count(), 2);
+        assert!(!snapshot.dot.contains(&orphan));
+    }
+
     #[test]
     fn snapshot_png_replay_detects_image_tampering() {
         if Command::new("dot").arg("-V").output().is_err() {
