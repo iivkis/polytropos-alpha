@@ -2191,6 +2191,10 @@ pub struct GpuReadbackProfile {
     pub bytes: usize,
 }
 
+/// Selected F32 tensors and host-side D2H timings returned by profiled readback.
+/// The alias preserves the existing tuple result and its public API semantics.
+pub type GpuProfiledReadback = (Vec<(NodeId, Tensor<f32>)>, GpuReadbackProfile);
+
 pub struct GpuExecution {
     session: CudaSession,
     program: GpuProgram,
@@ -2903,7 +2907,7 @@ impl GpuExecution {
     pub fn read_outputs_selected_profiled(
         &mut self,
         selected: &[NodeId],
-    ) -> Result<(Vec<(NodeId, Tensor<f32>)>, GpuReadbackProfile), GpuError> {
+    ) -> Result<GpuProfiledReadback, GpuError> {
         self.read_outputs_selected_profiled_impl(selected, false)
     }
 
@@ -2912,7 +2916,7 @@ impl GpuExecution {
     pub fn read_outputs_selected_packed_profiled(
         &mut self,
         selected: &[NodeId],
-    ) -> Result<(Vec<(NodeId, Tensor<f32>)>, GpuReadbackProfile), GpuError> {
+    ) -> Result<GpuProfiledReadback, GpuError> {
         self.read_outputs_selected_profiled_impl(selected, true)
     }
 
@@ -2920,7 +2924,7 @@ impl GpuExecution {
         &mut self,
         selected: &[NodeId],
         packed: bool,
-    ) -> Result<(Vec<(NodeId, Tensor<f32>)>, GpuReadbackProfile), GpuError> {
+    ) -> Result<GpuProfiledReadback, GpuError> {
         self.execution_health.ensure_outputs_ready()?;
         let preflight_started = Instant::now();
         let mut seen = BTreeSet::new();
