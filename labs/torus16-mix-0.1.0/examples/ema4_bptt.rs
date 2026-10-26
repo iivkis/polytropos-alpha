@@ -432,6 +432,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         reverse_build_started.elapsed().as_secs_f64() * 1000.
     );
     let gpu_adamw_requested = std::env::var_os("TORUS16_GPU_ADAMW").is_some();
+    let packed_d2h = std::env::var_os("TORUS16_PACKED_D2H").is_some();
     // Explicit, checkpointed fine-tuning experiment. Do not change the
     // established 0.002 baseline or silently reset AdamW moments/steps.
     let lr_decay_5x = std::env::var_os("TORUS16_LR_DECAY_5X").is_some();
@@ -1019,7 +1020,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             &selected[output_count..train_output_count]
         };
-        let (outputs, readback) = gpu.read_outputs_selected_profiled(to_read)?;
+        let (outputs, readback) = if packed_d2h {
+            gpu.read_outputs_selected_packed_profiled(to_read)?
+        } else {
+            gpu.read_outputs_selected_profiled(to_read)?
+        };
         for (sum, duration) in d2h_phase_totals.iter_mut().zip([
             readback.preflight,
             readback.enqueue,
@@ -1255,8 +1260,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // timing summaries from a zero-window no-op training loop.
     let profile_divisor = profile_windows.max(1) as f64;
     println!(
-        "training_d2h_profile_avg_ms windows={} preflight={:.4} enqueue={:.4} synchronize={:.4} host_copy={:.4} tensor_construct={:.4} transfers_per_window={:.2} bytes_per_window={:.1} timing=host_wall_after_synchronous_replay",
+        "training_d2h_profile_avg_ms windows={} packed={} preflight={:.4} enqueue={:.4} synchronize={:.4} host_copy={:.4} tensor_construct={:.4} transfers_per_window={:.2} bytes_per_window={:.1} timing=host_wall_after_synchronous_replay",
         profile_windows,
+        packed_d2h,
         d2h_phase_totals[0] / profile_divisor,
         d2h_phase_totals[1] / profile_divisor,
         d2h_phase_totals[2] / profile_divisor,

@@ -964,6 +964,18 @@ CPU AdamW дополнительно поддерживает `TORUS16_METRIC_EV
 optimizer moments). Запуск требует NVIDIA и исходного warm-start checkpoint;
 результаты должны быть получены локально, а не предполагаются заранее.
 
+Экспериментальный `TORUS16_PACKED_D2H=1` использует универсальный
+CUDA Graph для побитовой D2D-упаковки выбранных F32 результатов в
+одну последовательную область памяти, затем ровно один D2H DMA в
+pinned host-buffer. Обычный путь сохранён по умолчанию. Упаковка не
+выполняет арифметических FP32 операций, но её совместимость с конкретным
+NVIDIA backend проверяется отдельным GPU-тестом и полным побитовым
+сравнением checkpoint. Использовать `task benchmark-torus16-packed-d2h`
+для сравнения с обычным CPU AdamW при `METRIC_EVERY=1`. Время
+создания readback CUDA Graph включено в первый enqueue; короткие
+benchmark могут зависеть от первого прогрева. Этот путь ещё не
+профилирован на NVIDIA и не объявляется ускорением до измерений.
+
 Лог `training_d2h_profile_avg_ms` теперь показывает wall-clock
 `preflight`, `enqueue` (включая подготовку pinned буферов и очередь
 `cuMemcpyDtoHAsync`), `synchronize` (ожидание completion очереди на

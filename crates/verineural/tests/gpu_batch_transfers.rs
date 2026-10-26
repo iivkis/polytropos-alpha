@@ -26,10 +26,27 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
     let (reversed, profile) = gpu.read_outputs_selected_profiled(&[product, sum]).unwrap();
     assert_eq!(profile.transfers, 2);
     assert_eq!(profile.bytes, 2 * 4 * std::mem::size_of::<f32>());
+    let (packed, packed_profile) = gpu
+        .read_outputs_selected_packed_profiled(&[product, sum])
+        .unwrap();
+    assert_eq!(packed_profile.transfers, 1);
+    assert_eq!(packed_profile.bytes, profile.bytes);
+    assert_eq!(packed.len(), reversed.len());
+    for ((packed_id, packed_tensor), (id, tensor)) in packed.iter().zip(&reversed) {
+        assert_eq!(packed_id, id);
+        for (&x, &y) in packed_tensor.values().iter().zip(tensor.values()) {
+            assert_eq!(x.to_bits(), y.to_bits());
+        }
+    }
     let (empty, empty_profile) = gpu.read_outputs_selected_profiled(&[]).unwrap();
     assert!(empty.is_empty());
     assert_eq!(empty_profile.bytes, 0);
     assert_eq!(empty_profile.transfers, 0);
+    let (packed_empty, packed_empty_profile) = gpu
+        .read_outputs_selected_packed_profiled(&[])
+        .unwrap();
+    assert!(packed_empty.is_empty());
+    assert_eq!(packed_empty_profile.transfers, 0);
     assert_eq!(old[0].0, sum);
     assert_eq!(old[1].0, product);
     assert_eq!(reversed[0].0, product);
@@ -41,6 +58,10 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
         }
     }
 
+    assert!(matches!(
+        gpu.read_outputs_selected_packed_profiled(&[sum, sum]),
+        Err(GpuError::InvalidInput { .. })
+    ));
     assert!(matches!(
         gpu.read_outputs_selected_profiled(&[sum, sum]),
         Err(GpuError::InvalidInput {

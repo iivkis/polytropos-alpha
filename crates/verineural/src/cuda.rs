@@ -377,6 +377,15 @@ DONE:
         feedback_kernel: Handle,
         feedback_descriptors: DevicePtr,
         feedback_descriptor_capacity: usize,
+        // Separate descriptor/graph cache for architecture-neutral packed
+        // readback. Never evict the recurrent feedback graph.
+        readback_graph: Handle,
+        readback_graph_exec: Handle,
+        readback_plan: Vec<(DevicePtr, DevicePtr, usize)>,
+        readback_descriptors: DevicePtr,
+        readback_descriptor_capacity: usize,
+        readback_device_buffer: DevicePtr,
+        readback_device_capacity: usize,
         // A separate, reusable guard Graph checks all runtime-domain
         // obligations before any state-feedback copies are launched.
         guard_module: Handle,
@@ -460,6 +469,13 @@ DONE:
                 feedback_kernel: ptr::null_mut(),
                 feedback_descriptors: 0,
                 feedback_descriptor_capacity: 0,
+                readback_graph: ptr::null_mut(),
+                readback_graph_exec: ptr::null_mut(),
+                readback_plan: Vec::new(),
+                readback_descriptors: 0,
+                readback_descriptor_capacity: 0,
+                readback_device_buffer: 0,
+                readback_device_capacity: 0,
                 guard_module: ptr::null_mut(),
                 guard_kernel: ptr::null_mut(),
                 guard_flag: 0,
@@ -521,11 +537,20 @@ DONE:
             address: DevicePtr,
             elements: usize,
         ) -> Result<(), GpuError> {
-            if self
+            // A logical view may refer to an interior f32-aligned slice
+            // of an owned CUDA allocation. Bounds are checked relative to
+            // the originating allocation (not the next allocation).
+            let valid = self
                 .allocation_capacity
-                .get(&address)
-                .is_none_or(|&capacity| capacity < elements)
-            {
+                .range(..=address)
+                .next_back()
+                .is_some_and(|(&base, &capacity)| {
+                    let offset = address - base;
+                    offset % 4 == 0
+                        && (offset / 4) <= capacity as u64
+                        && elements <= capacity - (offset / 4) as usize
+                });
+            if !valid {
                 return Err(GpuError::Driver(
                     "CUDA kernel memory contract references an unallocated or undersized buffer"
                         .into(),
@@ -923,6 +948,33 @@ DONE:
             })
         }
 
+        // Keep distinct CUDA Graph caches for feedback and packed readback.
+        // The same proven u32 load/store kernel executes in either graph;
+        // swaps never escape this call, including on recoverable errors.
+        fn launch_readback_pack(
+            &mut self,
+            copies: &[(DevicePtr, DevicePtr, usize)],
+        ) -> Result<(), GpuError> {
+            std::mem::swap(&mut self.feedback_graph, &mut self.readback_graph);
+            std::mem::swap(&mut self.feedback_graph_exec, &mut self.readback_graph_exec);
+            std::mem::swap(&mut self.feedback_plan, &mut self.readback_plan);
+            std::mem::swap(&mut self.feedback_descriptors, &mut self.readback_descriptors);
+            std::mem::swap(
+                &mut self.feedback_descriptor_capacity,
+                &mut self.readback_descriptor_capacity,
+            );
+            let result = self.launch_feedback_copies(copies);
+            std::mem::swap(
+                &mut self.feedback_descriptor_capacity,
+                &mut self.readback_descriptor_capacity,
+            );
+            std::mem::swap(&mut self.feedback_descriptors, &mut self.readback_descriptors);
+            std::mem::swap(&mut self.feedback_plan, &mut self.readback_plan);
+            std::mem::swap(&mut self.feedback_graph_exec, &mut self.readback_graph_exec);
+            std::mem::swap(&mut self.feedback_graph, &mut self.readback_graph);
+            result
+        }
+
         /// Opt-in CUDA event measurement of the *same* grouped D2D graph.
         /// This does not replay transfers a second time; it changes the
         /// caller's synchronization point and is unsuitable for throughput
@@ -1062,6 +1114,104 @@ DONE:
                     synchronize,
                     host_copy: copy_started.elapsed(),
                     transfers: transfers.len(),
+                    bytes,
+                },
+            ))
+        }
+
+        /// Experimental packed readback: a CUDA Graph gathers disjoint
+        /// F32 outputs bit-for-bit into one device allocation, then queues
+        /// exactly one D2H DMA on the same non-blocking stream.
+        /// This never launches a standalone kernel or reorders arithmetic.
+        pub fn copy_f32_batch_to_host_packed_profiled(
+            &mut self,
+            transfers: &[(DevicePtr, usize)],
+        ) -> Result<(Vec<Vec<f32>>, CudaD2hTiming), GpuError> {
+            if transfers.is_empty() {
+                return Ok((Vec::new(), CudaD2hTiming::default()));
+            }
+            let mut total_elements = 0usize;
+            let mut spans = Vec::with_capacity(transfers.len());
+            for &(source, elements) in transfers {
+                self.require_allocation(source, elements)?;
+                if elements > i32::MAX as usize {
+                    return Err(GpuError::UnsupportedSize { elements });
+                }
+                spans.push((source, total_elements, elements));
+                total_elements = total_elements
+                    .checked_add(elements)
+                    .ok_or(GpuError::UnsupportedSize { elements })?;
+            }
+            if total_elements == 0 {
+                return Ok((
+                    vec![Vec::new(); transfers.len()],
+                    CudaD2hTiming::default(),
+                ));
+            }
+            let bytes = total_elements
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(GpuError::UnsupportedSize {
+                    elements: total_elements,
+                })?;
+            let enqueue_started = Instant::now();
+            if total_elements > self.readback_device_capacity {
+                self.readback_device_buffer = self.allocate(total_elements)?;
+                self.readback_device_capacity = total_elements;
+            }
+            let mut copies = Vec::with_capacity(spans.len());
+            for &(src, offset, elements) in &spans {
+                if elements == 0 {
+                    continue;
+                }
+                let offset_bytes = (offset * std::mem::size_of::<f32>()) as u64;
+                let dst = self
+                    .readback_device_buffer
+                    .checked_add(offset_bytes)
+                    .ok_or(GpuError::UnsupportedSize { elements: offset })?;
+                copies.push((dst, src, elements));
+            }
+            let pinned = self.staging_buffer(bytes)?;
+            let pointer = pinned.address;
+            self.staging_pending.push(pinned);
+            self.launch_readback_pack(&copies)?;
+            let _context = self.enter_context()?;
+            check("cuMemcpyDtoHAsync_v2", unsafe {
+                (self.functions.device_to_host)(
+                    pointer,
+                    self.readback_device_buffer,
+                    bytes,
+                    self.stream,
+                )
+            })?;
+            let enqueue = enqueue_started.elapsed();
+            let sync_started = Instant::now();
+            self.synchronize()?;
+            let synchronize = sync_started.elapsed();
+            let copy_started = Instant::now();
+            let mut results = Vec::with_capacity(spans.len());
+            for (_, offset, elements) in spans {
+                let mut values = vec![0f32; elements];
+                if elements > 0 {
+                    // SAFETY: the graph and DMA have completed on this stream.
+                    // The pinned allocation covers all packed tensor slices.
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            pointer.cast::<f32>().add(offset),
+                            values.as_mut_ptr(),
+                            elements,
+                        )
+                    };
+                }
+                results.push(values);
+            }
+            self.release_completed_staging();
+            Ok((
+                results,
+                CudaD2hTiming {
+                    enqueue,
+                    synchronize,
+                    host_copy: copy_started.elapsed(),
+                    transfers: 1,
                     bytes,
                 },
             ))
@@ -1497,6 +1647,12 @@ DONE:
             if !self.feedback_graph.is_null() {
                 unsafe { (self.functions.graph_destroy)(self.feedback_graph) };
             }
+            if !self.readback_graph_exec.is_null() {
+                unsafe { (self.functions.graph_exec_destroy)(self.readback_graph_exec) };
+            }
+            if !self.readback_graph.is_null() {
+                unsafe { (self.functions.graph_destroy)(self.readback_graph) };
+            }
             if !self.graph_exec.is_null() {
                 // SAFETY: the executable graph is owned by this session.
                 unsafe { (self.functions.graph_exec_destroy)(self.graph_exec) };
@@ -1661,6 +1817,15 @@ mod platform {
         }
 
         pub fn copy_f32_batch_to_host_profiled(
+            &mut self,
+            _: &[(u64, usize)],
+        ) -> Result<(Vec<Vec<f32>>, super::CudaD2hTiming), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn copy_f32_batch_to_host_packed_profiled(
             &mut self,
             _: &[(u64, usize)],
         ) -> Result<(Vec<Vec<f32>>, super::CudaD2hTiming), GpuError> {

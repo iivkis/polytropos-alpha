@@ -2827,6 +2827,23 @@ impl GpuExecution {
         &mut self,
         selected: &[NodeId],
     ) -> Result<(Vec<(NodeId, Tensor<f32>)>, GpuReadbackProfile), GpuError> {
+        self.read_outputs_selected_profiled_impl(selected, false)
+    }
+
+    /// Experimental: gather all selected outputs through a reusable CUDA
+    /// Graph and issue one D2H transfer. No new FP32 computation is performed.
+    pub fn read_outputs_selected_packed_profiled(
+        &mut self,
+        selected: &[NodeId],
+    ) -> Result<(Vec<(NodeId, Tensor<f32>)>, GpuReadbackProfile), GpuError> {
+        self.read_outputs_selected_profiled_impl(selected, true)
+    }
+
+    fn read_outputs_selected_profiled_impl(
+        &mut self,
+        selected: &[NodeId],
+        packed: bool,
+    ) -> Result<(Vec<(NodeId, Tensor<f32>)>, GpuReadbackProfile), GpuError> {
         self.execution_health.ensure_outputs_ready()?;
         let preflight_started = Instant::now();
         let mut seen = BTreeSet::new();
@@ -2878,9 +2895,12 @@ impl GpuExecution {
             .iter()
             .map(|(_, shape, address)| (*address, shape.element_count()))
             .collect::<Vec<_>>();
-        let (copied, timing) = self
-            .execution_health
-            .record_io(self.session.copy_f32_batch_to_host_profiled(&buffers))?;
+        let transfer = if packed {
+            self.session.copy_f32_batch_to_host_packed_profiled(&buffers)
+        } else {
+            self.session.copy_f32_batch_to_host_profiled(&buffers)
+        };
+        let (copied, timing) = self.execution_health.record_io(transfer)?;
         let construct_started = Instant::now();
         let outputs = sources
             .into_iter()
