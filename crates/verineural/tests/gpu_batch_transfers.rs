@@ -23,9 +23,7 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
     gpu.replay().unwrap();
 
     let old = gpu.read_outputs().unwrap();
-    let (reversed, profile) = gpu
-        .read_outputs_selected_profiled(&[product, sum])
-        .unwrap();
+    let (reversed, profile) = gpu.read_outputs_selected_profiled(&[product, sum]).unwrap();
     assert_eq!(profile.transfers, 2);
     assert_eq!(profile.bytes, 2 * 4 * std::mem::size_of::<f32>());
     let (empty, empty_profile) = gpu.read_outputs_selected_profiled(&[]).unwrap();

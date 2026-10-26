@@ -1055,13 +1055,16 @@ DONE:
                 outputs.push(values);
             }
             self.release_completed_staging();
-            Ok((outputs, CudaD2hTiming {
-                enqueue,
-                synchronize,
-                host_copy: copy_started.elapsed(),
-                transfers: transfers.len(),
-                bytes,
-            }))
+            Ok((
+                outputs,
+                CudaD2hTiming {
+                    enqueue,
+                    synchronize,
+                    host_copy: copy_started.elapsed(),
+                    transfers: transfers.len(),
+                    bytes,
+                },
+            ))
         }
 
         pub fn copy_to_host(

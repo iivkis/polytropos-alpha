@@ -2838,13 +2838,13 @@ impl GpuExecution {
                     reason: "duplicate selected read output",
                 });
             }
-            let &slot = self
-                .output_address_lookup
-                .get(&id.index())
-                .ok_or(GpuError::InvalidInput {
-                    node: id.index(),
-                    reason: "requested output is not selected",
-                })?;
+            let &slot =
+                self.output_address_lookup
+                    .get(&id.index())
+                    .ok_or(GpuError::InvalidInput {
+                        node: id.index(),
+                        reason: "requested output is not selected",
+                    })?;
             let (_, shape, original) = &self.output_addresses[slot];
             let node = self.program.graph.node(id)?;
             if node.dtype != DType::F32 {
@@ -2866,10 +2866,13 @@ impl GpuExecution {
         }
         let preflight = preflight_started.elapsed();
         if sources.is_empty() {
-            return Ok((Vec::new(), GpuReadbackProfile {
-                preflight,
-                ..GpuReadbackProfile::default()
-            }));
+            return Ok((
+                Vec::new(),
+                GpuReadbackProfile {
+                    preflight,
+                    ..GpuReadbackProfile::default()
+                },
+            ));
         }
         let buffers = sources
             .iter()
@@ -2884,15 +2887,18 @@ impl GpuExecution {
             .zip(copied)
             .map(|((id, shape, _), values)| Ok((id, Tensor::new(shape, values)?)))
             .collect::<Result<Vec<_>, GpuError>>()?;
-        Ok((outputs, GpuReadbackProfile {
-            preflight,
-            enqueue: timing.enqueue,
-            synchronize: timing.synchronize,
-            host_copy: timing.host_copy,
-            tensor_construct: construct_started.elapsed(),
-            transfers: timing.transfers,
-            bytes: timing.bytes,
-        }))
+        Ok((
+            outputs,
+            GpuReadbackProfile {
+                preflight,
+                enqueue: timing.enqueue,
+                synchronize: timing.synchronize,
+                host_copy: timing.host_copy,
+                tensor_construct: construct_started.elapsed(),
+                transfers: timing.transfers,
+                bytes: timing.bytes,
+            },
+        ))
     }
 
     /// Backward-compatible all-F32 reader, now batched in declaration order.
