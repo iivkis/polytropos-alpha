@@ -577,7 +577,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             "unchanged"
         },
-        if pending_checkpoint.is_some() { "preserved" } else { "reset" }
+        if pending_checkpoint.is_some() {
+            "preserved"
+        } else {
+            "reset"
+        }
     );
     println!(
         "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} adapter_rank={:?} delta_scale={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
