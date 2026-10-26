@@ -629,37 +629,74 @@ fn main() -> Result<(), Box<dyn Error>> {
         role_init,
         corpus: &corpus,
     };
-    // Before/after reports count actual CUDA Graph kernel nodes, not the
-    // number of semantic IR nodes. Baseline is compiled but NOT executed.
-    let old_kernels = {
-        let baseline = GpuEngine::new(
-            "llc",
-            std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
-        )
-        .with_launch_config(GpuLaunchConfig::default().with_approximate_exp())
-        .compile_outputs(&execution_graph, &selected)?;
-        baseline.kernel_count()?
+    // This unfused compilation is diagnostic only; it neither launches
+    // kernels nor contributes to the trained weights. On large BPTT DAGs it
+    // duplicates substantial host-side lowering/codegen work. Opt out for
+    // throughput experiments, but never when explicitly checking parity.
+    let skip_fusion_baseline = match std::env::var("TORUS16_SKIP_FUSION_BASELINE").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => return Err("TORUS16_SKIP_FUSION_BASELINE must be 0 or 1".into()),
     };
-    // Release the unfused program before constructing the GPU execution:
-    // large BPTT graphs should not retain two IR/LLVM copies simultaneously.
+    let compare_replay = std::env::var_os("TORUS16_BENCH_COMPARE").is_some();
+    if skip_fusion_baseline && (verify_fusion || compare_replay) {
+        return Err(
+            "cannot skip the unfused baseline when fusion parity or replay benchmark is requested"
+                .into(),
+        );
+    }
+    let baseline_engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    )
+    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    // Keep one baseline program for the optional bitwise verification/replay
+    // instead of compiling it twice. Otherwise drop it before fused codegen.
+    let (old_kernels, baseline_program) = if skip_fusion_baseline {
+        (None, None)
+    } else {
+        let baseline = baseline_engine.compile_outputs(&execution_graph, &selected)?;
+        let count = baseline.kernel_count()?;
+        (
+            Some(count),
+            if verify_fusion || compare_replay {
+                Some(baseline)
+            } else {
+                None
+            },
+        )
+    };
     let program = engine.compile_outputs(&execution_graph, &selected)?;
     let new_kernels = program.kernel_count()?;
-    if new_kernels > old_kernels {
-        return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
+    if let Some(old) = old_kernels {
+        if new_kernels > old {
+            return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
+        }
+        println!(
+            "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} four_op_fusions={} diamond_fusions={} dual_output_fusions={} reduction_percent={:.2}",
+            old,
+            new_kernels,
+            old - new_kernels,
+            program.fused_mul_adds().len(),
+            program.fused_mul_add_muls().len(),
+            program.fused_binary_pairs().len(),
+            program.fused_mul_mul_add_divs().len(),
+            program.fused_mul_diamond_adds().len(),
+            program.fused_dual_outputs().len(),
+            100. * (old - new_kernels) as f64 / old as f64
+        );
+    } else {
+        println!(
+            "cuda_graph_baseline=SKIPPED cuda_graph_after={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} four_op_fusions={} diamond_fusions={} dual_output_fusions={} comparison=unmeasured",
+            new_kernels,
+            program.fused_mul_adds().len(),
+            program.fused_mul_add_muls().len(),
+            program.fused_binary_pairs().len(),
+            program.fused_mul_mul_add_divs().len(),
+            program.fused_mul_diamond_adds().len(),
+            program.fused_dual_outputs().len(),
+        );
     }
-    println!(
-        "cuda_graph_before={} cuda_graph_after={} removed={} mul_add_fusions={} mul_add_mul_fusions={} binary_pointwise_fusions={} four_op_fusions={} diamond_fusions={} dual_output_fusions={} reduction_percent={:.2}",
-        old_kernels,
-        new_kernels,
-        old_kernels - new_kernels,
-        program.fused_mul_adds().len(),
-        program.fused_mul_add_muls().len(),
-        program.fused_binary_pairs().len(),
-        program.fused_mul_mul_add_divs().len(),
-        program.fused_mul_diamond_adds().len(),
-        program.fused_dual_outputs().len(),
-        100. * (old_kernels - new_kernels) as f64 / old_kernels as f64
-    );
 
     let base = all
         .into_iter()
@@ -704,7 +741,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // identical parameters, recurrent state, training tokens and CE labels.
     // The baseline session is dropped before allocating the fused session to
     // avoid requiring two large CUDA graphs in GPU memory simultaneously.
-    let compare_replay = std::env::var_os("TORUS16_BENCH_COMPARE").is_some();
     let verify_updates = if verify_fusion && first_window < train_windows {
         let mut updates = Vec::with_capacity(window_len * 2);
         let start = first_window * window_len;
@@ -726,12 +762,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         None
     };
     let (baseline_replay_ms, baseline_outputs) = if compare_replay || verify_updates.is_some() {
-        let baseline_engine = GpuEngine::new(
-            "llc",
-            std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
-        )
-        .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
-        let baseline = baseline_engine.compile_outputs(&execution_graph, &selected)?;
+        let baseline = baseline_program
+            .as_ref()
+            .ok_or("fusion comparison requires the unfused GPU program")?;
         let baseline_sources = supplied
             .iter()
             .filter(|(id, _)| baseline.source_inputs().contains(id))
@@ -759,6 +792,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         (None, None)
     };
+    // The unfused program is no longer needed after optional parity/replay.
+    // Drop its large LLVM/IR metadata before materializing the fused CUDA Graph.
+    drop(baseline_program);
     let mut gpu = engine.prepare(&program, &supplied, &artifact)?;
     if fresh {
         let stale_best = checkpoint_path.with_extension("best.ckpt");

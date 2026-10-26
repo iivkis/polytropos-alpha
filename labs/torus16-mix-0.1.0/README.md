@@ -811,3 +811,56 @@ GPU optimizer добавляет дополнительные IR-узлы и п�
 поэтому может оказаться медленнее CPU. Выбирать backend только по
 измеренной сквозной скорости и целевой точности, а не по процентажу
 `nvidia-smi`. Новая конфигурация ещё не тестировалась локально.
+
+
+### Дополнительное ускорение подготовки: без дублирования unfused CUDA-IR
+
+Ревью долгого обучения (26.10.2026): у rank-4 BPTT=4 в smoke run
+`cuda_graph_before=19266`, `cuda_graph_after=16239`,
+`setup_compile_and_cuda_prepare_ms=87990.894`. Значительная
+часть наблюдаемой стоимости включает GPU/NVPTX подготовку; точная
+доля повторной компиляции ещё не замерена. В прежнем пути **всегда**
+выполнялась полноценная компиляция отдельной нефьюзированной программы
+только ради `cuda_graph_before`, а при `TORUS16_VERIFY_FUSION`
+или `TORUS16_BENCH_COMPARE` та же baseline программа компилировалась
+**повторно**. Она не участвует в обучении.
+
+Новый `TORUS16_SKIP_FUSION_BASELINE=1` исключает этот
+диагностический lowering. Он не меняет математический graph,
+fusion в **исполняемом** graph, optimizer, FP32 policy или checkpoint
+fingerprint. Тренер явно пишет `cuda_graph_baseline=SKIPPED`,
+`cuda_graph_after` и реальные counts fusion; `removed` и
+`reduction_percent` в таком режиме **неизвестны**. Для
+`TORUS16_VERIFY_FUSION` / `TORUS16_BENCH_COMPARE` отключать baseline
+запрещено (fail-closed). Когда baseline нужен, компиляция происходит
+один раз и программа переиспользуется для сравнения/бенчмарка.
+Все GPU memory/domain проверки исполняемой программы сохраняются.
+
+В `task compare-torus16-role-delta-ranks` и
+`task benchmark-torus16-role-delta-backends` пропуск baseline
+включён явно для сокращения *необязательного* времени подготовки.
+Обычный тренер без переменной сохраняет прежний диагностический
+режим. Для локальной приёмки:
+
+```bash
+task verify-torus16-role-delta-fast-setup
+```
+
+Приёмка запускает 2 одинаковых Role-Delta rank-4 BPTT=4 GPU-обучения
+от одного warm-start, один с полным диагностическим baseline, другой
+без него. Требуется побитовое совпадение final и best checkpoint;
+время `setup_compile_and_cuda_prepare_ms` выводится раздельно.
+Значение **ускорения заранее не утверждается**: оно измеряется именно
+этой командой, с учётом отличий работы компилятора и прогрева.
+Тест не читает test-раздел и не затрагивает прежние checkpoint.
+
+Принципиально другая, ещё не решённая проблема: 16 239 мелких
+CUDA Graph kernels на BPTT=4 (в проверенном CPU AdamW smoke),
+низкая полезная загрузка GPU и серийные зависимости самой
+рекуррентной архитектуры. Пропуск диагностической компиляции
+ускоряет **startup**, но не один training step. Для сокращения
+kernel count нужен следующий, отдельно доказательно проверяемый
+универсальный fusion/region-lowering в VeriNeural, а не отдельный
+лабораторный CUDA kernel. Разграничение фаз нужно оценивать по
+`setup_compile_and_cuda_prepare_ms`, `training_tokens_per_second`
+и `training_profile_avg_ms`, а не только по GPU utilization.
