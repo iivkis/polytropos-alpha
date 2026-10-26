@@ -12,3 +12,24 @@
 **/.auto-build.previous-*/
 **/.verineural-pre-stage10/
 
+
+# Example labs regenerate this evidence from Rust/Lean/CUDA. Tracking symlinks
+# into the ignored auto-build tree or stale PTX/certificates breaks clean clones.
+/labs/xor-0.1.0/architecture.*
+/labs/xor-0.1.0/identity.txt
+/labs/xor-0.1.0/semantic.ir
+/labs/xor-0.1.0/*.bits
+/labs/xor-0.1.0/SHA256SUMS
+/labs/xor-0.1.0/report.txt
+/labs/xor-0.1.0/gpu/
+/labs/coupled-field-0.1.0/architecture.*
+/labs/coupled-field-0.1.0/composition.lean
+/labs/coupled-field-0.1.0/identity.txt
+/labs/coupled-field-0.1.0/semantic.ir
+/labs/coupled-field-0.1.0/*.bits
+/labs/coupled-field-0.1.0/SHA256SUMS
+/labs/coupled-field-0.1.0/report.txt
+/labs/coupled-field-0.1.0/gpu/
+# Rotating-matrices keeps deliberately published evidence in artifacts/,
+# except dangling legacy aliases to the generated certified auto-build bundle.
+/labs/rotating-matrices-0.1.0/artifacts/certified/

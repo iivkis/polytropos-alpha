@@ -1,5 +1,0 @@
-node=0 role=input shape=[1, 4] bits=3f800000,40000000,40400000,40800000
-node=1 role=input shape=[1, 4] bits=40000000,3f800000,00000000,3f800000
-node=2 role=input shape=[1, 4] bits=00000000,3f800000,40000000,3f800000
-node=3 role=parameter shape=[4] bits=3f800000,00000000,3f800000,00000000
-node=4 role=parameter shape=[4] bits=00000000,40000000,00000000,3f800000

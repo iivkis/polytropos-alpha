@@ -85,7 +85,11 @@ task verify-lab-rotating-gpu
 Потребитель теперь использует `Tensor::from_slice` вместо собственного helper.
 
 `artifacts/inspect.txt`, `artifacts/inspect.semantic.ir` и `artifacts/training-report.txt`
-остаются диагностикой/результатами лаборатории. Stage 10 публикует единый
+остаются диагностикой/результатами лаборатории. Ранее опубликованные
+артефакты и результаты обучения сохранены в Git как исследовательские
+свидетельства. Только устаревшие симлинки `artifacts/certified/*` на
+ещё не созданный `auto-build/` удалены из индекса: нужный bundle
+создаётся командой сертификации и игнорируется Git. Stage 10 публикует единый
 сертифицируемый bundle в `artifacts/certified/auto-build/` с собственными
 `SHA256SUMS`, `identity.txt`, Lean, PTX, DOT/PNG и manifest. Лаборатория
 не копирует файлы из bundle вручную и не пересчитывает SHA-256 сама.

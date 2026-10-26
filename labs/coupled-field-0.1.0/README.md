@@ -31,6 +31,12 @@ execution guarantees.
     task lab-stage9
     task verify-lab-stage9
 
+Certification artifacts (generated Lean, DOT/PNG, LLVM/PTX, bit-level
+inputs/outputs, manifests) are **not tracked in Git**. On a fresh checkout
+run `task lab-stage9` before `task verify-lab-stage9`. This avoids
+shipping stale evidence and dangling legacy `auto-build/` symlinks.
+Published source files, tests and proof obligations remain versioned.
+
 The lab runs the same independent checked i64 oracle for the concrete
 [4,10,8,12] values, kernel-checks both architecture_global_nonnegative
 and architecture_property_coupled_branch_lower_bound via Lean, checks
