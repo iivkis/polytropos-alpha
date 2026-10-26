@@ -278,7 +278,8 @@ fn temporal_parameter_hoisting_gpu_forward_and_gradients_match_baseline() {
             horizon,
             if hoisted { "shared" } else { "baseline" },
         ));
-        engine.execute_outputs(&program, &sources, &path)
+        engine
+            .execute_outputs(&program, &sources, &path)
             .unwrap()
             .into_iter()
             .map(|(_, tensor)| tensor)

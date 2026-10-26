@@ -653,9 +653,7 @@ impl GpuProgram {
         let skipped = self.skipped_nodes();
         let mut total = 0usize;
         for &index in &self.live_nodes {
-            if skipped.contains(&index)
-                && !self.fused_dual_outputs.values().any(|&n| n == index)
-            {
+            if skipped.contains(&index) && !self.fused_dual_outputs.values().any(|&n| n == index) {
                 continue;
             }
             let node = &self.graph.nodes()[index];
