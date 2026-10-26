@@ -975,7 +975,9 @@ tasks:
 
 
   verify-torus16-role-delta:
-    desc: Validate Role-Delta rank inventories and initial CUDA Graph EMA4 parity
+    desc: Validate Role-Delta inventory, scalar gradients, initial EMA4 parity and projection GPU VJP
     cmds:
       - cargo test -p torus16-mix-lab --test ema4 role_delta_parameter_inventory_and_zero_adapter_initialization
+      - cargo test -p torus16-mix-lab --lib role_delta_scalar_vjp_matches_finite_differences
       - cargo test -p torus16-mix-lab --test ema4 role_delta_initial_gpu_logits_and_state_match -- --ignored --nocapture
+      - cargo test -p torus16-mix-lab --lib role_delta_gpu_vjp_matches_scalar_oracle -- --ignored --nocapture

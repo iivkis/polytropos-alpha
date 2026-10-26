@@ -10,6 +10,9 @@ pub mod ema4;
 pub mod ema4_checkpoint;
 pub mod ema4_reference;
 
+#[cfg(test)]
+mod role_delta_tests;
+
 pub const WIDTH: usize = 48;
 pub const ROLES: usize = 8;
 pub const BASES: usize = 2 * ROLES;
