@@ -386,6 +386,14 @@ DONE:
         readback_descriptor_capacity: usize,
         readback_device_buffer: DevicePtr,
         readback_device_capacity: usize,
+        // Independent reusable CUDA Graph for scatter after packed H2D.
+        upload_graph: Handle,
+        upload_graph_exec: Handle,
+        upload_plan: Vec<(DevicePtr, DevicePtr, usize)>,
+        upload_descriptors: DevicePtr,
+        upload_descriptor_capacity: usize,
+        upload_device_buffer: DevicePtr,
+        upload_device_capacity: usize,
         // A separate, reusable guard Graph checks all runtime-domain
         // obligations before any state-feedback copies are launched.
         guard_module: Handle,
@@ -476,6 +484,13 @@ DONE:
                 readback_descriptor_capacity: 0,
                 readback_device_buffer: 0,
                 readback_device_capacity: 0,
+                upload_graph: ptr::null_mut(),
+                upload_graph_exec: ptr::null_mut(),
+                upload_plan: Vec::new(),
+                upload_descriptors: 0,
+                upload_descriptor_capacity: 0,
+                upload_device_buffer: 0,
+                upload_device_capacity: 0,
                 guard_module: ptr::null_mut(),
                 guard_kernel: ptr::null_mut(),
                 guard_flag: 0,
@@ -604,6 +619,71 @@ DONE:
             check("cuMemcpyHtoDAsync_v2", unsafe {
                 (self.functions.host_to_device)(address, pinned, bytes.len(), self.stream)
             })
+        }
+
+        /// One pinned H2D DMA followed by a reusable CUDA Graph that scatters
+        /// F32 bit patterns to original input allocations. No FP32 arithmetic.
+        pub fn copy_f32_batch_to_device_packed(
+            &mut self,
+            transfers: &[(DevicePtr, &[f32])],
+        ) -> Result<(), GpuError> {
+            if transfers.is_empty() {
+                return Ok(());
+            }
+            // Preflight everything before the first transfer.
+            let mut total = 0usize;
+            let mut spans = Vec::with_capacity(transfers.len());
+            for &(address, values) in transfers {
+                self.require_allocation(address, values.len())?;
+                if values.is_empty() || values.len() > i32::MAX as usize {
+                    return Err(GpuError::UnsupportedSize {
+                        elements: values.len(),
+                    });
+                }
+                spans.push((address, total, values));
+                total = total
+                    .checked_add(values.len())
+                    .ok_or(GpuError::UnsupportedSize { elements: total })?;
+            }
+            let bytes = total
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(GpuError::UnsupportedSize { elements: total })?;
+            let _context = self.enter_context()?;
+            if total > self.upload_device_capacity {
+                self.upload_device_buffer = self.allocate(total)?;
+                self.upload_device_capacity = total;
+            }
+            let staging = self.staging_buffer(bytes)?;
+            for &(_, offset, values) in &spans {
+                // SAFETY: checked offsets and lengths fit the pinned buffer.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        values.as_ptr(),
+                        staging.address.cast::<f32>().add(offset),
+                        values.len(),
+                    )
+                };
+            }
+            let pinned = staging.address;
+            self.staging_pending.push(staging);
+            check("cuMemcpyHtoDAsync_v2", unsafe {
+                (self.functions.host_to_device)(
+                    self.upload_device_buffer,
+                    pinned,
+                    bytes,
+                    self.stream,
+                )
+            })?;
+            let mut copies = Vec::with_capacity(spans.len());
+            for &(dest, offset, values) in &spans {
+                let src = self
+                    .upload_device_buffer
+                    .checked_add((offset * std::mem::size_of::<f32>()) as u64)
+                    .ok_or(GpuError::UnsupportedSize { elements: offset })?;
+                copies.push((dest, src, values.len()));
+            }
+            self.launch_upload_scatter(&copies)?;
+            self.flush_input_copies()
         }
 
         /// Stage input bytes in page-locked memory and enqueue on our explicit
@@ -978,6 +1058,32 @@ DONE:
             std::mem::swap(&mut self.feedback_plan, &mut self.readback_plan);
             std::mem::swap(&mut self.feedback_graph_exec, &mut self.readback_graph_exec);
             std::mem::swap(&mut self.feedback_graph, &mut self.readback_graph);
+            result
+        }
+
+        // The same generic bit-copy kernel, but a third cache. Without it
+        // alternating host uploads and readbacks rebuilds the transfer graph.
+        fn launch_upload_scatter(
+            &mut self,
+            copies: &[(DevicePtr, DevicePtr, usize)],
+        ) -> Result<(), GpuError> {
+            std::mem::swap(&mut self.feedback_graph, &mut self.upload_graph);
+            std::mem::swap(&mut self.feedback_graph_exec, &mut self.upload_graph_exec);
+            std::mem::swap(&mut self.feedback_plan, &mut self.upload_plan);
+            std::mem::swap(&mut self.feedback_descriptors, &mut self.upload_descriptors);
+            std::mem::swap(
+                &mut self.feedback_descriptor_capacity,
+                &mut self.upload_descriptor_capacity,
+            );
+            let result = self.launch_feedback_copies(copies);
+            std::mem::swap(
+                &mut self.feedback_descriptor_capacity,
+                &mut self.upload_descriptor_capacity,
+            );
+            std::mem::swap(&mut self.feedback_descriptors, &mut self.upload_descriptors);
+            std::mem::swap(&mut self.feedback_plan, &mut self.upload_plan);
+            std::mem::swap(&mut self.feedback_graph_exec, &mut self.upload_graph_exec);
+            std::mem::swap(&mut self.feedback_graph, &mut self.upload_graph);
             result
         }
 
@@ -1658,6 +1764,12 @@ DONE:
             if !self.readback_graph.is_null() {
                 unsafe { (self.functions.graph_destroy)(self.readback_graph) };
             }
+            if !self.upload_graph_exec.is_null() {
+                unsafe { (self.functions.graph_exec_destroy)(self.upload_graph_exec) };
+            }
+            if !self.upload_graph.is_null() {
+                unsafe { (self.functions.graph_destroy)(self.upload_graph) };
+            }
             if !self.graph_exec.is_null() {
                 // SAFETY: the executable graph is owned by this session.
                 unsafe { (self.functions.graph_exec_destroy)(self.graph_exec) };
@@ -1772,6 +1884,15 @@ mod platform {
         }
 
         pub fn require_allocation(&self, _: u64, _: usize) -> Result<(), GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn copy_f32_batch_to_device_packed(
+            &mut self,
+            _: &[(u64, &[f32])],
+        ) -> Result<(), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))

@@ -126,6 +126,44 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
             assert_eq!(packed_value.to_bits(), regular_value.to_bits());
         }
     }
+    // Packed H2D scatter must update every source bit-for-bit, and
+    // a cached scatter graph must accept subsequent input epochs.
+    let packed_x = Tensor::from_slice(vec![4], &[6., -1., -3., 2.]).unwrap();
+    let packed_y = Tensor::from_slice(vec![4], &[2., 0.25, -4., -1.]).unwrap();
+    assert!(matches!(
+        gpu.update_input_subset_packed(&[(x, &packed_x), (x, &packed_y)]),
+        Err(GpuError::InvalidInput {
+            reason: "duplicate partial input update",
+            ..
+        })
+    ));
+    gpu.update_input_subset_packed(&[(x, &packed_x), (y, &packed_y)])
+        .unwrap();
+    gpu.replay().unwrap();
+    let packed_values = gpu.read_outputs_selected(&[sum, product]).unwrap();
+    for i in 0..4 {
+        let expected_sum = packed_x.values()[i] + packed_y.values()[i];
+        let expected_product = expected_sum * packed_y.values()[i];
+        assert_eq!(
+            packed_values[0].1.values()[i].to_bits(),
+            expected_sum.to_bits()
+        );
+        assert_eq!(
+            packed_values[1].1.values()[i].to_bits(),
+            expected_product.to_bits()
+        );
+    }
+    gpu.update_input_subset_packed(&[(x, &new_x), (y, &new_y)])
+        .unwrap();
+    gpu.replay().unwrap();
+    let repeated = gpu.read_outputs_selected(&[sum, product]).unwrap();
+    for (now, before) in repeated.iter().zip(&actual) {
+        assert_eq!(now.0, before.0);
+        for (&left, &right) in now.1.values().iter().zip(before.1.values()) {
+            assert_eq!(left.to_bits(), right.to_bits());
+        }
+    }
+
     // Existing pointwise single-update API still yields the same results.
     gpu.update_input(x, &new_x).unwrap();
     gpu.update_input(y, &new_y).unwrap();

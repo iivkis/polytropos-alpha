@@ -2196,6 +2196,23 @@ impl GpuExecution {
         &mut self,
         inputs: &[(NodeId, &Tensor<f32>)],
     ) -> Result<(), GpuError> {
+        self.update_input_subset_impl(inputs, false)
+    }
+
+    /// Experimental packed H2D upload, using one DMA and a cached CUDA Graph
+    /// scatter. Validates the complete subset before any upload.
+    pub fn update_input_subset_packed(
+        &mut self,
+        inputs: &[(NodeId, &Tensor<f32>)],
+    ) -> Result<(), GpuError> {
+        self.update_input_subset_impl(inputs, true)
+    }
+
+    fn update_input_subset_impl(
+        &mut self,
+        inputs: &[(NodeId, &Tensor<f32>)],
+        packed: bool,
+    ) -> Result<(), GpuError> {
         self.execution_health.ensure_ready()?;
         let mut seen = BTreeSet::new();
         for &(id, value) in inputs {
@@ -2225,14 +2242,23 @@ impl GpuExecution {
         }
         self.execution_health.invalidate_outputs();
         self.preserved_output_valid.set(false);
-        for &(id, value) in inputs {
-            self.execution_health.record_io(
-                self.session
-                    .copy_to_device(self.input_addresses[&id.index()], value.values()),
-            )?;
+        if packed {
+            let transfers = inputs
+                .iter()
+                .map(|&(id, value)| (self.input_addresses[&id.index()], value.values()))
+                .collect::<Vec<_>>();
+            self.execution_health
+                .record_io(self.session.copy_f32_batch_to_device_packed(&transfers))
+        } else {
+            for &(id, value) in inputs {
+                self.execution_health.record_io(
+                    self.session
+                        .copy_to_device(self.input_addresses[&id.index()], value.values()),
+                )?;
+            }
+            self.execution_health
+                .record_io(self.session.flush_input_copies())
         }
-        self.execution_health
-            .record_io(self.session.flush_input_copies())
     }
 
     /// Rebind one named source without uploading unchanged parameters or state.

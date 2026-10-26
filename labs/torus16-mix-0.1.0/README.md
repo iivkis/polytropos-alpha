@@ -976,6 +976,15 @@ NVIDIA backend проверяется отдельным GPU-тестом и п�
 benchmark могут зависеть от первого прогрева. Этот путь ещё не
 профилирован на NVIDIA и не объявляется ускорением до измерений.
 
+Экспериментальный `TORUS16_PACKED_H2D=1` переносит все обновлённые
+CPU AdamW параметры одним H2D на явном non-blocking stream и
+распределяет их по исходным GPU-адресам через отдельный кэшированный
+CUDA Graph. Ни один FP32-вычислительный узел модели не меняется. Режим
+по умолчанию выключен до NVIDIA parity и benchmark. Проверка:
+`task benchmark-torus16-packed-h2d`, включая побитовое сравнение
+final/best checkpoint. `parameters_or_checkpoint_io` включает также
+другие операции и не равен чистому H2D.
+
 Лог `training_d2h_profile_avg_ms` теперь показывает wall-clock
 `preflight`, `enqueue` (включая подготовку pinned буферов и очередь
 `cuMemcpyDtoHAsync`), `synchronize` (ожидание completion очереди на

@@ -433,6 +433,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let gpu_adamw_requested = std::env::var_os("TORUS16_GPU_ADAMW").is_some();
     let packed_d2h = std::env::var_os("TORUS16_PACKED_D2H").is_some();
+    let packed_h2d = std::env::var_os("TORUS16_PACKED_H2D").is_some();
     // Explicit, checkpointed fine-tuning experiment. Do not change the
     // established 0.002 baseline or silently reset AdamW moments/steps.
     let lr_decay_5x = std::env::var_os("TORUS16_LR_DECAY_5X").is_some();
@@ -1150,7 +1151,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .zip(&targets)
                 .map(|(name, &id)| (id, &params[name]))
                 .collect::<Vec<_>>();
-            gpu.update_input_subset(&updates)?;
+            if packed_h2d {
+                gpu.update_input_subset_packed(&updates)?;
+            } else {
+                gpu.update_input_subset(&updates)?;
+            }
             None
         };
         let upload_parameters_ms = timing.elapsed().as_secs_f64() * 1000.;
@@ -1259,6 +1264,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // A completed checkpoint can be inspected again without generating NaN
     // timing summaries from a zero-window no-op training loop.
     let profile_divisor = profile_windows.max(1) as f64;
+    println!("training_parameter_upload_mode=packed_{}", packed_h2d);
     println!(
         "training_d2h_profile_avg_ms windows={} packed={} preflight={:.4} enqueue={:.4} synchronize={:.4} host_copy={:.4} tensor_construct={:.4} transfers_per_window={:.2} bytes_per_window={:.1} timing=host_wall_after_synchronous_replay",
         profile_windows,
