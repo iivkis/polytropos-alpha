@@ -645,12 +645,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     if gpu_optimizer.is_some() {
         launch = launch.with_internal_pointwise_fusion();
     }
+    // Experimental physical memory layout only; architecture, Semantic IR,
+    // CUDA kernels and training checkpoint compatibility are unchanged.
+    let gpu_allocation_slab = std::env::var_os("TORUS16_GPU_ALLOCATION_SLAB").is_some();
     let engine = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
     )
     .with_launch_config(launch)
-    .with_codegen_opt_level(codegen_opt_level);
+    .with_codegen_opt_level(codegen_opt_level)
+    .with_allocation_slab(gpu_allocation_slab);
+    println!(
+        "gpu_allocation_mode={}",
+        if gpu_allocation_slab { "slab" } else { "separate" }
+    );
     let holdout = HoldoutContext {
         engine: &engine,
         model: &model,

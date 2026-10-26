@@ -1177,6 +1177,42 @@ tasks:
         grep '^setup_compile_and_cuda_prepare_ms=' "$dir/fast.log"
         echo "Evidence: $dir"
 
+  benchmark-torus16-v02-allocation-slab:
+    desc: Compare separate CUDA tensor allocations against a single bounded slab and require bitwise checkpoint parity
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        base="${TORUS16_V02_SLAB_DIR:-target/torus16-v02-allocation-slab}"
+        mkdir -p "$base"
+        export VERINEURAL_GPU_PREPARE_PROFILE=1
+        export TORUS16_V02_RANKS=4 TORUS16_V02_BPTTS=8
+        export TORUS16_V02_TRAIN_TOKENS=64 TORUS16_V02_VALIDATION_CHARS=64
+        unset TORUS16_GPU_ALLOCATION_SLAB
+        for mode in separate slab; do
+          if [ "$mode" = slab ]; then
+            export TORUS16_GPU_ALLOCATION_SLAB=1
+          else
+            unset TORUS16_GPU_ALLOCATION_SLAB
+          fi
+          echo "v0.2 memory layout=$mode role_delta_4 BPTT8 (64-char setup smoke)"
+          TORUS16_V02_DIR="$base/$mode" task benchmark-torus16-v02-horizon >"$base/$mode.log" 2>&1 || {
+            tail -n 100 "$base/$mode.log"
+            exit 1
+          }
+          grep '^gpu_allocation_mode=' "$base/$mode.log" | head -n 1
+          grep '^gpu_prepare_allocations .*artifact_dir=.*vn_ema4_bptt_' "$base/$mode.log"
+          grep '^gpu_prepare_phase=.*artifact_dir=.*vn_ema4_bptt_' "$base/$mode.log"
+          grep '^setup_compile_and_cuda_prepare_ms=' "$base/$mode.log"
+          grep '^training_total_s=' "$base/$mode.log"
+          grep '^test_evaluation=SKIPPED ' "$base/$mode.log"
+        done
+        cmp "$base/separate/rank4-bptt8.ckpt" "$base/slab/rank4-bptt8.ckpt"
+        cmp "$base/separate/rank4-bptt8.best.ckpt" "$base/slab/rank4-bptt8.best.ckpt"
+        echo "PASS: slab and separate CUDA allocations preserve final/best checkpoint bits."
+        echo "DIAGNOSTIC ONLY: 64-char validation must not be used to rank architecture quality."
+        echo "Logs: $base/separate.log $base/slab.log"
+
   benchmark-torus16-v02-setup-stability:
     desc: Repeat BPTT8 CUDA setup across fresh processes, report phase spread and verify deterministic checkpoint bytes
     deps: [prepare]

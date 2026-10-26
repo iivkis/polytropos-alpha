@@ -175,3 +175,73 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
         }
     }
 }
+
+/// Compare two independent CUDA sessions using the same Semantic IR.
+#[test]
+#[ignore = "requires NVIDIA + LLVM NVPTX; verifies slab boundaries, replay, packed H2D/D2H"]
+fn slab_allocation_preserves_cuda_graph_outputs_and_packed_io() {
+    let mut graph = NeuralGraph::default();
+    let shape = Shape::new(vec![4]).unwrap();
+    let x = graph.input(shape.clone(), Domain::Finite);
+    let y = graph.input(shape, Domain::Finite);
+    let sum = graph.add(x, y).unwrap();
+    let product = graph.mul(sum, y).unwrap();
+    let result = graph.add(product, x).unwrap();
+    let arch = std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".to_string());
+    let ordinary_engine = GpuEngine::new("llc", arch.clone());
+    let slab_engine = GpuEngine::new("llc", arch).with_allocation_slab(true);
+    let program = ordinary_engine
+        .compile_outputs(&graph, &[sum, product, result])
+        .unwrap();
+    let source = vec![
+        (x, Tensor::from_slice(vec![4], &[1., 0., -3., 9.]).unwrap()),
+        (y, Tensor::from_slice(vec![4], &[2., -0., -4., 0.25]).unwrap()),
+    ];
+    let root = std::env::temp_dir().join(format!("vn_allocation_slab_{}", std::process::id()));
+    let mut normal = ordinary_engine
+        .prepare(&program, &source, &root.join("ordinary"))
+        .unwrap();
+    let mut slab = slab_engine
+        .prepare(&program, &source, &root.join("slab"))
+        .unwrap();
+    for epoch in 0..3 {
+        if epoch != 0 {
+            let x_values = Tensor::from_slice(
+                vec![4],
+                &[epoch as f32, -0., 0.125, -(epoch as f32)],
+            )
+            .unwrap();
+            let y_values =
+                Tensor::from_slice(vec![4], &[0.5, 7., -1., epoch as f32]).unwrap();
+            normal
+                .update_input_subset(&[(x, &x_values), (y, &y_values)])
+                .unwrap();
+            slab.update_input_subset_packed(&[(x, &x_values), (y, &y_values)])
+                .unwrap();
+        }
+        normal.replay().unwrap();
+        slab.replay().unwrap();
+        let expected = normal
+            .read_outputs_selected(&[result, sum, product])
+            .unwrap();
+        let (actual, profile) = slab
+            .read_outputs_selected_packed_profiled(&[result, sum, product])
+            .unwrap();
+        assert_eq!(profile.transfers, 1);
+        assert_eq!(expected.len(), actual.len());
+        for ((expected_id, expected_tensor), (actual_id, actual_tensor)) in
+            expected.iter().zip(&actual)
+        {
+            assert_eq!(expected_id, actual_id);
+            assert_eq!(expected_tensor.shape(), actual_tensor.shape());
+            for (&left, &right) in expected_tensor.values().iter().zip(actual_tensor.values()) {
+                assert_eq!(
+                    left.to_bits(),
+                    right.to_bits(),
+                    "epoch={epoch}, output={}",
+                    expected_id.index()
+                );
+            }
+        }
+    }
+}

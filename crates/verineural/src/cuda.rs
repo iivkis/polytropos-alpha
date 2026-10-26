@@ -544,6 +544,50 @@ DONE:
             Ok(address)
         }
 
+        /// Allocate independent non-overlapping F32 tensors inside one
+        /// owned CUDA allocation. CUDA Graph kernels still receive ordinary
+        /// device addresses. Only the slab base pointer is freed on drop.
+        pub fn allocate_batch(&mut self, sizes: &[usize]) -> Result<Vec<DevicePtr>, GpuError> {
+            if sizes.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Check every size/offset before asking the driver to allocate.
+            let mut offsets = Vec::with_capacity(sizes.len());
+            let mut total = 0usize;
+            for &elements in sizes {
+                if elements == 0 {
+                    return Err(GpuError::UnsupportedSize { elements });
+                }
+                offsets.push(total);
+                total = total
+                    .checked_add(elements)
+                    .ok_or(GpuError::UnsupportedSize { elements })?;
+            }
+            total
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(GpuError::UnsupportedSize { elements: total })?;
+            let base = self.allocate(total)?;
+            let addresses = offsets
+                .into_iter()
+                .map(|offset| {
+                    let bytes = offset
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or(GpuError::UnsupportedSize { elements: offset })?;
+                    let bytes = u64::try_from(bytes)
+                        .map_err(|_| GpuError::UnsupportedSize { elements: offset })?;
+                    base.checked_add(bytes)
+                        .ok_or(GpuError::UnsupportedSize { elements: offset })
+                })
+                .collect::<Result<Vec<_>, GpuError>>()?;
+            // Preserve *logical per-tensor bounds*. Using only the original
+            // slab capacity would allow a faulty kernel to write into the
+            // next tensor without being rejected by require_allocation().
+            for (&address, &elements) in addresses.iter().zip(sizes) {
+                self.allocation_capacity.insert(address, elements);
+            }
+            Ok(addresses)
+        }
+
         /// Check the actual device allocations backing a logical memory
         /// contract before graph capture. This is a preflight check, not an
         /// assertion about LLVM/PTX's machine-level memory accesses.
@@ -552,9 +596,11 @@ DONE:
             address: DevicePtr,
             elements: usize,
         ) -> Result<(), GpuError> {
-            // A logical view may refer to an interior f32-aligned slice
-            // of an owned CUDA allocation. Bounds are checked relative to
-            // the originating allocation (not the next allocation).
+            // Find the containing logical tensor view. An allocation slab
+            // registers each tensor extent independently, so preflight
+            // cannot accidentally authorize access to its neighbour.
+            // Ordinary allocations and packed staging buffers each register
+            // a single full-size view, including valid interior slices.
             let valid = self
                 .allocation_capacity
                 .range(..=address)
@@ -1878,6 +1924,12 @@ mod platform {
         }
 
         pub fn allocate(&mut self, _: usize) -> Result<u64, GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn allocate_batch(&mut self, _: &[usize]) -> Result<Vec<u64>, GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))

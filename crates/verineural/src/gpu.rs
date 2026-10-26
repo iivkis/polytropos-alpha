@@ -2995,6 +2995,7 @@ pub struct GpuEngine {
     arch: String,
     launch: GpuLaunchConfig,
     codegen_opt_level: GpuCodegenOptLevel,
+    allocation_slab: bool,
 }
 
 impl Default for GpuEngine {
@@ -3011,6 +3012,7 @@ impl GpuEngine {
             arch: arch.into(),
             launch: GpuLaunchConfig::default(),
             codegen_opt_level: GpuCodegenOptLevel::O0,
+            allocation_slab: false,
         }
     }
 
@@ -3024,6 +3026,16 @@ impl GpuEngine {
     /// The emitted PTX must still pass translation validation before execution.
     pub fn with_codegen_opt_level(mut self, level: GpuCodegenOptLevel) -> Self {
         self.codegen_opt_level = level;
+        self
+    }
+
+    /// Opt into one CUDA allocation containing disjoint tensor buffers.
+    /// Physical addresses change but Semantic IR, arithmetic and kernel
+    /// ordering do not. Disabled by default pending GPU parity/benchmarks.
+    /// The entire live graph must fit in one device allocation; allocation
+    /// failures are returned, never silently retried using a different plan.
+    pub fn with_allocation_slab(mut self, enabled: bool) -> Self {
+        self.allocation_slab = enabled;
         self
     }
 
@@ -3845,6 +3857,51 @@ impl GpuEngine {
         let mut input_addresses = BTreeMap::new();
         let skipped = program.skipped_nodes();
 
+        // Preassign all materialized source/output allocations before any
+        // CUDA Graph capture. A fused secondary output still needs storage;
+        // zero-copy aliases share the exact address of their source.
+        // Every checked offset belongs to the single owned CUDA allocation.
+        let mut slab_addresses = BTreeMap::new();
+        if self.allocation_slab {
+            let mut entries = Vec::new();
+            for &index in &program.live_nodes {
+                if skipped.contains(&index)
+                    && !program.fused_dual_outputs.values().any(|&n| n == index)
+                {
+                    continue;
+                }
+                let node = &program.graph.nodes()[index];
+                if matches!(node.operation, Operation::Input)
+                    || matches!(
+                        program.graph.storage(node.id)?,
+                        NodeStorage::OwnedContiguous { .. }
+                    )
+                {
+                    entries.push((index, node.shape.element_count()));
+                }
+            }
+            let sizes = entries.iter().map(|&(_, size)| size).collect::<Vec<_>>();
+            let addresses = session.allocate_batch(&sizes)?;
+            slab_addresses.extend(
+                entries
+                    .into_iter()
+                    .zip(addresses)
+                    .map(|((index, _), address)| (index, address)),
+            );
+        }
+        let allocate_node = |session: &mut CudaSession, index: usize, elements: usize| {
+            if self.allocation_slab {
+                slab_addresses
+                    .get(&index)
+                    .copied()
+                    .ok_or(GpuError::InvalidInput {
+                        node: index,
+                        reason: "missing preallocated slab tensor",
+                    })
+            } else {
+                session.allocate(elements)
+            }
+        };
         for &index in &program.live_nodes {
             if skipped.contains(&index) && !program.fused_dual_outputs.values().any(|&n| n == index)
             {
@@ -3855,7 +3912,8 @@ impl GpuEngine {
             match (&node.operation, storage) {
                 (Operation::Input, _) => {
                     let value = given[&index];
-                    let ptr = session.allocate(value.values().len())?;
+                    let ptr =
+                        allocate_node(&mut session, index, value.values().len())?;
                     session.copy_to_device(ptr, value.values())?;
                     input_addresses.insert(index, ptr);
                     buffers.insert(index, ptr);
@@ -3880,13 +3938,32 @@ impl GpuEngine {
                     | Operation::Pointwise(_),
                     NodeStorage::OwnedContiguous { .. },
                 ) => {
-                    let ptr = session.allocate(node.shape.element_count())?;
+                    let ptr =
+                        allocate_node(&mut session, index, node.shape.element_count())?;
                     buffers.insert(index, ptr);
                 }
                 _ => unreachable!("the compilation pass rejected unsupported nodes"),
             }
         }
 
+        if profile {
+            let materialized_tensors = buffers
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len();
+            eprintln!(
+                "gpu_prepare_allocations mode={} materialized_tensors={} cuda_allocations={} artifact_dir={}",
+                if self.allocation_slab { "slab" } else { "separate" },
+                materialized_tensors,
+                if self.allocation_slab {
+                    usize::from(materialized_tensors != 0)
+                } else {
+                    materialized_tensors
+                },
+                output_dir.display(),
+            );
+        }
         report("allocate_and_initial_h2d", phase_started);
         let phase_started = Instant::now();
         // Validate the *allocated* buffers as well as the abstract shapes
