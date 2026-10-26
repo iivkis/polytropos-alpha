@@ -571,6 +571,13 @@ tasks:
         echo "PASS: uninterrupted and checkpoint-resumed training match per-window CE/BPC and optimizer steps"
         echo "PASS: final EMA4 checkpoints are bit-identical, including 271 parameter tensors, recurrent states and AdamW"
 
+  verify-gpu-kernel-reuse:
+    desc: Validate NVPTX specialization interning, translation evidence, and NVIDIA CUDA Graph parity
+    deps: [prepare]
+    cmds:
+      - cargo test -p verineural --test kernel_specialization_reuse
+      - cargo test -p verineural --test kernel_specialization_reuse -- --ignored --nocapture
+
   verify-gpu-dual-pointwise-outputs:
     desc: Check observable dual-output RNE fusion with structural tests and NVIDIA CUDA Graph parity
     deps: [prepare]
