@@ -3657,7 +3657,14 @@ impl GpuEngine {
             .arg("-o")
             .arg(&ptx)
             .arg(&ir)
-            .output()?;
+            .output()
+            .map_err(|err| GpuError::LlvmFailed {
+                diagnostics: format!(
+                    "cannot launch LLVM NVPTX compiler '{}': {err}; \
+                     verify that it is in PATH (project devShell: `nix develop`)",
+                    self.llc.display()
+                ),
+            })?;
         if !output.status.success() {
             return Err(GpuError::LlvmFailed {
                 diagnostics: format!(
