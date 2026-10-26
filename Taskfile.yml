@@ -983,7 +983,7 @@ tasks:
       - cargo test -p torus16-mix-lab --test ema4 role_delta_initial_gpu_logits_and_state_match -- --ignored --nocapture
       - cargo test -p torus16-mix-lab --lib role_delta_gpu_vjp_matches_scalar_oracle -- --ignored --nocapture
 
-compare-torus16-role-delta-ranks:
+  compare-torus16-role-delta-ranks:
     desc: Paired rank-4/rank-8 validation-only Role-Delta experiments (resumable, no test peeking)
     deps: [prepare]
     cmds:
