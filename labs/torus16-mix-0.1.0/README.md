@@ -958,6 +958,22 @@ CPU AdamW дополнительно поддерживает `TORUS16_METRIC_EV
 градиенты/обновления. Эта оптимизация **не измерена** данным benchmark,
 где `TORUS16_METRIC_EVERY=1`.
 
+`task benchmark-torus16-cpu-metric-sampling` сравнивает CPU AdamW с
+`METRIC_EVERY=1/16` при одинаковых rank-4 BPTT-4 весах, 256 окнах и
+строгом побитовом сравнении final/best checkpoint (включая состояния и
+optimizer moments). Запуск требует NVIDIA и исходного warm-start checkpoint;
+результаты должны быть получены локально, а не предполагаются заранее.
+
+Лог `training_d2h_profile_avg_ms` теперь показывает wall-clock
+`preflight`, `enqueue` (включая подготовку pinned буферов и очередь
+`cuMemcpyDtoHAsync`), `synchronize` (ожидание completion очереди на
+non-blocking CUDA stream), `host_copy` (копирование из pinned staging в
+Rust Vec) и `tensor_construct`. Также фиксируются число тензоров и байты
+на окно. `gpu.replay()` уже синхронизирован отдельно: нельзя объяснять
+время D2H ожиданием GPU replay. Профиль **не** является замером чистой
+пропускной способности PCIe или NVIDIA event timing; `selected_d2h`
+включает возможные дополнительные диагностические D2H в первом окне.
+
 Для локализации затрат теперь печатаются отдельные
 `setup_stage=temporal_unroll`, `loss_seed_and_reverse_ad`,
 `before_fused_compile` (накопленное с начала setup),

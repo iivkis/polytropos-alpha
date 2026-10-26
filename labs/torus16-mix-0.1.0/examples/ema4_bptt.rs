@@ -950,6 +950,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // single slow checkpoint or CUDA synchronization cannot disappear among
     // the three early-window samples.
     let mut profile_totals = [0.0f64; 13];
+    // CUDA D2H host-wall phases for the ordinary training output batch only.
+    let mut d2h_phase_totals = [0.0f64; 5];
+    let mut d2h_bytes_total = 0usize;
+    let mut d2h_transfers_total = 0usize;
     // Event profiling modifies synchronization and is intentionally off in
     // the authoritative end-to-end throughput benchmark.
     let gpu_feedback_events =
@@ -1015,11 +1019,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             &selected[output_count..train_output_count]
         };
-        let outputs = if to_read.is_empty() {
-            Vec::new()
-        } else {
-            gpu.read_outputs_selected(to_read)?
-        };
+        let (outputs, readback) = gpu.read_outputs_selected_profiled(to_read)?;
+        for (sum, duration) in d2h_phase_totals.iter_mut().zip([
+            readback.preflight,
+            readback.enqueue,
+            readback.synchronize,
+            readback.host_copy,
+            readback.tensor_construct,
+        ]) {
+            *sum += duration.as_secs_f64() * 1000.;
+        }
+        d2h_bytes_total += readback.bytes;
+        d2h_transfers_total += readback.transfers;
         if iteration == 0
             && let Some(path) = &initial_probe_path
         {
@@ -1243,6 +1254,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     // A completed checkpoint can be inspected again without generating NaN
     // timing summaries from a zero-window no-op training loop.
     let profile_divisor = profile_windows.max(1) as f64;
+    println!(
+        "training_d2h_profile_avg_ms windows={} preflight={:.4} enqueue={:.4} synchronize={:.4} host_copy={:.4} tensor_construct={:.4} transfers_per_window={:.2} bytes_per_window={:.1} timing=host_wall_after_synchronous_replay",
+        profile_windows,
+        d2h_phase_totals[0] / profile_divisor,
+        d2h_phase_totals[1] / profile_divisor,
+        d2h_phase_totals[2] / profile_divisor,
+        d2h_phase_totals[3] / profile_divisor,
+        d2h_phase_totals[4] / profile_divisor,
+        d2h_transfers_total as f64 / profile_divisor,
+        d2h_bytes_total as f64 / profile_divisor,
+    );
     println!(
         "training_profile_avg_ms windows={} input_h2d={:.4} graph_replay={:.4} selected_d2h={:.4} host_ce={:.4} host_adamw={:.4} feedback_total={:.4} checkpoint_state_d2h={:.4} parameters_or_checkpoint_io={:.4} feedback_validation_d2h={:.4} feedback_snapshot_d2d={:.4} feedback_copy_sync={:.4} feedback_plan_host={:.4} feedback_device_event_ms={:.4} feedback_events={} feedback_checked_values={} feedback_copied_values={} timing=host_wall_including_sync",
         profile_windows,

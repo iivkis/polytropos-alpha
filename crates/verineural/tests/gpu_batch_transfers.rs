@@ -23,7 +23,15 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
     gpu.replay().unwrap();
 
     let old = gpu.read_outputs().unwrap();
-    let reversed = gpu.read_outputs_selected(&[product, sum]).unwrap();
+    let (reversed, profile) = gpu
+        .read_outputs_selected_profiled(&[product, sum])
+        .unwrap();
+    assert_eq!(profile.transfers, 2);
+    assert_eq!(profile.bytes, 2 * 4 * std::mem::size_of::<f32>());
+    let (empty, empty_profile) = gpu.read_outputs_selected_profiled(&[]).unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(empty_profile.bytes, 0);
+    assert_eq!(empty_profile.transfers, 0);
     assert_eq!(old[0].0, sum);
     assert_eq!(old[1].0, product);
     assert_eq!(reversed[0].0, product);
@@ -36,7 +44,7 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
     }
 
     assert!(matches!(
-        gpu.read_outputs_selected(&[sum, sum]),
+        gpu.read_outputs_selected_profiled(&[sum, sum]),
         Err(GpuError::InvalidInput {
             reason: "duplicate selected read output",
             ..

@@ -3,6 +3,17 @@
 //! Legacy/default streams, direct standalone kernel launches and silent fallbacks
 //! are forbidden. Host transfers also use this explicit stream.
 
+/// Host-wall readback decomposition, not CUDA device-event timing.
+/// The stream is already synchronized by GpuExecution::replay().
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CudaD2hTiming {
+    pub enqueue: std::time::Duration,
+    pub synchronize: std::time::Duration,
+    pub host_copy: std::time::Duration,
+    pub transfers: usize,
+    pub bytes: usize,
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +22,8 @@ mod platform {
     use std::ptr;
 
     use super::super::gpu::GpuError;
+    use super::CudaD2hTiming;
+    use std::time::Instant;
 
     #[link(name = "dl")]
     unsafe extern "C" {
@@ -990,10 +1003,18 @@ DONE:
             &mut self,
             transfers: &[(DevicePtr, usize)],
         ) -> Result<Vec<Vec<f32>>, GpuError> {
+            self.copy_f32_batch_to_host_profiled(transfers)
+                .map(|(values, _)| values)
+        }
+
+        pub fn copy_f32_batch_to_host_profiled(
+            &mut self,
+            transfers: &[(DevicePtr, usize)],
+        ) -> Result<(Vec<Vec<f32>>, CudaD2hTiming), GpuError> {
             if transfers.is_empty() {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), CudaD2hTiming::default()));
             }
-            // Fail before enqueueing any operation on invalid byte counts.
+            // Validate the complete batch before queuing any DMA.
             let byte_counts = transfers
                 .iter()
                 .map(|&(_, elements)| {
@@ -1002,6 +1023,11 @@ DONE:
                         .ok_or(GpuError::UnsupportedSize { elements })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let bytes = byte_counts.iter().try_fold(0usize, |sum, &count| {
+                sum.checked_add(count)
+                    .ok_or(GpuError::UnsupportedSize { elements: sum })
+            })?;
+            let enqueue_started = Instant::now();
             let _context = self.enter_context()?;
             let mut staged = Vec::with_capacity(transfers.len());
             for (&(address, elements), &bytes) in transfers.iter().zip(&byte_counts) {
@@ -1013,7 +1039,11 @@ DONE:
                 })?;
                 staged.push((pointer, elements));
             }
+            let enqueue = enqueue_started.elapsed();
+            let sync_started = Instant::now();
             self.synchronize()?;
+            let synchronize = sync_started.elapsed();
+            let copy_started = Instant::now();
             let mut outputs = Vec::with_capacity(staged.len());
             for (pointer, elements) in staged {
                 let mut values = vec![0f32; elements];
@@ -1025,7 +1055,13 @@ DONE:
                 outputs.push(values);
             }
             self.release_completed_staging();
-            Ok(outputs)
+            Ok((outputs, CudaD2hTiming {
+                enqueue,
+                synchronize,
+                host_copy: copy_started.elapsed(),
+                transfers: transfers.len(),
+                bytes,
+            }))
         }
 
         pub fn copy_to_host(
@@ -1616,6 +1652,15 @@ mod platform {
             &mut self,
             _: &[(u64, usize)],
         ) -> Result<Vec<Vec<f32>>, GpuError> {
+            Err(GpuError::Driver(
+                "CUDA Driver backend requires Linux".into(),
+            ))
+        }
+
+        pub fn copy_f32_batch_to_host_profiled(
+            &mut self,
+            _: &[(u64, usize)],
+        ) -> Result<(Vec<Vec<f32>>, super::CudaD2hTiming), GpuError> {
             Err(GpuError::Driver(
                 "CUDA Driver backend requires Linux".into(),
             ))

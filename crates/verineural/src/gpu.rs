@@ -2126,6 +2126,20 @@ impl ExecutionHealth {
     }
 }
 
+/// Host-side phases of one selected F32 D2H batch. Not device-event timing:
+/// `synchronize` includes completion of queued DMA; replay is separately
+/// synchronized before outputs become readable.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GpuReadbackProfile {
+    pub preflight: Duration,
+    pub enqueue: Duration,
+    pub synchronize: Duration,
+    pub host_copy: Duration,
+    pub tensor_construct: Duration,
+    pub transfers: usize,
+    pub bytes: usize,
+}
+
 pub struct GpuExecution {
     session: CudaSession,
     program: GpuProgram,
@@ -2133,6 +2147,7 @@ pub struct GpuExecution {
     output_shape: Shape,
     output_address: u64,
     output_addresses: Vec<(NodeId, Shape, u64)>,
+    output_address_lookup: BTreeMap<usize, usize>,
     // Only public outputs sharing storage with state inputs need snapshots.
     // Buffers are allocated once at prepare, before any CUDA Graph replay.
     preserved_output_addresses: BTreeMap<usize, u64>,
@@ -2802,7 +2817,18 @@ impl GpuExecution {
         &mut self,
         selected: &[NodeId],
     ) -> Result<Vec<(NodeId, Tensor<f32>)>, GpuError> {
+        self.read_outputs_selected_profiled(selected)
+            .map(|(outputs, _)| outputs)
+    }
+
+    /// Identical output semantics to `read_outputs_selected`, additionally
+    /// reporting wall-clock host/transfer phases and copied F32 byte count.
+    pub fn read_outputs_selected_profiled(
+        &mut self,
+        selected: &[NodeId],
+    ) -> Result<(Vec<(NodeId, Tensor<f32>)>, GpuReadbackProfile), GpuError> {
         self.execution_health.ensure_outputs_ready()?;
+        let preflight_started = Instant::now();
         let mut seen = BTreeSet::new();
         let mut sources = Vec::with_capacity(selected.len());
         for &id in selected {
@@ -2812,14 +2838,14 @@ impl GpuExecution {
                     reason: "duplicate selected read output",
                 });
             }
-            let (_, shape, original) = self
-                .output_addresses
-                .iter()
-                .find(|(node, _, _)| *node == id)
+            let &slot = self
+                .output_address_lookup
+                .get(&id.index())
                 .ok_or(GpuError::InvalidInput {
                     node: id.index(),
                     reason: "requested output is not selected",
                 })?;
+            let (_, shape, original) = &self.output_addresses[slot];
             let node = self.program.graph.node(id)?;
             if node.dtype != DType::F32 {
                 return Err(GpuError::InvalidGraph(NeuralError::DTypeMismatch {
@@ -2838,21 +2864,35 @@ impl GpuExecution {
             };
             sources.push((id, shape.clone(), address));
         }
+        let preflight = preflight_started.elapsed();
         if sources.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), GpuReadbackProfile {
+                preflight,
+                ..GpuReadbackProfile::default()
+            }));
         }
         let buffers = sources
             .iter()
             .map(|(_, shape, address)| (*address, shape.element_count()))
             .collect::<Vec<_>>();
-        let copied = self
+        let (copied, timing) = self
             .execution_health
-            .record_io(self.session.copy_f32_batch_to_host(&buffers))?;
-        sources
+            .record_io(self.session.copy_f32_batch_to_host_profiled(&buffers))?;
+        let construct_started = Instant::now();
+        let outputs = sources
             .into_iter()
             .zip(copied)
             .map(|((id, shape, _), values)| Ok((id, Tensor::new(shape, values)?)))
-            .collect()
+            .collect::<Result<Vec<_>, GpuError>>()?;
+        Ok((outputs, GpuReadbackProfile {
+            preflight,
+            enqueue: timing.enqueue,
+            synchronize: timing.synchronize,
+            host_copy: timing.host_copy,
+            tensor_construct: construct_started.elapsed(),
+            transfers: timing.transfers,
+            bytes: timing.bytes,
+        }))
     }
 
     /// Backward-compatible all-F32 reader, now batched in declaration order.
@@ -3870,6 +3910,11 @@ impl GpuEngine {
                 Ok((id, node.shape.clone(), address))
             })
             .collect::<Result<Vec<_>, GpuError>>()?;
+        let output_address_lookup = output_addresses
+            .iter()
+            .enumerate()
+            .map(|(slot, (id, _, _))| (id.index(), slot))
+            .collect();
         Ok(GpuExecution {
             session,
             program: program.clone(),
@@ -3877,6 +3922,7 @@ impl GpuEngine {
             output_shape: last.shape.clone(),
             output_address: buffers[&program.output.index()],
             output_addresses,
+            output_address_lookup,
             preserved_output_addresses: BTreeMap::new(),
             feedback_observable_outputs: None,
             feedback_snapshot_destinations: BTreeSet::new(),

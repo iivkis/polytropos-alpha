@@ -1177,6 +1177,48 @@ tasks:
         grep '^setup_compile_and_cuda_prepare_ms=' "$dir/fast.log"
         echo "Evidence: $dir"
 
+  benchmark-torus16-cpu-metric-sampling:
+    desc: Verify CPU AdamW metric sampling preserves rank-4 BPTT-4 checkpoints bit-for-bit and profile D2H
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        if [ ! -f "$source" ]; then
+          echo "Missing trained TorusShared source checkpoint: $source" >&2
+          exit 1
+        fi
+        out="${TORUS16_CPU_METRIC_BENCH_DIR:-target/torus16-cpu-metric-benchmark}"
+        mkdir -p "$out"
+        export TORUS16_WARM_START_SHARED="$source"
+        export TORUS16_MATRIX_MODE=role_delta_4 TORUS16_ROLE_INIT=matched TORUS16_MATRIX_SEED=0
+        export TORUS16_DELTA_SCALE=1 TORUS16_BPTT=4 TORUS16_TRAIN_WINDOWS=256
+        export TORUS16_VAL_LIMIT=64 TORUS16_TEST_LIMIT=64
+        export TORUS16_EVAL_EVERY=256 TORUS16_CHECKPOINT_EVERY=256
+        export TORUS16_SKIP_TEST=1 TORUS16_SKIP_FUSION_BASELINE=1
+        export TORUS16_REUSE_HOLDOUT=1 TORUS16_HOIST_PARAMETER_ONLY=0
+        export TORUS16_LLC_OPT=0 TORUS16_THREADS_PER_BLOCK=256 TORUS16_FRESH=1
+        unset TORUS16_GPU_ADAMW TORUS16_LR_DECAY_5X TORUS16_VERIFY_FUSION
+        unset TORUS16_BENCH_COMPARE TORUS16_BENCH_FUSED TORUS16_GPU_FEEDBACK_EVENTS
+        unset TORUS16_INITIAL_PROBE_PATH TORUS16_CORPUS
+        for every in 1 16; do
+          echo "CPU AdamW metric sample=$every, rank4 BPTT4, 256 windows"
+          TORUS16_METRIC_EVERY="$every" TORUS16_CHECKPOINT="$out/metric$every.ckpt" \
+            cargo run --release -p torus16-mix-lab --example ema4_bptt >"$out/metric$every.log" 2>&1 || {
+              tail -n 100 "$out/metric$every.log"
+              exit 1
+            }
+          grep '^training_d2h_profile_avg_ms ' "$out/metric$every.log"
+          grep '^training_profile_avg_ms ' "$out/metric$every.log"
+          grep '^training_total_s=' "$out/metric$every.log"
+          grep '^holdout_reset_streaming_bpc=' "$out/metric$every.log"
+        done
+        cmp "$out/metric1.ckpt" "$out/metric16.ckpt"
+        cmp "$out/metric1.best.ckpt" "$out/metric16.best.ckpt"
+        echo "PASS: sampled CPU logits preserve full optimizer/state/checkpoint bits"
+        echo "Compare repeated throughput and separate D2H enqueue/sync/host-copy timings, not one noisy run."
+        echo "Logs and checkpoints: $out"
+
   benchmark-torus16-role-delta-hoisting:
     desc: Compare same rank-4 BPTT-4 training with and without parameter-only temporal IR reuse
     deps: [prepare]
