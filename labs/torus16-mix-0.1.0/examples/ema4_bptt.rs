@@ -953,6 +953,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         cuda_prepare_started.elapsed().as_secs_f64() * 1000.
     );
     if setup_probe_only {
+        let prepare_total_ms = compile_clock.elapsed().as_secs_f64() * 1000.;
         // A completed graph capture is not evidence of a successful replay.
         // Do one synchronized execution and validate an actual supervised
         // readout. CUDA event timing is reported separately from host wall
@@ -974,7 +975,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             new_kernels,
             unique_functions,
             tensor_bytes,
-            compile_clock.elapsed().as_secs_f64() * 1000.,
+            prepare_total_ms,
             replay_wall_ms,
             timing.average().as_secs_f64() * 1000.,
             logits[0].1.values().len(),
