@@ -563,12 +563,20 @@ fn full_bptt_gradient_graph_targets_every_trainable_parameter() {
     }
 }
 
-
 #[test]
 fn role_delta_parameter_inventory_and_zero_adapter_initialization() {
-    assert_eq!(MatrixMode::parse("role_delta"), Some(MatrixMode::RoleDelta4));
-    assert_eq!(MatrixMode::parse("role_delta_2"), Some(MatrixMode::RoleDelta2));
-    assert_eq!(MatrixMode::parse("role_delta_8"), Some(MatrixMode::RoleDelta8));
+    assert_eq!(
+        MatrixMode::parse("role_delta"),
+        Some(MatrixMode::RoleDelta4)
+    );
+    assert_eq!(
+        MatrixMode::parse("role_delta_2"),
+        Some(MatrixMode::RoleDelta2)
+    );
+    assert_eq!(
+        MatrixMode::parse("role_delta_8"),
+        Some(MatrixMode::RoleDelta8)
+    );
     assert_eq!(MatrixMode::parse("role_delta_16"), None);
     let vocabulary = 16;
     let weights = Ema4Weights::deterministic_seeded(vocabulary, 123).unwrap();
@@ -576,7 +584,11 @@ fn role_delta_parameter_inventory_and_zero_adapter_initialization() {
         .trainable_parameters_for(MatrixMode::TorusShared)
         .unwrap();
     let baseline_model = architecture_model_for(vocabulary, MatrixMode::TorusShared).unwrap();
-    for mode in [MatrixMode::RoleDelta2, MatrixMode::RoleDelta4, MatrixMode::RoleDelta8] {
+    for mode in [
+        MatrixMode::RoleDelta2,
+        MatrixMode::RoleDelta4,
+        MatrixMode::RoleDelta8,
+    ] {
         let rank = mode.role_delta_rank().unwrap();
         assert_eq!(mode.matrix_count(), LAYERS);
         let params = weights.trainable_parameters_for(mode).unwrap();
@@ -591,7 +603,10 @@ fn role_delta_parameter_inventory_and_zero_adapter_initialization() {
         );
         assert_eq!(params.len(), baseline.len() + 2 * LAYERS * 8);
         for layer in 0..LAYERS {
-            assert_eq!(params[&format!("weight_{layer}")], baseline[&format!("weight_{layer}")]);
+            assert_eq!(
+                params[&format!("weight_{layer}")],
+                baseline[&format!("weight_{layer}")]
+            );
             for role in 0..8 {
                 let a = &params[&format!("delta_a_{layer}_{role}")];
                 let b = &params[&format!("delta_b_{layer}_{role}")];
@@ -602,11 +617,25 @@ fn role_delta_parameter_inventory_and_zero_adapter_initialization() {
             }
         }
         let model = architecture_model_for(vocabulary, mode).unwrap();
-        assert_eq!(model.state_links().len(), baseline_model.state_links().len());
-        assert_eq!(model.graph().modules().len(), baseline_model.graph().modules().len());
+        assert_eq!(
+            model.state_links().len(),
+            baseline_model.state_links().len()
+        );
+        assert_eq!(
+            model.graph().modules().len(),
+            baseline_model.graph().modules().len()
+        );
         assert!(model.bind(weights.bindings_for(0, mode).unwrap()).is_ok());
-        assert!(model.bind(weights.bindings_for(0, MatrixMode::TorusShared).unwrap()).is_err());
-        assert!(baseline_model.bind(weights.bindings_for(0, mode).unwrap()).is_err());
+        assert!(
+            model
+                .bind(weights.bindings_for(0, MatrixMode::TorusShared).unwrap())
+                .is_err()
+        );
+        assert!(
+            baseline_model
+                .bind(weights.bindings_for(0, mode).unwrap())
+                .is_err()
+        );
     }
     let bad = Ema4Weights {
         delta_scale: f32::NAN,
@@ -623,42 +652,63 @@ fn role_delta_initial_gpu_logits_and_state_match() {
     let engine = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
-    ).with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
-    let root = std::env::temp_dir()
-        .join(format!("vn_role_delta_initial_{}", std::process::id()));
+    )
+    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    let root = std::env::temp_dir().join(format!("vn_role_delta_initial_{}", std::process::id()));
     let tokens = [3, 7, 2];
     let baseline = {
         let model = architecture_model_for(vocabulary, MatrixMode::TorusShared).unwrap();
-        let mut execution = engine.prepare_model(
-            &model,
-            weights.bindings_for(0, MatrixMode::TorusShared).unwrap(),
-            &root.join("shared"),
-        ).unwrap();
-        tokens.iter().map(|&token| {
-            execution.set_input("token", &onehot(token, vocabulary)).unwrap();
-            execution.step().unwrap();
-            (execution.output("logits").unwrap(), execution.state("mem_0").unwrap())
-        }).collect::<Vec<_>>()
+        let mut execution = engine
+            .prepare_model(
+                &model,
+                weights.bindings_for(0, MatrixMode::TorusShared).unwrap(),
+                &root.join("shared"),
+            )
+            .unwrap();
+        tokens
+            .iter()
+            .map(|&token| {
+                execution
+                    .set_input("token", &onehot(token, vocabulary))
+                    .unwrap();
+                execution.step().unwrap();
+                (
+                    execution.output("logits").unwrap(),
+                    execution.state("mem_0").unwrap(),
+                )
+            })
+            .collect::<Vec<_>>()
     };
     for mode in [MatrixMode::RoleDelta4, MatrixMode::RoleDelta8] {
         let model = architecture_model_for(vocabulary, mode).unwrap();
-        let mut execution = engine.prepare_model(
-            &model,
-            weights.bindings_for(0, mode).unwrap(),
-            &root.join(mode.as_str()),
-        ).unwrap();
+        let mut execution = engine
+            .prepare_model(
+                &model,
+                weights.bindings_for(0, mode).unwrap(),
+                &root.join(mode.as_str()),
+            )
+            .unwrap();
         for (step, &token) in tokens.iter().enumerate() {
-            execution.set_input("token", &onehot(token, vocabulary)).unwrap();
+            execution
+                .set_input("token", &onehot(token, vocabulary))
+                .unwrap();
             execution.step().unwrap();
             for (name, actual, expected) in [
-                ("logits", execution.output("logits").unwrap(), &baseline[step].0),
-                ("EMA state", execution.state("mem_0").unwrap(), &baseline[step].1),
+                (
+                    "logits",
+                    execution.output("logits").unwrap(),
+                    &baseline[step].0,
+                ),
+                (
+                    "EMA state",
+                    execution.state("mem_0").unwrap(),
+                    &baseline[step].1,
+                ),
             ] {
                 assert_eq!(actual.shape(), expected.shape());
                 for (lane, (&a, &b)) in actual.values().iter().zip(expected.values()).enumerate() {
                     assert!(
-                        a.is_finite() && b.is_finite()
-                            && (a - b).abs() <= 1e-5 + 1e-5 * b.abs(),
+                        a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-5 + 1e-5 * b.abs(),
                         "mode={} step={step} {name} lane={lane}: {a} vs {b}",
                         mode.as_str()
                     );

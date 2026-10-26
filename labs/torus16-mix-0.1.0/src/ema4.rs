@@ -346,9 +346,16 @@ impl Ema4Weights {
         )?;
         if mode.role_delta_rank().is_some() {
             if !self.delta_scale.is_finite() || self.delta_scale <= 0.0 {
-                return Err(ModelError::Invalid("Role-Delta scale must be positive and finite".into()));
+                return Err(ModelError::Invalid(
+                    "Role-Delta scale must be positive and finite".into(),
+                ));
             }
-            insert(&mut result, "delta_scale", vec![1, 1], vec![self.delta_scale])?;
+            insert(
+                &mut result,
+                "delta_scale",
+                vec![1, 1],
+                vec![self.delta_scale],
+            )?;
         }
         for (layer, b) in self.blocks.iter().enumerate() {
             for role_weight in 0..(if mode == MatrixMode::Independent {
@@ -408,12 +415,14 @@ impl Ema4Weights {
                         &format!("delta_a_{layer}_{role}"),
                         vec![WIDTH, rank],
                         (0..WIDTH * rank)
-                            .map(|index| matrix_sample(
-                                self.matrix_seed ^ 0x524f4c455f444c54,
-                                layer,
-                                role,
-                                index,
-                            ))
+                            .map(|index| {
+                                matrix_sample(
+                                    self.matrix_seed ^ 0x524f4c455f444c54,
+                                    layer,
+                                    role,
+                                    index,
+                                )
+                            })
                             .collect(),
                     )?;
                     insert(

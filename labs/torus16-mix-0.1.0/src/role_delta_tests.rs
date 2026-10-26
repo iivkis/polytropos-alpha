@@ -1,9 +1,7 @@
 //! Independent scalar contracts for a single Role-Delta projection.
 //! GPU VJP checks exercise the exact lab projection built on public VeriNeural IR.
 use crate::{Parameters, WIDTH, projection_graph_with_delta};
-use verineural::{
-    Domain, GpuEngine, GpuLaunchConfig, Model, ModelBuilder, Tensor, differentiate,
-};
+use verineural::{Domain, GpuEngine, GpuLaunchConfig, Model, ModelBuilder, Tensor, differentiate};
 
 const RANK: usize = 4;
 
@@ -34,7 +32,13 @@ impl Fixture {
                 .map(|i| ((i * 17 % 29) as f32 - 14.0) * 0.015)
                 .collect(),
             b: (0..RANK * WIDTH)
-                .map(|i| if zero_b { 0.0 } else { ((i * 13 % 31) as f32 - 15.0) * 0.021 })
+                .map(|i| {
+                    if zero_b {
+                        0.0
+                    } else {
+                        ((i * 13 % 31) as f32 - 15.0) * 0.021
+                    }
+                })
                 .collect(),
             scale: 0.75,
         }
@@ -64,7 +68,11 @@ impl Fixture {
         put("ones_column", vec![WIDTH, 1], vec![1.0; WIDTH]);
         put("one", vec![1, 1], vec![1.0]);
         put("minus_one", vec![1, 1], vec![-1.0]);
-        put("inv_sqrt_width", vec![1, 1], vec![1.0 / (WIDTH as f32).sqrt()]);
+        put(
+            "inv_sqrt_width",
+            vec![1, 1],
+            vec![1.0 / (WIDTH as f32).sqrt()],
+        );
         put("delta_a", vec![WIDTH, RANK], self.a.clone());
         put("delta_b", vec![RANK, WIDTH], self.b.clone());
         put("delta_scale", vec![1, 1], vec![self.scale]);
@@ -87,8 +95,7 @@ impl Fixture {
         std::array::from_fn(|j| {
             let one = (j + c) % WIDTH;
             let two = (j + c + 17) % WIDTH;
-            gate * self.x[one] * p.col[one]
-                + (1.0 - gate) * self.x[two] * p.col[two]
+            gate * self.x[one] * p.col[one] + (1.0 - gate) * self.x[two] * p.col[two]
         })
     }
 
@@ -96,9 +103,8 @@ impl Fixture {
         let p = &self.p.roles[role];
         let mixed = self.mixed(role);
         let r = (role * 7 + 1) % WIDTH;
-        let low: [f32; RANK] = std::array::from_fn(|k| {
-            (0..WIDTH).map(|j| mixed[j] * self.a[j * RANK + k]).sum()
-        });
+        let low: [f32; RANK] =
+            std::array::from_fn(|k| (0..WIDTH).map(|j| mixed[j] * self.a[j * RANK + k]).sum());
         std::array::from_fn(|out| {
             let column = (out + WIDTH - r) % WIDTH;
             let base = (0..WIDTH)
@@ -152,9 +158,7 @@ impl Fixture {
             let upstream: f32 = (0..WIDTH)
                 .map(|column| self.b[k * WIDTH + column] * dprojected[column])
                 .sum();
-            let projected_a: f32 = (0..WIDTH)
-                .map(|j| mixed[j] * self.a[j * RANK + k])
-                .sum();
+            let projected_a: f32 = (0..WIDTH).map(|j| mixed[j] * self.a[j * RANK + k]).sum();
             for (j, &u) in mixed.iter().enumerate() {
                 da[j * RANK + k] = self.scale * u * upstream;
             }
@@ -169,7 +173,9 @@ impl Fixture {
 fn model(role: usize) -> Model {
     let mut m = ModelBuilder::new("role-delta-gradient-oracle", "0.2.0");
     let x = m.input("x", vec![1, WIDTH], Domain::Finite).unwrap();
-    let w = m.parameter("weight", vec![WIDTH, WIDTH], Domain::Finite).unwrap();
+    let w = m
+        .parameter("weight", vec![WIDTH, WIDTH], Domain::Finite)
+        .unwrap();
     let w = if role.is_multiple_of(2) {
         m.graph_mut().permute(w, &[1, 0]).unwrap()
     } else {
@@ -178,20 +184,38 @@ fn model(role: usize) -> Model {
     let row = m.parameter("row", vec![1, WIDTH], Domain::Finite).unwrap();
     let col = m.parameter("col", vec![1, WIDTH], Domain::Finite).unwrap();
     let bias = m.parameter("bias", vec![1, WIDTH], Domain::Finite).unwrap();
-    let mix_gate = m.parameter("mix_gate", vec![1, WIDTH], Domain::Finite).unwrap();
+    let mix_gate = m
+        .parameter("mix_gate", vec![1, WIDTH], Domain::Finite)
+        .unwrap();
     let mix_bias = m.parameter("mix_bias", vec![1, 1], Domain::Finite).unwrap();
-    let ones = m.parameter("ones_column", vec![WIDTH, 1], Domain::Finite).unwrap();
+    let ones = m
+        .parameter("ones_column", vec![WIDTH, 1], Domain::Finite)
+        .unwrap();
     let one = m.parameter("one", vec![1, 1], Domain::Finite).unwrap();
-    let minus = m.parameter("minus_one", vec![1, 1], Domain::Finite).unwrap();
-    let inv = m.parameter("inv_sqrt_width", vec![1, 1], Domain::Finite).unwrap();
-    let a = m.parameter("delta_a", vec![WIDTH, RANK], Domain::Finite).unwrap();
-    let b = m.parameter("delta_b", vec![RANK, WIDTH], Domain::Finite).unwrap();
-    let scale = m.parameter("delta_scale", vec![1, 1], Domain::Finite).unwrap();
-    let output = m.block(
-        "role_delta_projection",
-        &[x, w, row, col, bias, mix_gate, mix_bias, ones, one, minus, inv, a, b, scale],
-        |g, nodes| projection_graph_with_delta(g, nodes, role),
-    ).unwrap();
+    let minus = m
+        .parameter("minus_one", vec![1, 1], Domain::Finite)
+        .unwrap();
+    let inv = m
+        .parameter("inv_sqrt_width", vec![1, 1], Domain::Finite)
+        .unwrap();
+    let a = m
+        .parameter("delta_a", vec![WIDTH, RANK], Domain::Finite)
+        .unwrap();
+    let b = m
+        .parameter("delta_b", vec![RANK, WIDTH], Domain::Finite)
+        .unwrap();
+    let scale = m
+        .parameter("delta_scale", vec![1, 1], Domain::Finite)
+        .unwrap();
+    let output = m
+        .block(
+            "role_delta_projection",
+            &[
+                x, w, row, col, bias, mix_gate, mix_bias, ones, one, minus, inv, a, b, scale,
+            ],
+            |g, nodes| projection_graph_with_delta(g, nodes, role),
+        )
+        .unwrap();
     m.output("projected", output).unwrap();
     m.finish().unwrap()
 }
@@ -258,12 +282,12 @@ fn role_delta_gpu_vjp_matches_scalar_oracle() {
     let engine = GpuEngine::new(
         "llc",
         std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
-    ).with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    )
+    .with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
     for role in [0, 1] {
         let model = model(role);
         let output = model.output("projected").unwrap();
-        let sources = ["weight", "delta_a", "delta_b"]
-            .map(|name| model.source(name).unwrap().0);
+        let sources = ["weight", "delta_a", "delta_b"].map(|name| model.source(name).unwrap().0);
         let reverse = differentiate(model.graph(), output, &sources).unwrap();
         let gradients = sources.map(|id| reverse.gradient_of(id).unwrap());
         let roots = [output, gradients[0], gradients[1], gradients[2]];
@@ -271,10 +295,9 @@ fn role_delta_gpu_vjp_matches_scalar_oracle() {
         for zero_b in [true, false] {
             let fixture = Fixture::new(role, zero_b);
             let bound = model.bind(fixture.bindings(role)).unwrap();
-            let tensors = reverse.bindings(
-                &bound,
-                Tensor::from_slice(vec![1, WIDTH], &seed).unwrap(),
-            ).unwrap();
+            let tensors = reverse
+                .bindings(&bound, Tensor::from_slice(vec![1, WIDTH], &seed).unwrap())
+                .unwrap();
             let active = tensors
                 .into_iter()
                 .filter(|(id, _)| compiled.source_inputs().contains(id))

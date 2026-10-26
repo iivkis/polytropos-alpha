@@ -272,12 +272,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let checkpoint_every = option_usize("TORUS16_CHECKPOINT_EVERY", 128, 1, 4096)?;
     let checkpoint_path = std::env::var_os("TORUS16_CHECKPOINT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            match matrix_mode {
-                MatrixMode::TorusShared => PathBuf::from("target/torus16-ema4-bptt.ckpt"),
-                MatrixMode::Independent => PathBuf::from("target/torus16-ema4-independent-bptt.ckpt"),
-                _ => PathBuf::from(format!("target/torus16-ema4-{}-bptt.ckpt", matrix_mode.as_str())),
-            }
+        .unwrap_or_else(|| match matrix_mode {
+            MatrixMode::TorusShared => PathBuf::from("target/torus16-ema4-bptt.ckpt"),
+            MatrixMode::Independent => PathBuf::from("target/torus16-ema4-independent-bptt.ckpt"),
+            _ => PathBuf::from(format!(
+                "target/torus16-ema4-{}-bptt.ckpt",
+                matrix_mode.as_str()
+            )),
         });
     let fresh = std::env::var_os("TORUS16_FRESH").is_some();
     let corpus_hash = fingerprint(&fs::read(&corpus_path)?);
@@ -329,8 +330,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         let saved = Ema4Checkpoint::read(path)?;
-        trainable_initial =
-            saved.role_delta_warm_start(&weights, matrix_mode, corpus_hash)?;
+        trainable_initial = saved.role_delta_warm_start(&weights, matrix_mode, corpus_hash)?;
         // Fingerprint the *effective* initial parameters. Resume therefore
         // rejects absent/changed warm-start sources, not just changed shapes.
         for (name, tensor) in &mut initial_bindings {
