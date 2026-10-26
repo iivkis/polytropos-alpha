@@ -669,14 +669,14 @@ IR или checkpoint; для каждого rank отдельный путь `ta
 Fingerprint охватывает ранговые порты, начальные A/B, масштаб, seed и
 параметры обучения. Resume несовместимого checkpoint запрещён.
 
-Верификация в этом коммите: структурная Rust-проверка форм, имён,
-параметров и отделения режимов плюс отключённый по умолчанию GPU-тест
-исходных logits/EMA state; запустить `task verify-torus16-role-delta` на
-NVIDIA машине. GPU, strict FP32, градиенты, снижение BPC и Lean-сертификация
-нового составного оператора **не подтверждены локальным прогоном**.
-Weight-only warm-start и отдельный evaluation-only runner ещё не сделаны,
-архитектурный BPTT остаётся 2–8. Не смешивать этот срез с dynamic EMA,
-ReZero или увеличением глубины до прохождения измерительных ablation.
+На 26.10.2026 пользователь подтвердил все пять тестов `task
+verify-torus16-role-delta`: формы/параметры, finite differences,
+корректность weight-only warm-start, начальную GPU parity logits/EMA
+и GPU VJP против независимого scalar oracle. Подтверждён также двухоконный
+BPTT=4 warm-start smoke run с записью и чтением best checkpoint.
+Это **численные проверки**, не формальная Lean-сертификация GPU/FP32,
+не доказательство улучшения BPC и не проверка длительного resume.
+Поддерживаемый BPTT остаётся 2–8.
 
 ### Role-Delta обратный проход: независимая проверка
 
@@ -690,10 +690,10 @@ VeriNeural Semantic IR и CUDA Graph, отдельно для чётной/не�
 а B должен получать ненулевой обучающий сигнал; при B≠0 обе
 матрицы имеют градиент. Проверяется и транспонирование общей W.
 
-Пользователь локально подтвердил предыдущие структурную и начальную
-GPU-parity проверки 26.10.2026 в Nix devShell. Новые тесты с
-градиентами добавлены, но **ещё не запускались**. Численная GPU-проверка
-не равнозначна формальному Lean-доказательству и не удостоверяет SASS.
+Все пять Role-Delta тестов успешно выполнены пользователем 26.10.2026
+в Nix devShell, включая GPU VJP и finite differences. Численная
+GPU-проверка не равнозначна формальному Lean-доказательству и не
+удостоверяет SASS.
 
 ### TorusShared → Role-Delta: явный weight-only warm-start
 
@@ -730,3 +730,42 @@ TORUS16_MATRIX_MODE=role_delta_4 TORUS16_WARM_START_SHARED=target/torus16-pilot/
 тега архитектуры. Проверка в новом тесте подтверждает перенос и
 отклонение несовместимых источников, но не доказывает GPU-семантику,
 качество генерации или корректность полного длительного resume.
+
+
+### Validation-only rank 4 против rank 8 и проверка resume
+
+`task compare-torus16-role-delta-ranks` сравнивает rank 4 и rank 8
+от **одного и того же** обученного TorusShared checkpoint, с seed=0,
+BPTT=4, одинаковыми 8192 окнами, validation на 512 символах раз в
+1024 окна и сохранением каждые 512 окон. Источник по умолчанию:
+`target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt`,
+что соответствует локальному checkpoint пользователя; переопределение:
+`TORUS16_ROLE_DELTA_SOURCE`. Дополнительный бюджет:
+`TORUS16_ROLE_DELTA_WINDOWS=16384 task compare-torus16-role-delta-ranks`;
+команда **продолжит** существующие checkpoint. Выход по умолчанию:
+`target/torus16-role-delta-rank-ablation/`. Один seed не обеспечивает
+статистического вывода; при необходимости повторить на иных seed
+через `TORUS16_ROLE_DELTA_SEED` с отдельными checkpoint.
+
+Для выбора ранга введён `TORUS16_SKIP_TEST=1`. Режим выходит после
+валидации, не загружая best checkpoint для test и не читая test-токены.
+По умолчанию флаг выключен, предыдущий протокол не изменён. Для
+validation-only checkpoint установлен отдельный fingerprint,
+**обычный resume с включённым test не допускается**.
+Оценивать сравнение по `best_validation_bpc` и кривым validation;
+не подбирать параметры по test BPC. Многократное использование одной
+validation-выборки тоже повышает риск selection bias.
+
+`task verify-torus16-role-delta-resume` запускает три отдельных GPU
+обучения (2 окна; продолжение с 2 до 4; непрерывные 4 окна)
+и требует побитового совпадения final и validation-best checkpoint.
+Для проверки другого ранга:
+`TORUS16_ROLE_DELTA_VERIFY_MODE=role_delta_8 task verify-torus16-role-delta-resume`.
+У команды отдельный временный каталог в `target/` с сохранёнными
+логами и checkpoint. GPU acceptance дорогостоящий, потому что полная
+модель с BPTT=4 компилируется три раза; тест должен выполняться
+пользователем локально. Результат до запуска **не подтверждён**.
+
+В новом запуске лог `optimizer_moments=reset` отражает fresh/warm-start,
+а `optimizer_moments=preserved` появляется только при действительном
+resume предыдущего Role-Delta checkpoint.

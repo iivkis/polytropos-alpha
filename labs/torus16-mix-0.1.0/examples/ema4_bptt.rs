@@ -245,6 +245,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 1_000_000)?;
     let val_limit = option_usize("TORUS16_VAL_LIMIT", 64, 2, 100000)?;
     let test_limit = option_usize("TORUS16_TEST_LIMIT", 64, 2, 100000)?;
+    // Opt-in validation-only runs never read the test suffix.
+    // Preserve default behavior for all existing experiments.
+    let skip_test = match std::env::var("TORUS16_SKIP_TEST").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => return Err("TORUS16_SKIP_TEST must be 0 or 1".into()),
+    };
     if val_limit
         .checked_add(test_limit)
         .and_then(|sum| sum.checked_add(2))
@@ -531,10 +538,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             val_limit,
             test_limit,
             eval_every,
-            optimizer_backend: if gpu_optimizer.is_some() {
-                "GPU_IR_ADAMW_V1"
-            } else {
-                "HOST_ADAMW_V1"
+            // Tag validation-only as a distinct evaluation protocol.
+            // Default test-enabled identities remain byte-for-byte unchanged.
+            optimizer_backend: match (gpu_optimizer.is_some(), skip_test) {
+                (true, true) => "GPU_IR_ADAMW_V1_VALIDATION_ONLY",
+                (false, true) => "HOST_ADAMW_V1_VALIDATION_ONLY",
+                (true, false) => "GPU_IR_ADAMW_V1",
+                (false, false) => "HOST_ADAMW_V1",
             },
         },
     );
@@ -561,12 +571,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     println!(
-        "training_adamw_lr={training_lr:.8} checkpoint_lr_transition={} optimizer_moments=preserved",
+        "training_adamw_lr={training_lr:.8} checkpoint_lr_transition={} optimizer_moments={}",
         if lr_decay_5x {
             "explicit_5x_decay"
         } else {
             "unchanged"
-        }
+        },
+        if pending_checkpoint.is_some() { "preserved" } else { "reset" }
     );
     println!(
         "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} adapter_rank={:?} delta_scale={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
@@ -1195,6 +1206,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         validation_start.elapsed().as_secs_f64(),
         best_validation.unwrap_or(bpc as f32),
     );
+    // Rank/architecture selection must not repeatedly consult test data.
+    // Stop before loading the best snapshot or touching test-suffix tokens.
+    if skip_test {
+        println!(
+            "test_evaluation=SKIPPED protocol=validation_only best_validation_bpc={:.6}",
+            best_validation.unwrap_or(bpc as f32)
+        );
+        return Ok(());
+    }
     // Only the checkpoint selected by validation is evaluated on test.
     // No training, early stopping or best-checkpoint choice sees test data.
     let best_path = checkpoint_path.with_extension("best.ckpt");
