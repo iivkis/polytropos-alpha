@@ -4,7 +4,7 @@
 //! 8-role Torus16-Mix/EMA/SwiGLU) -> final LayerNorm -> tied logits.
 //! All temporal memory is explicit ModelBuilder state/next_state.
 //! There are no lab CUDA kernels, opaque forward callbacks or extra IR.
-use crate::{Parameters, ROLES, WIDTH, projection_graph};
+use crate::{Parameters, ROLES, WIDTH, projection_graph, projection_graph_with_delta};
 use verineural::{
     Domain, Model, ModelBuilder, ModelError, NeuralError, NeuralGraph, NodeId, Shape, Tensor,
 };
@@ -22,6 +22,12 @@ pub enum MatrixMode {
     Independent,
     /// One 48x48 matrix shared by all eight roles in each block (Torus16-Mix).
     TorusShared,
+    /// Shared W plus role-specific rank-2 adapter.
+    RoleDelta2,
+    /// Shared W plus role-specific rank-4 adapter.
+    RoleDelta4,
+    /// Shared W plus role-specific rank-8 adapter.
+    RoleDelta8,
 }
 
 impl MatrixMode {
@@ -29,6 +35,9 @@ impl MatrixMode {
         match self {
             Self::Independent => "independent",
             Self::TorusShared => "torus_shared",
+            Self::RoleDelta2 => "role_delta_2",
+            Self::RoleDelta4 => "role_delta_4",
+            Self::RoleDelta8 => "role_delta_8",
         }
     }
 
@@ -36,6 +45,9 @@ impl MatrixMode {
         match name {
             "independent" => Some(Self::Independent),
             "torus_shared" => Some(Self::TorusShared),
+            "role_delta_2" => Some(Self::RoleDelta2),
+            "role_delta" | "role_delta_4" => Some(Self::RoleDelta4),
+            "role_delta_8" => Some(Self::RoleDelta8),
             _ => None,
         }
     }
@@ -43,7 +55,23 @@ impl MatrixMode {
     pub const fn matrix_count(self) -> usize {
         match self {
             Self::Independent => LAYERS * ROLES,
-            Self::TorusShared => LAYERS,
+            Self::TorusShared | Self::RoleDelta2 | Self::RoleDelta4 | Self::RoleDelta8 => LAYERS,
+        }
+    }
+
+    pub const fn role_delta_rank(self) -> Option<usize> {
+        match self {
+            Self::RoleDelta2 => Some(2),
+            Self::RoleDelta4 => Some(4),
+            Self::RoleDelta8 => Some(8),
+            Self::Independent | Self::TorusShared => None,
+        }
+    }
+
+    pub const fn adapter_parameter_count(self) -> usize {
+        match self.role_delta_rank() {
+            Some(rank) => LAYERS * ROLES * 2 * WIDTH * rank,
+            None => 0,
         }
     }
 }
@@ -126,6 +154,8 @@ impl Default for BlockWeights {
 pub struct Ema4Weights {
     pub vocabulary: usize,
     pub matrix_seed: u64,
+    /// Fixed lambda/q multiplier of each Role-Delta correction (not trained).
+    pub delta_scale: f32,
     /// Tied input/output embedding [vocabulary, 48].
     pub embedding: Vec<f32>,
     pub blocks: [BlockWeights; LAYERS],
@@ -145,6 +175,7 @@ impl Ema4Weights {
         let mut result = Self {
             vocabulary,
             matrix_seed: seed,
+            delta_scale: 1.0,
             embedding: (0..vocabulary * WIDTH)
                 .map(|i| ((i * 19 + 7) % 37) as f32 * 0.0011 - 0.020)
                 .collect(),
@@ -177,6 +208,7 @@ impl Ema4Weights {
     pub const fn parameter_count_for(vocabulary: usize, mode: MatrixMode) -> usize {
         Self::parameter_count(vocabulary) - LAYERS * WIDTH * WIDTH
             + mode.matrix_count() * WIDTH * WIDTH
+            + mode.adapter_parameter_count()
     }
 
     /// Preserve the existing shared-matrix consumer API.
@@ -213,6 +245,7 @@ impl Ema4Weights {
             "half_vec",
             "one_up",
             "minus_up",
+            "delta_scale",
         ];
         let parameters = self
             .bindings_with_init(0, mode, role_init)?
@@ -311,6 +344,12 @@ impl Ema4Weights {
             vec![1, WIDTH],
             self.final_beta.to_vec(),
         )?;
+        if mode.role_delta_rank().is_some() {
+            if !self.delta_scale.is_finite() || self.delta_scale <= 0.0 {
+                return Err(ModelError::Invalid("Role-Delta scale must be positive and finite".into()));
+            }
+            insert(&mut result, "delta_scale", vec![1, 1], vec![self.delta_scale])?;
+        }
         for (layer, b) in self.blocks.iter().enumerate() {
             for role_weight in 0..(if mode == MatrixMode::Independent {
                 ROLES
@@ -363,6 +402,27 @@ impl Ema4Weights {
                     vec![1, 1],
                     vec![p.mix_bias],
                 )?;
+                if let Some(rank) = mode.role_delta_rank() {
+                    insert(
+                        &mut result,
+                        &format!("delta_a_{layer}_{role}"),
+                        vec![WIDTH, rank],
+                        (0..WIDTH * rank)
+                            .map(|index| matrix_sample(
+                                self.matrix_seed ^ 0x524f4c455f444c54,
+                                layer,
+                                role,
+                                index,
+                            ))
+                            .collect(),
+                    )?;
+                    insert(
+                        &mut result,
+                        &format!("delta_b_{layer}_{role}"),
+                        vec![rank, WIDTH],
+                        vec![0.0; rank * WIDTH],
+                    )?;
+                }
             }
             for (label, values) in [
                 ("norm1_gamma", &b.norm1_gamma),
@@ -491,6 +551,7 @@ struct RoleNodes {
     bias: NodeId,
     gate: NodeId,
     gate_bias: NodeId,
+    delta: Option<(NodeId, NodeId)>,
 }
 
 struct ProjectionPorts {
@@ -499,6 +560,7 @@ struct ProjectionPorts {
     one_scalar: NodeId,
     minus_scalar: NodeId,
     inv_sqrt: NodeId,
+    delta_scale: Option<NodeId>,
 }
 
 fn project(
@@ -513,22 +575,37 @@ fn project(
     } else {
         ports.weight
     };
+    let mut inputs = vec![
+        x,
+        w,
+        ports.row,
+        ports.col,
+        ports.bias,
+        ports.gate,
+        ports.gate_bias,
+        p.ones_column,
+        p.one_scalar,
+        p.minus_scalar,
+        p.inv_sqrt,
+    ];
+    let with_delta = ports.delta.is_some();
+    if let Some((a, b)) = ports.delta {
+        inputs.extend([a, b, p.delta_scale.expect("Role-Delta scalar exists")]);
+    }
     model.block(
-        "torus16_mix_projection",
-        &[
-            x,
-            w,
-            ports.row,
-            ports.col,
-            ports.bias,
-            ports.gate,
-            ports.gate_bias,
-            p.ones_column,
-            p.one_scalar,
-            p.minus_scalar,
-            p.inv_sqrt,
-        ],
-        |graph, inputs| projection_graph(graph, inputs, role),
+        if with_delta {
+            "torus16_role_delta_projection"
+        } else {
+            "torus16_mix_projection"
+        },
+        &inputs,
+        |graph, inputs| {
+            if with_delta {
+                projection_graph_with_delta(graph, inputs, role)
+            } else {
+                projection_graph(graph, inputs, role)
+            }
+        },
     )
 }
 
@@ -595,6 +672,7 @@ struct BlockStepPorts {
     minus_up: NodeId,
     inv_sqrt: NodeId,
     minus_scalar: NodeId,
+    delta_scale: Option<NodeId>,
 }
 
 fn block_step(
@@ -610,10 +688,11 @@ fn block_step(
         minus_up,
         inv_sqrt,
         minus_scalar,
+        delta_scale,
     }: BlockStepPorts,
     mode: MatrixMode,
 ) -> Result<NodeId, ModelError> {
-    let shared_matrix = if mode == MatrixMode::TorusShared {
+    let shared_matrix = if mode != MatrixMode::Independent {
         Some(model.parameter(
             format!("weight_{layer}"),
             vec![WIDTH, WIDTH],
@@ -666,6 +745,22 @@ fn block_step(
             vec![1, 1],
             Domain::Finite,
         )?;
+        let delta = if let Some(rank) = mode.role_delta_rank() {
+            Some((
+                model.parameter(
+                    format!("delta_a_{layer}_{role}"),
+                    vec![WIDTH, rank],
+                    Domain::Finite,
+                )?,
+                model.parameter(
+                    format!("delta_b_{layer}_{role}"),
+                    vec![rank, WIDTH],
+                    Domain::Finite,
+                )?,
+            ))
+        } else {
+            None
+        };
         roles.push(RoleNodes {
             weight,
             transposed,
@@ -674,6 +769,7 @@ fn block_step(
             bias,
             gate,
             gate_bias,
+            delta,
         });
     }
     let p = ProjectionPorts {
@@ -682,6 +778,7 @@ fn block_step(
         one_scalar: norm.one,
         minus_scalar,
         inv_sqrt,
+        delta_scale,
     };
     let norm1_gamma = model.parameter(
         format!("norm1_gamma_{layer}"),
@@ -767,10 +864,12 @@ pub fn architecture_model_for(vocabulary: usize, mode: MatrixMode) -> Result<Mod
     if vocabulary == 0 || vocabulary > 4096 {
         return Err(ModelError::Invalid("vocabulary must be 1..=4096".into()));
     }
-    let model_name = if mode == MatrixMode::Independent {
-        "torus16-mix-ema4-lm-independent"
-    } else {
-        "torus16-mix-ema4-lm"
+    let model_name = match mode {
+        MatrixMode::Independent => "torus16-mix-ema4-lm-independent",
+        MatrixMode::TorusShared => "torus16-mix-ema4-lm",
+        MatrixMode::RoleDelta2 | MatrixMode::RoleDelta4 | MatrixMode::RoleDelta8 => {
+            "torus16-mix-ema4-lm-role-delta"
+        }
     };
     let mut model = ModelBuilder::new(model_name, "0.2.0");
     let token = model.input("token", vec![1, vocabulary], Domain::NonNegativeFinite)?;
@@ -786,6 +885,11 @@ pub fn architecture_model_for(vocabulary: usize, mode: MatrixMode) -> Result<Mod
     let one_up = model.parameter("one_up", vec![1, 2 * WIDTH], Domain::Finite)?;
     let minus_up = model.parameter("minus_up", vec![1, 2 * WIDTH], Domain::Finite)?;
     let inv_sqrt = model.parameter("inv_sqrt_width", vec![1, 1], Domain::Finite)?;
+    let delta_scale = if mode.role_delta_rank().is_some() {
+        Some(model.parameter("delta_scale", vec![1, 1], Domain::Finite)?)
+    } else {
+        None
+    };
     let norm = NormPorts {
         ones,
         inv_width,
@@ -802,6 +906,7 @@ pub fn architecture_model_for(vocabulary: usize, mode: MatrixMode) -> Result<Mod
         minus_up,
         inv_sqrt,
         minus_scalar,
+        delta_scale,
     };
     for layer in 0..LAYERS {
         x = block_step(&mut model, x, layer, block_ports, mode)?;

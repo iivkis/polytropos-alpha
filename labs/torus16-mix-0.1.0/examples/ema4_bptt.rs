@@ -256,12 +256,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let mode_name = std::env::var("TORUS16_MATRIX_MODE").unwrap_or_else(|_| "torus_shared".into());
     let matrix_mode = MatrixMode::parse(&mode_name)
-        .ok_or("TORUS16_MATRIX_MODE must be independent or torus_shared")?;
+        .ok_or("TORUS16_MATRIX_MODE must be independent, torus_shared, role_delta_2, role_delta_4 or role_delta_8")?;
     let role_init_name = std::env::var("TORUS16_ROLE_INIT").unwrap_or_else(|_| "matched".into());
     let role_init =
         RoleInit::parse(&role_init_name).ok_or("TORUS16_ROLE_INIT must be matched or diverse")?;
-    if matrix_mode == MatrixMode::TorusShared && role_init != RoleInit::Matched {
-        return Err("TorusShared requires TORUS16_ROLE_INIT=matched".into());
+    if matrix_mode != MatrixMode::Independent && role_init != RoleInit::Matched {
+        return Err("Shared/Role-Delta modes require TORUS16_ROLE_INIT=matched".into());
     }
     let matrix_seed = std::env::var("TORUS16_MATRIX_SEED")
         .ok()
@@ -273,10 +273,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let checkpoint_path = std::env::var_os("TORUS16_CHECKPOINT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            if matrix_mode == MatrixMode::TorusShared {
-                PathBuf::from("target/torus16-ema4-bptt.ckpt")
-            } else {
-                PathBuf::from("target/torus16-ema4-independent-bptt.ckpt")
+            match matrix_mode {
+                MatrixMode::TorusShared => PathBuf::from("target/torus16-ema4-bptt.ckpt"),
+                MatrixMode::Independent => PathBuf::from("target/torus16-ema4-independent-bptt.ckpt"),
+                _ => PathBuf::from(format!("target/torus16-ema4-{}-bptt.ckpt", matrix_mode.as_str())),
             }
         });
     let fresh = std::env::var_os("TORUS16_FRESH").is_some();
@@ -295,7 +295,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let onehots = (0..vocab)
         .map(|token| onehot(token, vocab))
         .collect::<Result<Vec<_>, _>>()?;
-    let weights = Ema4Weights::deterministic_seeded(vocab, matrix_seed)?;
+    let mut weights = Ema4Weights::deterministic_seeded(vocab, matrix_seed)?;
+    if matrix_mode.role_delta_rank().is_some() {
+        let scale = std::env::var("TORUS16_DELTA_SCALE")
+            .ok()
+            .map(|value| value.parse::<f32>())
+            .transpose()?
+            .unwrap_or(1.0);
+        if !scale.is_finite() || scale <= 0.0 || scale > 16.0 {
+            return Err("TORUS16_DELTA_SCALE must be finite and within (0,16]".into());
+        }
+        weights.delta_scale = scale;
+    } else if std::env::var_os("TORUS16_DELTA_SCALE").is_some() {
+        return Err("TORUS16_DELTA_SCALE is only supported in Role-Delta modes".into());
+    }
     let model = architecture_model_for(vocab, matrix_mode)?;
     let initial_bindings = weights.bindings_with_init(0, matrix_mode, role_init)?;
     let trainable_initial = weights.trainable_parameters_with_init(matrix_mode, role_init)?;
@@ -521,7 +534,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     );
     println!(
-        "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
+        "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} adapter_rank={:?} delta_scale={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
         matrix_mode.as_str(),
         role_init.as_str(),
         matrix_seed,
@@ -529,6 +542,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         matrix_mode.matrix_count(),
         matrix_mode.matrix_count() * torus16_mix_lab::WIDTH * torus16_mix_lab::WIDTH,
         parameter_count,
+        matrix_mode.role_delta_rank(),
+        weights.delta_scale,
         corpus_hash,
         window_len,
         train_windows,

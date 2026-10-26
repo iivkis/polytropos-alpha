@@ -973,3 +973,9 @@ tasks:
     cmds:
       - cargo run -p torus16-mix-lab --example torus16_mix -- --certify
 
+
+  verify-torus16-role-delta:
+    desc: Validate Role-Delta rank inventories and initial CUDA Graph EMA4 parity
+    cmds:
+      - cargo test -p torus16-mix-lab --test ema4 role_delta_parameter_inventory_and_zero_adapter_initialization
+      - cargo test -p torus16-mix-lab --test ema4 role_delta_initial_gpu_logits_and_state_match -- --ignored --nocapture

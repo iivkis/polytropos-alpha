@@ -121,6 +121,26 @@ pub(crate) fn projection_graph(
     inputs: &[NodeId],
     role: usize,
 ) -> Result<NodeId, NeuralError> {
+    projection_graph_impl(g, inputs, role, false)
+}
+
+/// Role-specific low-rank correction. Extra ports: A[48,q], B[q,48],
+/// and a fixed scalar multiplier. Both branches operate on the SAME mixed
+/// input and are combined before output permutation, row scaling and bias.
+pub(crate) fn projection_graph_with_delta(
+    g: &mut NeuralGraph,
+    inputs: &[NodeId],
+    role: usize,
+) -> Result<NodeId, NeuralError> {
+    projection_graph_impl(g, inputs, role, true)
+}
+
+fn projection_graph_impl(
+    g: &mut NeuralGraph,
+    inputs: &[NodeId],
+    role: usize,
+    with_delta: bool,
+) -> Result<NodeId, NeuralError> {
     // x, W (already transposed for even roles), row, col, bias,
     // mix_gate, mix_bias, ones_column, one, minus_one, inv_sqrt_width.
     let x = inputs[0];
@@ -147,6 +167,15 @@ pub(crate) fn projection_graph(
 
     // torch F.linear(z, W): z @ W.T; F.linear(z, W.T): z @ W.
     let projected = g.matmul(mixed, inputs[1])?;
+    let projected = if with_delta {
+        let low = g.matmul(mixed, inputs[11])?;
+        let low = g.matmul(low, inputs[12])?;
+        let scale = g.broadcast_to(inputs[13], Shape::new(vec![1, WIDTH])?)?;
+        let correction = g.mul(low, scale)?;
+        g.add(projected, correction)?
+    } else {
+        projected
+    };
     let unshifted = roll_left_graph(g, projected, (WIDTH - r) % WIDTH)?;
     let scaled = g.mul(unshifted, inputs[2])?;
     g.add(scaled, inputs[4])
