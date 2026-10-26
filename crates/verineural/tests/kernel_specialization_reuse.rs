@@ -52,12 +52,13 @@ fn identical_templates_share_entrypoints_without_removing_graph_nodes() {
     assert_eq!(report.kernel_count, 5);
     assert_eq!(report.rounded_adds, 3);
     assert_eq!(report.rounded_muls, 2);
-    assert!(plan
-        .validate(
+    assert!(
+        plan.validate(
             program.llvm_ir(),
             &ptx.replace(&format!("vn_node_{}(", d.index()), "vn_node_999(")
         )
-        .is_err());
+        .is_err()
+    );
     let mut invalid_plan = plan.clone();
     invalid_plan.kernels[1].entry_node = d.index(); // future entry
     assert!(TranslationPlan::from_text(&invalid_plan.to_text()).is_err());

@@ -651,7 +651,11 @@ impl GpuProgram {
     /// Identical code templates share an entrypoint but never share arguments
     /// or output storage. The physical graph still has `kernel_count()` nodes.
     pub fn unique_kernel_count(&self) -> usize {
-        self.kernel_entries.values().copied().collect::<BTreeSet<_>>().len()
+        self.kernel_entries
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
     }
 
     /// Function owner for a launched Semantic IR producer (not an alias).

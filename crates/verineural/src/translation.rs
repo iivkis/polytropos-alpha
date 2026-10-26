@@ -518,8 +518,7 @@ impl TranslationPlan {
             }
             previous = Some(kernel.node);
             if kernel.entry_node > kernel.node
-                || (kernel.entry_node != kernel.node
-                    && !seen_entries.contains(&kernel.entry_node))
+                || (kernel.entry_node != kernel.node && !seen_entries.contains(&kernel.entry_node))
             {
                 return Err(invalid(format!(
                     "kernel {} references unknown or future entry {}",
