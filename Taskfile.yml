@@ -1210,8 +1210,14 @@ tasks:
         unset TORUS16_GPU_ADAMW TORUS16_LR_DECAY_5X TORUS16_VERIFY_FUSION
         unset TORUS16_BENCH_COMPARE TORUS16_BENCH_FUSED TORUS16_GPU_FEEDBACK_EVENTS
         unset TORUS16_INITIAL_PROBE_PATH TORUS16_CORPUS
-        for rank in 4 8; do
-          for bptt in 4 8; do
+        # Default is the full matrix. Filter specific configurations when
+        # investigating expensive CUDA setup, without touching other runs.
+        ranks="${TORUS16_V02_RANKS:-4 8}"
+        bptts="${TORUS16_V02_BPTTS:-4 8}"
+        for rank in $ranks; do
+          case "$rank" in 4|8) ;; *) echo "Invalid v0.2 rank: $rank" >&2; exit 1 ;; esac
+          for bptt in $bptts; do
+            case "$bptt" in 4|8) ;; *) echo "Invalid v0.2 BPTT: $bptt" >&2; exit 1 ;; esac
             windows="$((train_tokens / bptt))"
             export TORUS16_MATRIX_MODE="role_delta_$rank"
             export TORUS16_BPTT="$bptt" TORUS16_TRAIN_WINDOWS="$windows"
@@ -1228,6 +1234,10 @@ tasks:
             grep '^temporal_parameter_only_hoisting=enabled ' "$out/$label.log" | tail -n 1
             grep '^cuda_graph_baseline=SKIPPED ' "$out/$label.log" | tail -n 1
             grep '^setup_compile_and_cuda_prepare_ms=' "$out/$label.log" | tail -n 1
+            if [ -n "${VERINEURAL_GPU_PREPARE_PROFILE:-}" ]; then
+              grep '^gpu_nvptx_stage=' "$out/$label.log"
+              grep '^gpu_prepare_phase=' "$out/$label.log"
+            fi
             grep '^training_parameter_upload_mode=packed_true' "$out/$label.log"
             grep '^training_d2h_profile_avg_ms .*packed=true' "$out/$label.log"
             grep '^training_profile_avg_ms ' "$out/$label.log" | tail -n 1
@@ -1236,7 +1246,7 @@ tasks:
             grep '^test_evaluation=SKIPPED ' "$out/$label.log" | tail -n 1
           done
         done
-        echo "PASS: four long-validation runs completed, test withheld; no claims of architecture superiority."
+        echo "PASS: selected long-validation runs completed, test withheld; no claims of architecture superiority."
         echo "Important: BPTT changes optimizer update count; different ranks/BPTT have different checkpoint identities."
         echo "Evidence and checkpoints: $out"
 

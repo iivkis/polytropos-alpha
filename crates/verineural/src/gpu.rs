@@ -3739,6 +3739,8 @@ impl GpuEngine {
     /// Write the inspectable LLVM IR and lower it with LLVM's NVPTX backend.
     /// LLVM must be available in the devShell; a nonzero exit is an error.
     pub fn lower(&self, program: &GpuProgram, dir: &Path) -> Result<PathBuf, GpuError> {
+        let profile = std::env::var_os("VERINEURAL_GPU_PREPARE_PROFILE").is_some();
+        let lower_started = Instant::now();
         fs::create_dir_all(dir)?;
         let ir = dir.join("graph.ll");
         let ptx = dir.join("graph.ptx");
@@ -3768,6 +3770,14 @@ impl GpuEngine {
                 ),
             });
         }
+        if profile {
+            eprintln!(
+                "gpu_nvptx_stage=llc elapsed_ms={:.3} artifact_dir={}",
+                lower_started.elapsed().as_secs_f64() * 1000.,
+                dir.display()
+            );
+        }
+        let audit_started = Instant::now();
         // Translation validation must succeed before the PTX reaches CUDA JIT.
         // The generated plan is derived from Semantic IR and fusion/memory
         // contracts, while the report is checked from both emitted artifacts.
@@ -3791,6 +3801,13 @@ impl GpuEngine {
             dir.join("capability.plan"),
             program.capability_plan()?.to_text(),
         )?;
+        if profile {
+            eprintln!(
+                "gpu_nvptx_stage=translation_audit elapsed_ms={:.3} artifact_dir={}",
+                audit_started.elapsed().as_secs_f64() * 1000.,
+                dir.display()
+            );
+        }
         Ok(ptx)
     }
 
@@ -3800,11 +3817,30 @@ impl GpuEngine {
         inputs: &[(NodeId, Tensor<f32>)],
         output_dir: &Path,
     ) -> Result<GpuExecution, GpuError> {
+        // Opt-in setup attribution. Never alter kernel generation, stream
+        // ordering, input bindings, FP32 arithmetic or proof claims.
+        let profile = std::env::var_os("VERINEURAL_GPU_PREPARE_PROFILE").is_some();
+        let total_started = Instant::now();
+        let report = |phase: &str, started: Instant| {
+            if profile {
+                eprintln!(
+                    "gpu_prepare_phase={phase} elapsed_ms={:.3} artifact_dir={}",
+                    started.elapsed().as_secs_f64() * 1000.,
+                    output_dir.display(),
+                );
+            }
+        };
         let contracts = program.memory_contracts()?;
         let given = validate_inputs(program, inputs)?;
+        report("preflight", total_started);
+        let phase_started = Instant::now();
         let ptx_path = self.lower(program, output_dir)?;
         let ptx = fs::read(ptx_path)?;
+        report("lower_and_audit", phase_started);
+        let phase_started = Instant::now();
         let mut session = CudaSession::new(&ptx)?;
+        report("cuda_module_load", phase_started);
+        let phase_started = Instant::now();
         let mut buffers: BTreeMap<usize, u64> = BTreeMap::new();
         let mut input_addresses = BTreeMap::new();
         let skipped = program.skipped_nodes();
@@ -3851,6 +3887,8 @@ impl GpuEngine {
             }
         }
 
+        report("allocate_and_initial_h2d", phase_started);
+        let phase_started = Instant::now();
         // Validate the *allocated* buffers as well as the abstract shapes
         // before capturing any kernel into the CUDA Graph. Each output has
         // its own allocation; aliases are allowed only for zero-copy Reshape
@@ -3892,12 +3930,16 @@ impl GpuEngine {
             }
         }
 
+        report("memory_contracts", phase_started);
         let kernel_count = contracts.len();
         let has_graph = kernel_count > 0;
         if has_graph {
+            let phase_started = Instant::now();
             for contract in &contracts {
                 session.prepare_kernel(&format!("vn_node_{}", contract.kernel_node))?;
             }
+            report("kernel_resolution", phase_started);
+            let phase_started = Instant::now();
             session.begin_graph()?;
             for contract in &contracts {
                 let index = contract.kernel_node;
@@ -3947,8 +3989,12 @@ impl GpuEngine {
                     )?;
                 }
             }
+            report("graph_capture", phase_started);
+            let phase_started = Instant::now();
             session.finish_graph()?;
+            report("graph_instantiate", phase_started);
         }
+        report("total_before_execution", total_started);
 
         let last = program.graph.node(program.output)?;
         let output_addresses = program
