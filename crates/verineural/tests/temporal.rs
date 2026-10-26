@@ -70,6 +70,40 @@ fn temporal_graph_has_shared_parameters_and_actual_state_edges() {
 }
 
 #[test]
+fn bptt16_hoisted_temporal_structure_and_gradients_are_valid() {
+    let model = invariant_recurrent();
+    let window = unroll_model_hoisted(&model, "y", 16).unwrap();
+    assert_eq!(window.outputs().len(), 16);
+    assert_eq!(window.cotangents().len(), 16);
+    assert_eq!(window.inputs().len(), 16);
+    assert_eq!(window.parameters().len(), 2);
+    assert_eq!(window.initial_states().len(), 1);
+    assert_eq!(window.terminal_states()["s"], window.outputs()[15]);
+    assert_ne!(window.outputs()[14], window.outputs()[15]);
+    let wrt = [window.parameters()["w"], window.parameters()["b"]];
+    let derivative = differentiate(window.graph(), window.objective(), &wrt).unwrap();
+    assert_eq!(
+        derivative
+            .graph()
+            .node(derivative.gradient_of(wrt[0]).unwrap())
+            .unwrap()
+            .shape
+            .dims(),
+        &[2, 2]
+    );
+    assert_eq!(
+        derivative
+            .graph()
+            .node(derivative.gradient_of(wrt[1]).unwrap())
+            .unwrap()
+            .shape
+            .dims(),
+        &[1, 2]
+    );
+    assert!(unroll_model(&model, "y", 17).is_err());
+}
+
+#[test]
 #[ignore = "requires NVIDIA GPU + LLVM NVPTX, checks through-time gradient"]
 fn temporal_gpu_vjp_matches_hand_derived_gradient() {
     let window = unroll_model(&recurrent(), "y", 2).unwrap();
@@ -200,14 +234,13 @@ fn temporal_parameter_hoisting_gpu_forward_and_gradients_match_baseline() {
         Tensor::from_slice(vec![1, 2], &[-0.2, 0.75]).unwrap(),
         Tensor::from_slice(vec![1, 2], &[0.1, 0.6]).unwrap(),
     ];
-    // Run the same GPU forward/VJP parity at the historical three-step
-    // horizon and at the first v0.2 target horizon of eight timesteps.
-    // Repeated step values are deterministic; state carries through all eight.
+    // Run GPU forward/VJP parity at 3, 8 and 16 timesteps.
+    // Repeated input/seed values are deterministic; state carries all 16.
     let short_steps = steps.clone();
     let short_seeds = seeds.clone();
     let mut steps = steps;
     let mut seeds = seeds;
-    for i in 3..8 {
+    for i in 3..16 {
         steps.push(short_steps[i % short_steps.len()].clone());
         seeds.push(short_seeds[i % short_seeds.len()].clone());
     }
@@ -227,7 +260,8 @@ fn temporal_parameter_hoisting_gpu_forward_and_gradients_match_baseline() {
         for &id in &wrt {
             roots.push(reverse.gradient_of(id).unwrap());
         }
-        let program = gpu.compile_outputs(reverse.graph(), &roots).unwrap();
+        let engine = gpu.clone().with_allocation_slab(horizon == 16);
+        let program = engine.compile_outputs(reverse.graph(), &roots).unwrap();
         let bindings = window
             .bindings(&base, &steps[..horizon], &seeds[..horizon])
             .unwrap();
@@ -244,13 +278,13 @@ fn temporal_parameter_hoisting_gpu_forward_and_gradients_match_baseline() {
             horizon,
             if hoisted { "shared" } else { "baseline" },
         ));
-        gpu.execute_outputs(&program, &sources, &path)
+        engine.execute_outputs(&program, &sources, &path)
             .unwrap()
             .into_iter()
             .map(|(_, tensor)| tensor)
             .collect::<Vec<_>>()
     };
-    for horizon in [3usize, 8] {
+    for horizon in [3usize, 8, 16] {
         let original = evaluate(false, horizon);
         let hoisted = evaluate(true, horizon);
         assert_eq!(original.len(), horizon + 2);

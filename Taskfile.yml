@@ -1177,6 +1177,42 @@ tasks:
         grep '^setup_compile_and_cuda_prepare_ms=' "$dir/fast.log"
         echo "Evidence: $dir"
 
+  benchmark-torus16-v02-bptt16:
+    desc: Opt-in BPTT16 acceptance smoke, rank4, fixed 64 train symbols, CUDA setup/tensor budget logging and test held out
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        # This is an explicit risk-bounded GPU acceptance run, not a
+        # hyperparameter selection or a 8192-character quality benchmark.
+        base="${TORUS16_V02_BPTT16_DIR:-target/torus16-v02-bptt16-smoke}"
+        mkdir -p "$base"
+        export VERINEURAL_GPU_PREPARE_PROFILE=1
+        export TORUS16_GPU_ALLOCATION_SLAB=1
+        export TORUS16_V02_RANKS=4 TORUS16_V02_BPTTS="8 16"
+        export TORUS16_V02_TRAIN_TOKENS=64 TORUS16_V02_VALIDATION_CHARS=64
+        export TORUS16_BPTT16_MAX_KERNELS="${TORUS16_BPTT16_MAX_KERNELS:-70000}"
+        export TORUS16_BPTT16_MAX_TENSOR_MIB="${TORUS16_BPTT16_MAX_TENSOR_MIB:-512}"
+        TORUS16_V02_DIR="$base" task benchmark-torus16-v02-horizon >"$base/summary.log" 2>&1 || {
+          tail -n 120 "$base/summary.log"
+          echo "BPTT16 smoke failed; raw training logs retained under $base" >&2
+          exit 1
+        }
+        for bptt in 8 16; do
+          raw="$base/rank4-bptt$bptt.log"
+          grep -Fx 'gpu_allocation_mode=slab' "$raw"
+          grep '^gpu_prepare_allocations mode=slab .*artifact_dir=.*vn_ema4_bptt_' "$raw"
+          grep '^setup_compile_and_cuda_prepare_ms=' "$raw"
+          grep '^training_total_s=' "$raw"
+          grep '^test_evaluation=SKIPPED ' "$raw"
+          if [ "$bptt" -eq 16 ]; then
+            grep '^bptt16_resource_preflight ' "$raw"
+          fi
+        done
+        echo "PASS: BPTT8 and BPTT16 rank4 smoke completed with 64 train/validation chars, test held out."
+        echo "Do not compare checkpoint bits across different BPTT IR fingerprints."
+        echo "Not a quality gate. Logs: $base/summary.log $base/rank4-bptt8.log $base/rank4-bptt16.log"
+
   benchmark-torus16-v02-allocation-slab:
     desc: Compare separate CUDA tensor allocations against a single bounded slab and require bitwise checkpoint parity
     deps: [prepare]
@@ -1306,7 +1342,11 @@ tasks:
         for rank in $ranks; do
           case "$rank" in 4|8) ;; *) echo "Invalid v0.2 rank: $rank" >&2; exit 1 ;; esac
           for bptt in $bptts; do
-            case "$bptt" in 4|8) ;; *) echo "Invalid v0.2 BPTT: $bptt" >&2; exit 1 ;; esac
+            case "$bptt" in 4|8|16) ;; *) echo "Invalid v0.2 BPTT: $bptt" >&2; exit 1 ;; esac
+            if [ "$((train_tokens % bptt))" -ne 0 ]; then
+              echo "Training tokens ($train_tokens) must be divisible by BPTT=$bptt" >&2
+              exit 1
+            fi
             windows="$((train_tokens / bptt))"
             export TORUS16_MATRIX_MODE="role_delta_$rank"
             export TORUS16_BPTT="$bptt" TORUS16_TRAIN_WINDOWS="$windows"

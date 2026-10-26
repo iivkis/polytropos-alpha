@@ -241,7 +241,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/corpus_snapshot.txt")
         });
     let corpus = CharCorpus::read(&corpus_path)?;
-    let window_len = option_usize("TORUS16_BPTT", 2, 2, 8)?;
+    // The public temporal API already supports 16 steps; this lab keeps
+    // BPTT=2 by default. The 16-step path is explicitly budgeted below.
+    let window_len = option_usize("TORUS16_BPTT", 2, 2, 16)?;
     let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 1_000_000)?;
     let val_limit = option_usize("TORUS16_VAL_LIMIT", 64, 2, 100000)?;
     let test_limit = option_usize("TORUS16_TEST_LIMIT", 64, 2, 100000)?;
@@ -715,6 +717,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     let codegen_started = Instant::now();
     let program = engine.compile_outputs(&execution_graph, &selected)?;
     let new_kernels = program.kernel_count()?;
+    // Calculate graph tensor storage before LLVM NVPTX and CUDA module JIT.
+    // This does not account for JIT, CUDA Graph or staging overhead.
+    if window_len == 16 {
+        let tensor_bytes = program.tensor_allocation_bytes()?;
+        let max_kernels = option_usize("TORUS16_BPTT16_MAX_KERNELS", 70_000, 1, 1_000_000)?;
+        let max_tensor_mib = option_usize("TORUS16_BPTT16_MAX_TENSOR_MIB", 512, 1, 65_536)?;
+        let max_tensor_bytes = max_tensor_mib
+            .checked_mul(1024 * 1024)
+            .ok_or("BPTT16 tensor allocation limit overflow")?;
+        println!(
+            "bptt16_resource_preflight kernels={} kernel_limit={} tensor_bytes={} tensor_limit_bytes={} scope=graph_tensors_only",
+            new_kernels, max_kernels, tensor_bytes, max_tensor_bytes
+        );
+        if new_kernels > max_kernels || tensor_bytes > max_tensor_bytes {
+            return Err(format!(
+                "BPTT16 preflight rejected: kernels={new_kernels}/{max_kernels}, graph_tensor_bytes={tensor_bytes}/{max_tensor_bytes}; no CUDA JIT or graph allocation attempted"
+            )
+            .into());
+        }
+    }
     println!(
         "setup_stage=fused_compile elapsed_ms={:.3}",
         codegen_started.elapsed().as_secs_f64() * 1000.

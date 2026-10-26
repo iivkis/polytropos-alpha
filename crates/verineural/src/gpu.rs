@@ -644,6 +644,39 @@ impl GpuProgram {
         Ok(self.memory_contracts()?.len())
     }
 
+    /// Conservative pre-JIT size of graph tensor allocations, in bytes.
+    /// Exactly matches the materialized Input/OwnedContiguous allocations
+    /// used by GpuEngine::prepare(), including secondary fused outputs.
+    /// Excludes PTX/JIT, CUDA Graph metadata, transfers and auxiliary buffers;
+    /// it is a budget guard, NOT a VRAM peak measurement.
+    pub fn tensor_allocation_bytes(&self) -> Result<usize, GpuError> {
+        let skipped = self.skipped_nodes();
+        let mut total = 0usize;
+        for &index in &self.live_nodes {
+            if skipped.contains(&index)
+                && !self.fused_dual_outputs.values().any(|&n| n == index)
+            {
+                continue;
+            }
+            let node = &self.graph.nodes()[index];
+            if matches!(node.operation, Operation::Input)
+                || matches!(
+                    self.graph.storage(node.id)?,
+                    NodeStorage::OwnedContiguous { .. }
+                )
+            {
+                let elements = node.shape.element_count();
+                let bytes = elements
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or(GpuError::UnsupportedSize { elements })?;
+                total = total
+                    .checked_add(bytes)
+                    .ok_or(GpuError::UnsupportedSize { elements })?;
+            }
+        }
+        Ok(total)
+    }
+
     pub const fn launch_config(&self) -> GpuLaunchConfig {
         self.launch
     }

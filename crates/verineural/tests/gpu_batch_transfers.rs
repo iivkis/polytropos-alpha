@@ -3,6 +3,25 @@
 use verineural::{Domain, GpuEngine, GpuError, NeuralGraph, Shape, Tensor};
 
 #[test]
+fn tensor_allocation_budget_counts_only_materialized_live_nodes() {
+    let mut g = NeuralGraph::default();
+    let shape = Shape::new(vec![4]).unwrap();
+    let x = g.input(shape.clone(), Domain::Finite);
+    let y = g.input(shape, Domain::Finite);
+    let sum = g.add(x, y).unwrap();
+    let product = g.mul(sum, y).unwrap();
+    let engine = GpuEngine::new("llc", "sm_52");
+    let program = engine.compile_outputs(&g, &[sum, product]).unwrap();
+    assert_eq!(program.kernel_count().unwrap(), 2);
+    // Two input tensors and two owned computed outputs, each four F32.
+    assert_eq!(program.tensor_allocation_bytes().unwrap(), 4 * 4 * 4);
+    let only_sum = engine.compile(&g, sum).unwrap();
+    assert_eq!(only_sum.kernel_count().unwrap(), 1);
+    // An unselected downstream product must not contribute to the estimate.
+    assert_eq!(only_sum.tensor_allocation_bytes().unwrap(), 3 * 4 * 4);
+}
+
+#[test]
 #[ignore = "requires NVIDIA GPU and LLVM NVPTX; checks batch parity and fail-before-DMA validation"]
 fn batched_subset_transfers_match_single_updates_and_reads() {
     let mut g = NeuralGraph::default();

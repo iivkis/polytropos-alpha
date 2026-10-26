@@ -386,3 +386,32 @@ TORUS16_V02_TRAIN_TOKENS=64 task benchmark-torus16-v02-horizon`
 три запуска в новых процессах с отдельными checkpoint
 и короткой validation **только для диагностики**.
 Подробности и ограничения: [V0.2_TRANSITION.md](V0.2_TRANSITION.md).
+
+## 18. CUDA tensor slab: локальная GPU-проверка (26 октября 2026)
+
+**Источник:** переданный stdout `task verify-gpu-batch-transfers`
+и `task benchmark-torus16-v02-allocation-slab`.
+Оба игнорируемых NVIDIA batch-transfer теста прошли (2/2).
+Эксперимент rank4/BPTT8: 64 новых обучающих символа, 64
+validation символа; CPU AdamW, Packed H2D/D2H, hoisting.
+Только performance smoke; test оставался закрытым.
+
+| Режим | Отдельные CUDA allocations | Allocate/initial H2D, мс | Вся compile+prepare, с | Training, токенов/с |
+|---|---:|---:|---:|---:|
+| Separate | 32 229 | 135.146 | 13.929722 | 225.62 |
+| Slab | 1 | 32.183 | 13.482055 | 232.00 |
+
+Сокращение **CUDA allocations 32 229 → 1**, времени
+`allocate_and_initial_h2d` на **~76.2%**, а общего setup
+на **~3.2%**. Обе пары final и best checkpoint совпали **побитово**
+(`cmp`). BPC на короткой validation оказался 1.527281 в обоих
+режимах; это **не** оценка качества на длинном heldout.
+Различия throughput при восьми окнах статистически неубедительны.
+По локальному профилю `lower_and_audit` занимал ~10.25 с:
+ускорение device allocation не устраняет основной расход NVPTX.
+
+**Вывод для этапа 0.2-B:** physical tensor slab оставить
+экспериментальным, не считать его ускорением LLVM и не
+включать по умолчанию. Следующий отдельный smoke проверяет
+BPTT=16 с лимитом числа kernels и расчётным размером основных
+GPU tensor allocations; результат ещё неизвестен.
