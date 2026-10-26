@@ -25,12 +25,15 @@ fn shared_gpu_program_emits_common_kernel_only_once_and_orders_results() {
     assert_eq!(program.output(), outputs[0]);
     assert_eq!(program.source_inputs(), &sources);
     assert_eq!(program.kernel_count().unwrap(), 4);
+    // Two Add producers now share one LLVM/PTX entrypoint, but remain
+    // separate CUDA Graph nodes with independent buffers and arguments.
+    assert_eq!(program.unique_kernel_count(), 3);
     assert_eq!(
         program
             .llvm_ir()
             .matches("define ptx_kernel void @vn_node_")
             .count(),
-        4
+        program.unique_kernel_count()
     );
     let root_nodes = program
         .translation_plan()

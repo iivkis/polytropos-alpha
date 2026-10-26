@@ -375,12 +375,15 @@ fn auto_builder_plans_one_shared_nvptx_module_for_all_supported_outputs() {
     let shared = plan.shared_gpu.as_ref().unwrap();
     assert_eq!(shared.outputs(), &[left, right, final_sum]);
     assert_eq!(shared.kernel_count().unwrap(), 4);
+    // Two Add producers now share one LLVM/PTX entrypoint, but remain
+    // separate CUDA Graph nodes with independent buffers and arguments.
+    assert_eq!(shared.unique_kernel_count(), 3);
     assert_eq!(
         shared
             .llvm_ir()
             .matches("define ptx_kernel void @vn_node_")
             .count(),
-        4
+        shared.unique_kernel_count()
     );
     assert_eq!(shared.source_inputs(), &[a, b]);
 
