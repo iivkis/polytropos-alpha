@@ -769,3 +769,45 @@ validation-выборки тоже повышает риск selection bias.
 В новом запуске лог `optimizer_moments=reset` отражает fresh/warm-start,
 а `optimizer_moments=preserved` появляется только при действительном
 resume предыдущего Role-Delta checkpoint.
+
+
+### Производительность обучения Role-Delta (CPU/GPU AdamW)
+
+Прогон 26.10.2026 с `task compare-torus16-role-delta-ranks`
+(rank 4 и 8, seed=0, 8192 окон, BPTT=4) использовал
+**CPU AdamW**, `TORUS16_METRIC_EVERY=1`; для обоих rank измерено
+около 183.5 обучающих токенов/с. Rank 4 достиг best validation
+BPC 2.512507, rank 8 — 2.590005 (один seed, validation=512).
+Загрузка GPU около 65% по внешнему наблюдению сама по себе
+не даёт точного распределения узких мест. В CPU-режиме каждый шаг
+делает D2H градиентов, host AdamW и H2D обновлённых параметров.
+Плюс исполняется много мелких IR/CUDA Graph kernels.
+
+Для предметной проверки добавлено
+`task benchmark-torus16-role-delta-backends`: одинаковый weight-only
+warm-start rank 4, BPTT=4, 256 окон; два отдельных тренировочных
+прохода CPU и GPU AdamW. Выводит `training_tokens_per_second`,
+`training_profile_avg_ms`, стоимость подготовки/компиляции и
+validation BPC. Метрики CPU и GPU могут отличаться численно;
+формальная битовая эквивалентность не обещается. Test не читается.
+Бенчмарк каждый раз начинает **новые** 256 окон и пишет только в
+`target/torus16-role-delta-backend-benchmark/`.
+
+Существующий `task compare-torus16-role-delta-ranks` по умолчанию
+**оставлен на CPU**, чтобы прежние checkpoint продолжали
+использовать прежний fingerprint и не были потеряны. Для отдельного
+GPU-прогона:
+
+```bash
+TORUS16_ROLE_DELTA_BACKEND=gpu TORUS16_ROLE_DELTA_WINDOWS=8192 task compare-torus16-role-delta-ranks
+```
+
+Этот режим включает `TORUS16_GPU_ADAMW=1`, редкую диагностику
+`TORUS16_METRIC_EVERY=32` и reuse inference graph для validation.
+Он пишет в **отдельную** папку
+`target/torus16-role-delta-rank-ablation-gpu/`, исходные CPU
+checkpoint не продолжает и не переписывает.
+GPU optimizer добавляет дополнительные IR-узлы и проверки feedback,
+поэтому может оказаться медленнее CPU. Выбирать backend только по
+измеренной сквозной скорости и целевой точности, а не по процентажу
+`nvidia-smi`. Новая конфигурация ещё не тестировалась локально.
