@@ -341,6 +341,20 @@ through time without lab backward kernels. Initial recurrent states
 are explicit window-boundary sources, cutting the gradient graph there.
 The new temporal.rs performs strict binding validation and rejects
 unregistered sources, wrong shapes and missing transitions.
+**New opt-in temporal reuse (code; CUDA acceptance pending):**
+`unroll_model_hoisted` reuses a pure original-model operation across
+window timesteps only when all of its transitive sources are named
+`Parameter` inputs. `State` and per-timestep `Input` dependencies are
+never hoisted. It shares the same public Neural IR and generic VJP/GPU
+lowering; no architecture-specific kernels or new arithmetic are added.
+The established `unroll_model` remains unchanged for old checkpoint
+fingerprints. This transformation can alter the reverse AD accumulation
+tree, so forward bitwise parity and gradient numeric parity require
+separate NVIDIA acceptance via `task verify-gpu-temporal-bptt`.
+A specific consumer training experiment is
+`task benchmark-torus16-role-delta-hoisting`; speedup is not
+confirmed until locally measured. Lean/strict-FP32/SASS semantics
+are not upgraded by this graph sharing.
 A tiny two-step CUDA test tests the *through-time* gradient analytically:
 2.25 with the cross-time edge, versus 1.875 when detached.
 

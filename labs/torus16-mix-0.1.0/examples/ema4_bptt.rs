@@ -18,7 +18,7 @@ use torus16_mix_lab::ema4_checkpoint::{
 use verineural::{
     AdamW, ArgMaxTieBreak, Domain, GpuAdamWPlan, GpuCodegenOptLevel, GpuEngine, GpuLaunchConfig,
     Model, ModelExecution, NodeId, ReluFusion, Shape, SourceRole, Tensor, differentiate_with_seeds,
-    unroll_model,
+    unroll_model, unroll_model_hoisted,
 };
 
 fn onehot(token: usize, width: usize) -> Result<Tensor<f32>, Box<dyn Error>> {
@@ -355,7 +355,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     let parameter_count: usize = trainable_initial.values().map(|v| v.values().len()).sum();
-    let window = unroll_model(&model, "logits", window_len)?;
+    // Parameter-only subgraphs are pure and invariant within one BPTT
+    // window. Opt in explicitly: the resulting training IR and therefore its
+    // checkpoint identity differ from the historical unroll.
+    let hoist_parameter_only = match std::env::var("TORUS16_HOIST_PARAMETER_ONLY").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => return Err("TORUS16_HOIST_PARAMETER_ONLY must be 0 or 1".into()),
+    };
+    let window = if hoist_parameter_only {
+        unroll_model_hoisted(&model, "logits", window_len)?
+    } else {
+        unroll_model(&model, "logits", window_len)?
+    };
+    println!(
+        "temporal_parameter_only_hoisting={} temporal_ir_nodes={}",
+        if hoist_parameter_only { "enabled" } else { "disabled" },
+        window.graph().nodes().len(),
+    );
     let named_parameter = window.parameters();
     let names = trainable_initial.keys().cloned().collect::<Vec<_>>();
     let targets = names

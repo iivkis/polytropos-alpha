@@ -323,3 +323,49 @@ fn role_delta_gpu_vjp_matches_scalar_oracle() {
         }
     }
 }
+
+#[test]
+fn role_delta_parameter_only_hoisting_reduces_real_bptt_ir() {
+    use crate::ema4::{MatrixMode, architecture_model_for};
+    use verineural::{Operation, unroll_model, unroll_model_hoisted};
+    let model = architecture_model_for(16, MatrixMode::RoleDelta4).unwrap();
+    let ordinary = unroll_model(&model, "logits", 4).unwrap();
+    let optimized = unroll_model_hoisted(&model, "logits", 4).unwrap();
+    let ordinary_count = ordinary.graph().nodes().len();
+    let optimized_count = optimized.graph().nodes().len();
+    let transpose_count = |window: &verineural::TemporalUnroll| {
+        window
+            .graph()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.operation, Operation::Permute { .. }))
+            .count()
+    };
+    println!(
+        "role_delta_hoist_bptt=4 ordinary_ir_nodes={} optimized_ir_nodes={} saved={} ordinary_permute={} optimized_permute={}",
+        ordinary_count,
+        optimized_count,
+        ordinary_count - optimized_count,
+        transpose_count(&ordinary),
+        transpose_count(&optimized)
+    );
+    assert!(
+        optimized_count < ordinary_count,
+        "model contains parameter-only pure nodes that must be reused"
+    );
+    assert!(transpose_count(&optimized) < transpose_count(&ordinary));
+    assert_eq!(
+        ordinary.parameters().keys().collect::<Vec<_>>(),
+        optimized.parameters().keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ordinary.initial_states().keys().collect::<Vec<_>>(),
+        optimized.initial_states().keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ordinary.terminal_states().keys().collect::<Vec<_>>(),
+        optimized.terminal_states().keys().collect::<Vec<_>>()
+    );
+    assert_eq!(ordinary.outputs().len(), optimized.outputs().len());
+    assert_eq!(optimized.outputs().len(), 4);
+}

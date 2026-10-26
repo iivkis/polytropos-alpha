@@ -864,3 +864,48 @@ kernel count нужен следующий, отдельно доказател�
 лабораторный CUDA kernel. Разграничение фаз нужно оценивать по
 `setup_compile_and_cuda_prepare_ms`, `training_tokens_per_second`
 и `training_profile_avg_ms`, а не только по GPU utilization.
+
+
+### Экспериментальный hot-path BPTT: переиспользование parameter-only подграфов
+
+`TORUS16_HOIST_PARAMETER_ONLY=1` выбирает новый универсальный
+`verineural::unroll_model_hoisted` вместо обычного `unroll_model`.
+При развёртывании BPTT вычисления, зависящие **исключительно от
+параметров модели**, создаются единожды и переиспользуются между
+временными шагами одного CUDA Graph replay. В частности, это
+позволяет не транспонировать одну shared W несколько раз.
+Вычисления, зависящие от предыдущего состояния, истории или входного
+токена, **не** объединяются. Значения всех параметров остаются
+неизменными внутри одного GPU replay; между BPTT окнами их разрешено
+обновлять. Это сокращает число повторно созданных IR-узлов, но не
+гарантирует уменьшения числа GPU kernels: совместное использование
+промежуточных результатов может ограничить downstream kernel fusion.
+Именно поэтому требуется сравнение `cuda_graph_after`, replay и tokens/s.
+
+Режим **выключен по умолчанию**. Он меняет training IR и fingerprint
+checkpoint; нельзя продолжать существующий checkpoint rank 4/8,
+созданный без hoisting, в режиме с hoisting. Для нового
+эксперимента использовать **отдельный** `TORUS16_CHECKPOINT`.
+Побитовое равенство forward логитов и численная близость градиентов
+в маленькой архитектурно-нейтральной модели проверяются через
+`task verify-gpu-temporal-bptt`; сравнение полного Role-Delta пока
+не прошло локальную GPU-проверку и не имеет нового Lean/FP32 доказательства.
+Порядок суммирования reverse-mode производных может изменяться,
+поэтому побитовое равенство checkpoint между режимами **не гарантировано**.
+
+Для проверки снижения IR/kernel count и end-to-end времени:
+
+```bash
+task temporal-bptt-stage
+task verify-gpu-temporal-bptt
+task benchmark-torus16-role-delta-hoisting
+```
+
+Последняя команда запускает по 256 окон rank 4 BPTT=4 от одного
+warm-start TorusShared checkpoint, с CPU AdamW, одинаковыми seed,
+параметрами и validation, но разными DAG. Она пишет два независимых
+checkpoint в `target/torus16-role-delta-hoist-benchmark/`,
+показывает `temporal_ir_nodes`, `cuda_graph_after`,
+`training_profile_avg_ms`, `training_tokens_per_second`,
+validation BPC и setup time. Test split не читается.
+Это сравнительный benchmark, а не гарантия ускорения.

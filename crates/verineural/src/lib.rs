@@ -111,7 +111,7 @@ pub use symbolic::{
     Dimension, DimensionBindings, DimensionConstraint, ParametricModule, ParametricSignature,
     SymbolicPort, SymbolicShape,
 };
-pub use temporal::{TemporalError, TemporalUnroll, unroll_model};
+pub use temporal::{TemporalError, TemporalUnroll, unroll_model, unroll_model_hoisted};
 pub use tensor::{Shape, Tensor, TensorShape, TensorValue};
 pub use translation::{
     TranslationError, TranslationKernel, TranslationKind, TranslationPlan, TranslationReport,

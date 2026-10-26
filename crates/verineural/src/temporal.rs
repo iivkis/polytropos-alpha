@@ -140,6 +140,32 @@ pub fn unroll_model(
     output_name: &str,
     steps: usize,
 ) -> Result<TemporalUnroll, TemporalError> {
+    unroll_model_impl(model, output_name, steps, false)
+}
+
+/// Opt-in temporal common-subgraph reuse for computations depending ONLY on
+/// named parameters. Within one BPTT window parameters are immutable: a
+/// parameter-only node has the same value at every step. We materialize it
+/// once and reuse its NodeId, including for all consumers and reverse-mode AD.
+///
+/// No state, token input, or state-dependent computation is hoisted. This
+/// transformation changes the training IR/fingerprint; consumers must not
+/// silently resume a checkpoint produced by the unoptimized unroll.
+/// Mathematical equivalence does not imply identical FP32 AD reductions.
+pub fn unroll_model_hoisted(
+    model: &Model,
+    output_name: &str,
+    steps: usize,
+) -> Result<TemporalUnroll, TemporalError> {
+    unroll_model_impl(model, output_name, steps, true)
+}
+
+fn unroll_model_impl(
+    model: &Model,
+    output_name: &str,
+    steps: usize,
+    hoist_parameter_only: bool,
+) -> Result<TemporalUnroll, TemporalError> {
     if !(1..=16).contains(&steps) {
         return Err(TemporalError::Invalid(
             "window length must be 1..=16".into(),
@@ -165,6 +191,24 @@ pub fn unroll_model(
             "duplicate named source nodes".into(),
         ));
     }
+    // Only node values transitively determined by Parameter sources may be
+    // reused. Build the predicate on the original topological model graph.
+    // Recurrent State and timestep Input sources are always variant.
+    let mut parameter_only = vec![false; old_nodes.len()];
+    if hoist_parameter_only {
+        for node in old_nodes {
+            parameter_only[node.id.index()] = if matches!(node.operation, Operation::Input) {
+                source_by_id
+                    .get(&node.id.index())
+                    .is_some_and(|(_, role)| *role == SourceRole::Parameter)
+            } else {
+                node.inputs
+                    .iter()
+                    .all(|id| parameter_only.get(id.index()) == Some(&true))
+            };
+        }
+    }
+    let mut cached_parameter_only = vec![None; old_nodes.len()];
     let mut graph = NeuralGraph::new(model.graph().policy());
     let mut params = BTreeMap::new();
     let mut initial = BTreeMap::new();
@@ -193,7 +237,14 @@ pub fn unroll_model(
         let mut mapping: Vec<Option<NodeId>> = vec![None; old_nodes.len()];
         let mut inputs = BTreeMap::new();
         for node in old_nodes {
-            let new = if matches!(node.operation, Operation::Input) {
+            let index = node.id.index();
+            // Cache hits are permitted only for parameter-only nodes.
+            // All other nodes follow exactly the historical builder path.
+            let new = if hoist_parameter_only
+                && let Some(reused) = cached_parameter_only[index]
+            {
+                reused
+            } else if matches!(node.operation, Operation::Input) {
                 let (name, role) = source_by_id
                     .get(&node.id.index())
                     .ok_or_else(|| TemporalError::Invalid("unregistered original input".into()))?;
@@ -218,6 +269,9 @@ pub fn unroll_model(
                     .collect::<Result<Vec<_>, _>>()?;
                 graph.apply(node.operation.clone(), &ids)?
             };
+            if hoist_parameter_only && parameter_only[index] {
+                cached_parameter_only[index] = Some(new);
+            }
             mapping[node.id.index()] = Some(new);
         }
         let logits = mapping[root.index()]
