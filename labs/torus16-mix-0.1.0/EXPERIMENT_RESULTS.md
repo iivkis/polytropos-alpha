@@ -355,3 +355,34 @@ GPU temporal VJP/hoisting (включая BPTT=8) и packed H2D/D2H
 CUDA JIT и создание Graph, а не оптимизировать один из них
 наугад. Короткий отдельный диагностический запуск и форма логов
 зафиксированы в [плане перехода](V0.2_TRANSITION.md).
+
+## 17. Профиль подготовки BPTT8 после первого v0.2-gate
+
+**Источник:** переданный stdout `VERINEURAL_GPU_PREPARE_PROFILE=1
+TORUS16_V02_RANKS=4 TORUS16_V02_BPTTS=8
+TORUS16_V02_TRAIN_TOKENS=64 task benchmark-torus16-v02-horizon`
+от 26 октября 2026 года. Ранг 4, BPTT8, 31 759 kernels,
+8 окон, 64 новых обучающих символа; GPU training и
+8192-символьная validation прошли, test не прочитан.
+
+| Training GPU setup phase | wall-clock |
+|---|---:|
+| LLVM `llc -O0` | 8.726 c |
+| Translation audit | 1.155 c |
+| CUDA module load | 1.440 c |
+| `cuModuleGetFunction` resolution | 1.918 c |
+| Device allocations / initial H2D | 0.172 c |
+| Capture + graph instantiate | 0.404 c |
+| Полная подготовка `GpuEngine::prepare` | 13.875 c |
+| Общий compile+CUDA setup | 14.202 c |
+
+Предшествующая необъяснённая подготовка rank4/BPTT8 длилась
+391.979 с, но тогда не было пофазного профиля. Поэтому из
+пары запусков нельзя определить причину большого выброса;
+утверждать о доказанном эффекте прогрева CUDA-кеша рано.
+При обычной длительности основная стоимость в `llc`, а
+не в CUDA Graph instantiate. Для проверки повторяемости
+добавлен `task benchmark-torus16-v02-setup-stability`:
+три запуска в новых процессах с отдельными checkpoint
+и короткой validation **только для диагностики**.
+Подробности и ограничения: [V0.2_TRANSITION.md](V0.2_TRANSITION.md).

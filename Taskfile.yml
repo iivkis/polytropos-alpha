@@ -1177,6 +1177,40 @@ tasks:
         grep '^setup_compile_and_cuda_prepare_ms=' "$dir/fast.log"
         echo "Evidence: $dir"
 
+  benchmark-torus16-v02-setup-stability:
+    desc: Repeat BPTT8 CUDA setup across fresh processes, report phase spread and verify deterministic checkpoint bytes
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        base="${TORUS16_V02_SETUP_DIR:-target/torus16-v02-setup-stability}"
+        mkdir -p "$base"
+        export VERINEURAL_GPU_PREPARE_PROFILE=1
+        export TORUS16_V02_RANKS=4 TORUS16_V02_BPTTS=8
+        export TORUS16_V02_TRAIN_TOKENS=64 TORUS16_V02_VALIDATION_CHARS=64
+        for trial in 1 2 3; do
+          echo "CUDA setup reproducibility trial=$trial/3, role_delta_4 BPTT8, separate process"
+          TORUS16_V02_DIR="$base/trial$trial" task benchmark-torus16-v02-horizon >"$base/trial$trial.log" 2>&1 || {
+            tail -n 100 "$base/trial$trial.log"
+            exit 1
+          }
+          # Distinguish the training graph from the much smaller reused
+          # holdout graph. Report stages without collapsing them into one timer.
+          grep '^setup_compile_and_cuda_prepare_ms=' "$base/trial$trial.log"
+          grep '^gpu_nvptx_stage=.*artifact_dir=.*vn_ema4_bptt_' "$base/trial$trial.log"
+          grep '^gpu_prepare_phase=.*artifact_dir=.*vn_ema4_bptt_' "$base/trial$trial.log"
+          grep '^training_total_s=' "$base/trial$trial.log"
+          grep '^test_evaluation=SKIPPED ' "$base/trial$trial.log"
+          if [ "$trial" != 1 ]; then
+            cmp "$base/trial1/rank4-bptt8.ckpt" "$base/trial$trial/rank4-bptt8.ckpt"
+            cmp "$base/trial1/rank4-bptt8.best.ckpt" "$base/trial$trial/rank4-bptt8.best.ckpt"
+          fi
+        done
+        echo "PASS: checkpoint bits identical across three independent setup runs."
+        echo "DIAGNOSTIC ONLY: 64-char validation is not an architecture quality gate."
+        echo "Compare llc, cuda_module_load, kernel_resolution and graph_instantiate across trials."
+        echo "Logs: $base/trial1.log $base/trial2.log $base/trial3.log"
+
   benchmark-torus16-v02-horizon:
     desc: v0.2 transition gate - Role-Delta rank 4/8 x BPTT 4/8 with packed I/O and long validation
     deps: [prepare]
@@ -1197,11 +1231,18 @@ tasks:
           echo "TORUS16_V02_TRAIN_TOKENS must be 8..32768 and divisible by 8" >&2
           exit 1
         fi
+        # Long-validation acceptance remains the default. A 64-character
+        # diagnostic mode is useful only for compiler/setup profiling.
+        validation_chars="${TORUS16_V02_VALIDATION_CHARS:-8192}"
+        case "$validation_chars" in
+          64|8192) ;;
+          *) echo "TORUS16_V02_VALIDATION_CHARS must be 64 (setup smoke) or 8192 (acceptance)" >&2; exit 1 ;;
+        esac
         out="${TORUS16_V02_DIR:-target/torus16-v02-horizon}"
         mkdir -p "$out"
         export TORUS16_WARM_START_SHARED="$source"
         export TORUS16_ROLE_INIT=matched TORUS16_MATRIX_SEED=0 TORUS16_DELTA_SCALE=1
-        export TORUS16_VAL_LIMIT=8192 TORUS16_TEST_LIMIT=8192
+        export TORUS16_VAL_LIMIT="$validation_chars" TORUS16_TEST_LIMIT=8192
         export TORUS16_SKIP_TEST=1 TORUS16_SKIP_FUSION_BASELINE=1
         export TORUS16_REUSE_HOLDOUT=1 TORUS16_METRIC_EVERY=16
         export TORUS16_LLC_OPT=0 TORUS16_THREADS_PER_BLOCK=256 TORUS16_FRESH=1
@@ -1224,7 +1265,7 @@ tasks:
             # Evaluate only after the same number of trained characters.
             export TORUS16_EVAL_EVERY="$windows"
             label="rank$rank-bptt$bptt"
-            echo "v0.2 gate $label training_characters=$train_tokens windows=$windows validation_characters=8192"
+            echo "v0.2 gate $label training_characters=$train_tokens windows=$windows validation_characters=$validation_chars"
             TORUS16_CHECKPOINT="$out/$label.ckpt" \
               cargo run --release -p torus16-mix-lab --example ema4_bptt >"$out/$label.log" 2>&1 || {
                 tail -n 100 "$out/$label.log"
@@ -1242,11 +1283,14 @@ tasks:
             grep '^training_d2h_profile_avg_ms .*packed=true' "$out/$label.log"
             grep '^training_profile_avg_ms ' "$out/$label.log" | tail -n 1
             grep '^training_total_s=' "$out/$label.log" | tail -n 1
-            grep '^holdout_reset_streaming_bpc=.*scored_characters=8192 ' "$out/$label.log" | tail -n 1
+            grep "^holdout_reset_streaming_bpc=.*scored_characters=$validation_chars " "$out/$label.log" | tail -n 1
             grep '^test_evaluation=SKIPPED ' "$out/$label.log" | tail -n 1
           done
         done
-        echo "PASS: selected long-validation runs completed, test withheld; no claims of architecture superiority."
+        echo "PASS: selected runs completed, validation_characters=$validation_chars, test withheld."
+        if [ "$validation_chars" != 8192 ]; then
+          echo "DIAGNOSTIC ONLY: validation is too short to rank architectures."
+        fi
         echo "Important: BPTT changes optimizer update count; different ranks/BPTT have different checkpoint identities."
         echo "Evidence and checkpoints: $out"
 
