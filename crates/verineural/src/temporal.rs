@@ -240,9 +240,7 @@ fn unroll_model_impl(
             let index = node.id.index();
             // Cache hits are permitted only for parameter-only nodes.
             // All other nodes follow exactly the historical builder path.
-            let new = if hoist_parameter_only
-                && let Some(reused) = cached_parameter_only[index]
-            {
+            let new = if hoist_parameter_only && let Some(reused) = cached_parameter_only[index] {
                 reused
             } else if matches!(node.operation, Operation::Input) {
                 let (name, role) = source_by_id

@@ -109,7 +109,6 @@ fn temporal_gpu_vjp_matches_hand_derived_gradient() {
     assert!((values[2].1.values()[0] - 2.25).abs() < 1e-5);
 }
 
-
 // Pure parameter expressions need only one materialization per BPTT window.
 // The state-dependent graph must still be rebuilt and differentiated per step.
 fn invariant_recurrent() -> Model {

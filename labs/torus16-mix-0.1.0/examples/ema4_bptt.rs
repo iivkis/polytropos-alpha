@@ -370,7 +370,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     println!(
         "temporal_parameter_only_hoisting={} temporal_ir_nodes={}",
-        if hoist_parameter_only { "enabled" } else { "disabled" },
+        if hoist_parameter_only {
+            "enabled"
+        } else {
+            "disabled"
+        },
         window.graph().nodes().len(),
     );
     let named_parameter = window.parameters();
