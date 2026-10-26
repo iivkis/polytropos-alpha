@@ -1200,18 +1200,30 @@ tasks:
             tail -n 100 "$base/$mode.log"
             exit 1
           }
-          grep '^gpu_allocation_mode=' "$base/$mode.log" | head -n 1
-          grep '^gpu_prepare_allocations .*artifact_dir=.*vn_ema4_bptt_' "$base/$mode.log"
-          grep '^gpu_prepare_phase=.*artifact_dir=.*vn_ema4_bptt_' "$base/$mode.log"
-          grep '^setup_compile_and_cuda_prepare_ms=' "$base/$mode.log"
-          grep '^training_total_s=' "$base/$mode.log"
-          grep '^test_evaluation=SKIPPED ' "$base/$mode.log"
+          # The nested task prints only a summary. Allocation details
+          # exist in the raw training log, not in the nested task stdout.
+          raw="$base/$mode/rank4-bptt8.log"
+          if [ ! -s "$raw" ]; then
+            echo "Missing raw training log: $raw" >&2
+            exit 1
+          fi
+          grep -Fx "gpu_allocation_mode=$mode" "$raw" || {
+            echo "Unexpected GPU allocation mode in $raw" >&2
+            tail -n 100 "$raw"
+            exit 1
+          }
+          grep "^gpu_prepare_allocations mode=$mode .*artifact_dir=.*vn_ema4_bptt_" "$raw"
+          grep '^gpu_prepare_phase=.*artifact_dir=.*vn_ema4_bptt_' "$raw"
+          grep '^setup_compile_and_cuda_prepare_ms=' "$raw"
+          grep '^training_total_s=' "$raw"
+          grep '^test_evaluation=SKIPPED ' "$raw"
         done
         cmp "$base/separate/rank4-bptt8.ckpt" "$base/slab/rank4-bptt8.ckpt"
         cmp "$base/separate/rank4-bptt8.best.ckpt" "$base/slab/rank4-bptt8.best.ckpt"
         echo "PASS: slab and separate CUDA allocations preserve final/best checkpoint bits."
         echo "DIAGNOSTIC ONLY: 64-char validation must not be used to rank architecture quality."
-        echo "Logs: $base/separate.log $base/slab.log"
+        echo "Summary logs: $base/separate.log $base/slab.log"
+        echo "Raw GPU logs: $base/separate/rank4-bptt8.log $base/slab/rank4-bptt8.log"
 
   benchmark-torus16-v02-setup-stability:
     desc: Repeat BPTT8 CUDA setup across fresh processes, report phase spread and verify deterministic checkpoint bytes
