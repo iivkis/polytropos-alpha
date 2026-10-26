@@ -2896,7 +2896,8 @@ impl GpuExecution {
             .map(|(_, shape, address)| (*address, shape.element_count()))
             .collect::<Vec<_>>();
         let transfer = if packed {
-            self.session.copy_f32_batch_to_host_packed_profiled(&buffers)
+            self.session
+                .copy_f32_batch_to_host_packed_profiled(&buffers)
         } else {
             self.session.copy_f32_batch_to_host_profiled(&buffers)
         };

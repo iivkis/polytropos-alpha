@@ -958,7 +958,10 @@ DONE:
             std::mem::swap(&mut self.feedback_graph, &mut self.readback_graph);
             std::mem::swap(&mut self.feedback_graph_exec, &mut self.readback_graph_exec);
             std::mem::swap(&mut self.feedback_plan, &mut self.readback_plan);
-            std::mem::swap(&mut self.feedback_descriptors, &mut self.readback_descriptors);
+            std::mem::swap(
+                &mut self.feedback_descriptors,
+                &mut self.readback_descriptors,
+            );
             std::mem::swap(
                 &mut self.feedback_descriptor_capacity,
                 &mut self.readback_descriptor_capacity,
@@ -968,7 +971,10 @@ DONE:
                 &mut self.feedback_descriptor_capacity,
                 &mut self.readback_descriptor_capacity,
             );
-            std::mem::swap(&mut self.feedback_descriptors, &mut self.readback_descriptors);
+            std::mem::swap(
+                &mut self.feedback_descriptors,
+                &mut self.readback_descriptors,
+            );
             std::mem::swap(&mut self.feedback_plan, &mut self.readback_plan);
             std::mem::swap(&mut self.feedback_graph_exec, &mut self.readback_graph_exec);
             std::mem::swap(&mut self.feedback_graph, &mut self.readback_graph);
@@ -1143,10 +1149,7 @@ DONE:
                     .ok_or(GpuError::UnsupportedSize { elements })?;
             }
             if total_elements == 0 {
-                return Ok((
-                    vec![Vec::new(); transfers.len()],
-                    CudaD2hTiming::default(),
-                ));
+                return Ok((vec![Vec::new(); transfers.len()], CudaD2hTiming::default()));
             }
             let bytes = total_elements
                 .checked_mul(std::mem::size_of::<f32>())

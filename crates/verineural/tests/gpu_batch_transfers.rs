@@ -42,9 +42,8 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
     assert!(empty.is_empty());
     assert_eq!(empty_profile.bytes, 0);
     assert_eq!(empty_profile.transfers, 0);
-    let (packed_empty, packed_empty_profile) = gpu
-        .read_outputs_selected_packed_profiled(&[])
-        .unwrap();
+    let (packed_empty, packed_empty_profile) =
+        gpu.read_outputs_selected_packed_profiled(&[]).unwrap();
     assert!(packed_empty.is_empty());
     assert_eq!(packed_empty_profile.transfers, 0);
     assert_eq!(old[0].0, sum);
