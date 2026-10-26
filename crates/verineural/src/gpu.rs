@@ -595,6 +595,9 @@ pub struct GpuProgram {
     live_nodes: Vec<usize>,
     source_inputs: Vec<NodeId>,
     llvm_ir: String,
+    // Each live kernel node resolves to the first identical generated function.
+    // The graph retains distinct nodes, buffers, arguments and dependencies.
+    kernel_entries: BTreeMap<usize, usize>,
     launch: GpuLaunchConfig,
     // Relu index -> exclusive immediate producer index.
     fused_relus: BTreeMap<usize, usize>,
@@ -642,6 +645,18 @@ impl GpuProgram {
     /// selected outputs depend on it. Zero-copy Reshape retains its alias.
     pub fn kernel_count(&self) -> Result<usize, GpuError> {
         Ok(self.memory_contracts()?.len())
+    }
+
+    /// Number of distinct compiled NVPTX functions, not CUDA Graph launches.
+    /// Identical code templates share an entrypoint but never share arguments
+    /// or output storage. The physical graph still has `kernel_count()` nodes.
+    pub fn unique_kernel_count(&self) -> usize {
+        self.kernel_entries.values().copied().collect::<BTreeSet<_>>().len()
+    }
+
+    /// Function owner for a launched Semantic IR producer (not an alias).
+    pub fn kernel_entry(&self, node: usize) -> Option<usize> {
+        self.kernel_entries.get(&node).copied()
     }
 
     /// Conservative pre-JIT size of graph tensor allocations, in bytes.
@@ -1371,6 +1386,7 @@ impl GpuProgram {
             };
             kernels.push(TranslationKernel {
                 node: contract.kernel_node,
+                entry_node: self.kernel_entries[&contract.kernel_node],
                 kind,
                 reads: contract.reads,
                 writes: contract.writes,
@@ -3594,6 +3610,8 @@ impl GpuEngine {
              declare i32 @llvm.nvvm.read.ptx.sreg.ctaid.x()\n\
              declare i32 @llvm.nvvm.read.ptx.sreg.ntid.x()\n\n",
         );
+        let mut specializations = BTreeMap::<String, usize>::new();
+        let mut kernel_entries = BTreeMap::new();
         for &index in &live_nodes {
             let node = &graph.nodes()[index];
             if matches!(node.operation, Operation::Input)
@@ -3602,8 +3620,9 @@ impl GpuEngine {
             {
                 continue;
             }
+            let mut body = String::new();
             if let Some(&earlier) = fused_dual_outputs.get(&index) {
-                llvm_ir.push_str(&dual_pointwise_kernel_ir(
+                body.push_str(&dual_pointwise_kernel_ir(
                     index,
                     matches!(graph.nodes()[earlier].operation, Operation::Mul),
                     matches!(node.operation, Operation::Mul),
@@ -3611,7 +3630,7 @@ impl GpuEngine {
             } else if let Some(&(_, _, _, reused, right_slot, left_slot)) =
                 fused_mul_diamond_adds.get(&index)
             {
-                llvm_ir.push_str(&mul_diamond_add_kernel_ir(
+                body.push_str(&mul_diamond_add_kernel_ir(
                     index,
                     reused,
                     right_slot == 1,
@@ -3620,18 +3639,18 @@ impl GpuEngine {
             } else if let Some(&(_, _, _, reused, middle_slot, add_slot)) =
                 fused_mul_mul_add_divs.get(&index)
             {
-                llvm_ir.push_str(&mul_mul_add_div_kernel_ir(
+                body.push_str(&mul_mul_add_div_kernel_ir(
                     index,
                     reused,
                     middle_slot == 1,
                     add_slot == 1,
                 ));
             } else if let Some(&(_, _, slot)) = fused_sqrt_add_divs.get(&index) {
-                llvm_ir.push_str(&sqrt_add_div_kernel_ir(index, slot == 1));
+                body.push_str(&sqrt_add_div_kernel_ir(index, slot == 1));
             } else if let Some(&(_, _, add_slot, outer_slot, reuse)) =
                 fused_mul_add_muls.get(&index)
             {
-                llvm_ir.push_str(&mul_add_mul_kernel_ir(
+                body.push_str(&mul_add_mul_kernel_ir(
                     index,
                     add_slot == 1,
                     outer_slot == 1,
@@ -3639,9 +3658,9 @@ impl GpuEngine {
                 ));
             } else if let Some(&(mul, slot)) = fused_mul_adds.get(&index) {
                 debug_assert!(matches!(graph.nodes()[mul].operation, Operation::Mul));
-                llvm_ir.push_str(&mul_add_kernel_ir(index, slot == 1));
+                body.push_str(&mul_add_kernel_ir(index, slot == 1));
             } else if let Some(&(producer, slot)) = fused_binary_pairs.get(&index) {
-                llvm_ir.push_str(&binary_chain_kernel_ir(
+                body.push_str(&binary_chain_kernel_ir(
                     index,
                     matches!(graph.nodes()[producer].operation, Operation::Add),
                     matches!(node.operation, Operation::Add),
@@ -3650,7 +3669,7 @@ impl GpuEngine {
             } else if let Some(chain) = fused_pointwise_chains.get(&index) {
                 let inner = &graph.nodes()[chain[0]];
                 let bias_add = &graph.nodes()[chain[1]];
-                llvm_ir.push_str(&pointwise_chain_kernel_ir(
+                body.push_str(&pointwise_chain_kernel_ir(
                     index,
                     &inner.operation,
                     bias_add.shape.dims()[1],
@@ -3662,10 +3681,10 @@ impl GpuEngine {
                 } else {
                     0
                 };
-                llvm_ir.push_str(&kernel_ir(index, &first.operation, columns, true));
+                body.push_str(&kernel_ir(index, &first.operation, columns, true));
             } else if matches!(node.operation, Operation::MatMul) {
                 let left = &graph.nodes()[node.inputs[0].index()];
-                llvm_ir.push_str(&matmul_kernel_ir(
+                body.push_str(&matmul_kernel_ir(
                     index,
                     left.shape.dims()[1],
                     node.shape.dims()[1],
@@ -3680,7 +3699,7 @@ impl GpuEngine {
                                 operation: node.operation.name(),
                             });
                         }
-                        llvm_ir.push_str(&transpose2d_kernel_ir(
+                        body.push_str(&transpose2d_kernel_ir(
                             index,
                             input.shape.dims()[0],
                             input.shape.dims()[1],
@@ -3694,7 +3713,7 @@ impl GpuEngine {
                                 operation: node.operation.name(),
                             });
                         }
-                        llvm_ir.push_str(&reverse2d_kernel_ir(
+                        body.push_str(&reverse2d_kernel_ir(
                             index,
                             input.shape.dims()[0],
                             input.shape.dims()[1],
@@ -3712,10 +3731,10 @@ impl GpuEngine {
                             .push_str(&concat_axis0_kernel_ir(index, left.shape.element_count()));
                     }
                     Operation::SliceAxis { axis: 1, start, .. } => {
-                        llvm_ir.push_str(&slice_last_row_kernel_ir(index, *start));
+                        body.push_str(&slice_last_row_kernel_ir(index, *start));
                     }
                     Operation::BroadcastTo(_) => {
-                        llvm_ir.push_str(&broadcast_scalar_kernel_ir(index));
+                        body.push_str(&broadcast_scalar_kernel_ir(index));
                     }
                     Operation::ArgMax {
                         axis: 1,
@@ -3728,10 +3747,10 @@ impl GpuEngine {
                                 operation: node.operation.name(),
                             });
                         }
-                        llvm_ir.push_str(&argmax_last_kernel_ir(index, input.shape.dims()[1]));
+                        body.push_str(&argmax_last_kernel_ir(index, input.shape.dims()[1]));
                     }
                     Operation::Take { axis: 0 } => {
-                        llvm_ir.push_str(&take_axis0_kernel_ir(index, node.shape.element_count()));
+                        body.push_str(&take_axis0_kernel_ir(index, node.shape.element_count()));
                     }
                     Operation::Permute { .. }
                     | Operation::Concat { .. }
@@ -3749,9 +3768,24 @@ impl GpuEngine {
                         } else {
                             0
                         };
-                        llvm_ir.push_str(&kernel_ir(index, &node.operation, columns, false));
+                        body.push_str(&kernel_ir(index, &node.operation, columns, false));
                     }
                 }
+            }
+            // The generated LLVM body, including its ABI, exact FP32
+            // instructions and shape-dependent constants, defines the key.
+            // Only the synthetic function name is excluded. No heuristic
+            // merging of merely similar graph operations is permitted.
+            let name = format!("define ptx_kernel void @vn_node_{index}(");
+            let signature = body.strip_prefix(&name).ok_or(GpuError::Fp32PtxRejected {
+                reason: format!("generated kernel {index} lacks expected LLVM entrypoint"),
+            })?;
+            if let Some(&owner) = specializations.get(signature) {
+                kernel_entries.insert(index, owner);
+            } else {
+                specializations.insert(signature.to_owned(), index);
+                kernel_entries.insert(index, index);
+                llvm_ir.push_str(&body);
             }
         }
         let program = GpuProgram {
@@ -3761,6 +3795,7 @@ impl GpuEngine {
             live_nodes,
             source_inputs,
             llvm_ir,
+            kernel_entries,
             launch: self.launch,
             fused_relus,
             fused_pointwise_chains,
@@ -3821,6 +3856,13 @@ impl GpuEngine {
             );
         }
         let audit_started = Instant::now();
+        if profile {
+            eprintln!(
+                "gpu_nvptx_stage=intern graph_kernels={} unique_functions={}",
+                program.kernel_count()?,
+                program.unique_kernel_count()
+            );
+        }
         // Translation validation must succeed before the PTX reaches CUDA JIT.
         // The generated plan is derived from Semantic IR and fusion/memory
         // contracts, while the report is checked from both emitted artifacts.
@@ -4041,14 +4083,20 @@ impl GpuEngine {
         let has_graph = kernel_count > 0;
         if has_graph {
             let phase_started = Instant::now();
-            for contract in &contracts {
-                session.prepare_kernel(&format!("vn_node_{}", contract.kernel_node))?;
+            for entry in program
+                .kernel_entries
+                .values()
+                .copied()
+                .collect::<BTreeSet<_>>()
+            {
+                session.prepare_kernel(&format!("vn_node_{entry}"))?;
             }
             report("kernel_resolution", phase_started);
             let phase_started = Instant::now();
             session.begin_graph()?;
             for contract in &contracts {
                 let index = contract.kernel_node;
+                let entry = program.kernel_entries[&index];
                 let inputs = contract
                     .reads
                     .iter()
@@ -4062,7 +4110,7 @@ impl GpuEngine {
                         });
                     }
                     session.launch4_dual(
-                        &format!("vn_node_{index}"),
+                        &format!("vn_node_{entry}"),
                         [inputs[0], inputs[1], inputs[2], inputs[3]],
                         [buffers[&other], buffers[&index]],
                         contract.writes,
@@ -4070,7 +4118,7 @@ impl GpuEngine {
                     )?;
                 } else if inputs.len() == 4 {
                     session.launch4(
-                        &format!("vn_node_{index}"),
+                        &format!("vn_node_{entry}"),
                         [inputs[0], inputs[1], inputs[2], inputs[3]],
                         buffers[&index],
                         contract.writes,
@@ -4078,7 +4126,7 @@ impl GpuEngine {
                     )?;
                 } else if inputs.len() == 3 {
                     session.launch3(
-                        &format!("vn_node_{index}"),
+                        &format!("vn_node_{entry}"),
                         [inputs[0], inputs[1], inputs[2]],
                         buffers[&index],
                         contract.writes,
@@ -4086,7 +4134,7 @@ impl GpuEngine {
                     )?;
                 } else {
                     session.launch(
-                        &format!("vn_node_{index}"),
+                        &format!("vn_node_{entry}"),
                         inputs[0],
                         inputs.get(1).copied().unwrap_or(0),
                         buffers[&index],

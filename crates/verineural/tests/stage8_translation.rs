@@ -7,10 +7,14 @@ use verineural::{
 /// llc or CUDA. Actual NVPTX assembly is exercised by the Stage 8 example.
 fn synthetic_ptx(plan: &TranslationPlan) -> String {
     let mut ptx = ".version 7.0\n.target sm_52\n.address_size 64\n".to_owned();
+    let mut emitted = std::collections::BTreeSet::new();
     for kernel in &plan.kernels {
+        if !emitted.insert(kernel.entry_node) {
+            continue;
+        }
         ptx.push_str(&format!(
             ".visible .entry vn_node_{}(\n)\n{{\n",
-            kernel.node
+            kernel.entry_node
         ));
         let (adds, muls) = match kernel.kind {
             TranslationKind::Add

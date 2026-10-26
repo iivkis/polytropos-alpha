@@ -4,7 +4,7 @@
 //! Unknown kernels, missing entries, changed FP32 operation sequences, shapes,
 //! address templates or rounding modes fail closed. CUDA JIT/SASS stays trusted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::gpu::audit_fp32_ptx;
@@ -375,6 +375,9 @@ impl TranslationKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranslationKernel {
     pub node: usize,
+    /// First producer using this exact LLVM/PTX function specialization.
+    /// Separate graph nodes keep their own buffer extents and launch args.
+    pub entry_node: usize,
     pub kind: TranslationKind,
     pub reads: Vec<(usize, usize)>,
     pub writes: usize,
@@ -508,11 +511,24 @@ impl TranslationPlan {
             return Err(invalid("unsupported CUDA launch width in translation plan"));
         }
         let mut previous = None;
+        let mut seen_entries = BTreeSet::new();
         for kernel in &self.kernels {
             if previous.is_some_and(|n| kernel.node <= n) {
                 return Err(invalid("kernel roots not strictly ordered"));
             }
             previous = Some(kernel.node);
+            if kernel.entry_node > kernel.node
+                || (kernel.entry_node != kernel.node
+                    && !seen_entries.contains(&kernel.entry_node))
+            {
+                return Err(invalid(format!(
+                    "kernel {} references unknown or future entry {}",
+                    kernel.node, kernel.entry_node
+                )));
+            }
+            if kernel.entry_node == kernel.node {
+                seen_entries.insert(kernel.node);
+            }
             if kernel.writes == 0
                 || kernel.writes > i32::MAX as usize
                 || kernel.reads.len() != kernel.kind.expected_inputs()
@@ -676,7 +692,7 @@ impl TranslationPlan {
     /// Deterministic, versioned plan. Generated from a graph, never from PTX.
     pub fn to_text(&self) -> String {
         let mut out = format!(
-            "vn-translation-plan-v1\nthreads={}\n",
+            "vn-translation-plan-v2\nthreads={}\n",
             self.threads_per_block
         );
         for kernel in &self.kernels {
@@ -687,8 +703,9 @@ impl TranslationPlan {
                 .collect::<Vec<_>>()
                 .join(",");
             out.push_str(&format!(
-                "kernel\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "kernel\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 kernel.node,
+                kernel.entry_node,
                 kernel.kind.name(),
                 kernel.writes,
                 reads,
@@ -703,9 +720,13 @@ impl TranslationPlan {
     /// The saved plan is SHA-pinned evidence, NOT by itself a semantic proof.
     pub fn from_text(source: &str) -> Result<Self, TranslationError> {
         let mut lines = source.lines();
-        if lines.next() != Some("vn-translation-plan-v1") {
-            return Err(invalid("unsupported translation plan version"));
-        }
+        // Version 1 artifacts had one physical entrypoint per graph node.
+        // Version 2 records each node's function owner explicitly.
+        let legacy = match lines.next() {
+            Some("vn-translation-plan-v1") => true,
+            Some("vn-translation-plan-v2") => false,
+            _ => return Err(invalid("unsupported translation plan version")),
+        };
         let threads_per_block = lines
             .next()
             .and_then(|line| line.strip_prefix("threads="))
@@ -714,7 +735,7 @@ impl TranslationPlan {
         let mut kernels = Vec::new();
         for line in lines {
             let fields = line.split('\t').collect::<Vec<_>>();
-            if fields.len() != 7 || fields[0] != "kernel" {
+            if fields.len() != (if legacy { 7 } else { 8 }) || fields[0] != "kernel" {
                 return Err(invalid("malformed translation kernel row"));
             }
             let number = |field: &str| -> Result<usize, TranslationError> {
@@ -723,8 +744,10 @@ impl TranslationPlan {
                     .map_err(|_| invalid("invalid translation integer"))
             };
             let node = number(fields[1])?;
-            let writes = number(fields[3])?;
-            let reads = fields[4]
+            let entry_node = if legacy { node } else { number(fields[2])? };
+            let offset = usize::from(!legacy);
+            let writes = number(fields[3 + offset])?;
+            let reads = fields[4 + offset]
                 .split(',')
                 .map(|pair| {
                     let (source, count) = pair
@@ -733,11 +756,12 @@ impl TranslationPlan {
                     Ok((number(source)?, number(count)?))
                 })
                 .collect::<Result<Vec<_>, TranslationError>>()?;
-            let columns = number(fields[5])?;
-            let inner = number(fields[6])?;
-            let kind = TranslationKind::parse(fields[2], columns, inner)?;
+            let columns = number(fields[5 + offset])?;
+            let inner = number(fields[6 + offset])?;
+            let kind = TranslationKind::parse(fields[2 + offset], columns, inner)?;
             kernels.push(TranslationKernel {
                 node,
+                entry_node,
                 kind,
                 reads,
                 writes,
@@ -818,10 +842,18 @@ impl TranslationPlan {
                     .push_str(&format!("{raw_line}\n"));
             }
         }
-        if llvm_parts.len() != self.kernels.len() || ptx_parts.len() != self.kernels.len() {
+        let expected_entries = self
+            .kernels
+            .iter()
+            .map(|kernel| kernel.entry_node)
+            .collect::<BTreeSet<_>>();
+        if llvm_parts.keys().copied().collect::<BTreeSet<_>>() != expected_entries
+            || ptx_parts.keys().copied().collect::<BTreeSet<_>>() != expected_entries
+        {
             return Err(invalid(format!(
-                "kernel set mismatch: semantic={}, LLVM={}, PTX={}",
+                "kernel entry set mismatch: semantic nodes={}, distinct entries={}, LLVM={}, PTX={}",
                 self.kernels.len(),
+                expected_entries.len(),
                 llvm_parts.len(),
                 ptx_parts.len()
             )));
@@ -836,12 +868,13 @@ impl TranslationPlan {
         };
         for kernel in &self.kernels {
             let node = kernel.node;
+            let entry = kernel.entry_node;
             let ir = llvm_parts
-                .get(&node)
-                .ok_or_else(|| invalid(format!("LLVM kernel {node} missing")))?;
+                .get(&entry)
+                .ok_or_else(|| invalid(format!("LLVM entry {entry} for node {node} missing")))?;
             let asm = ptx_parts
-                .get(&node)
-                .ok_or_else(|| invalid(format!("PTX kernel {node} missing")))?;
+                .get(&entry)
+                .ok_or_else(|| invalid(format!("PTX entry {entry} for node {node} missing")))?;
             let (add, mul, relu) = kernel.kind.counts();
             let structural_requirements: Option<Vec<String>> = match kernel.kind {
                 TranslationKind::Transpose2D { rows, columns } => Some(vec![
@@ -1717,6 +1750,7 @@ mod tests {
             threads_per_block: 256,
             kernels: vec![TranslationKernel {
                 node: 2,
+                entry_node: 2,
                 kind: TranslationKind::MulBiasRelu { columns: 1 },
                 reads: vec![(0, 1), (1, 1), (1, 1)],
                 writes: 1,
@@ -1728,6 +1762,7 @@ mod tests {
             threads_per_block: 128,
             kernels: vec![TranslationKernel {
                 node: 1,
+                entry_node: 1,
                 kind: TranslationKind::ReverseRows2D {
                     rows: 2,
                     columns: 3,
@@ -1739,10 +1774,14 @@ mod tests {
         let reverse_text = reverse.to_text();
         assert!(reverse_text.contains("reverse_rows2d\t6\t0:6\t3\t2"));
         assert_eq!(TranslationPlan::from_text(&reverse_text).unwrap(), reverse);
+        let legacy = reverse_text
+            .replace("vn-translation-plan-v2", "vn-translation-plan-v1")
+            .replace("kernel\t1\t1\t", "kernel\t1\t");
+        assert_eq!(TranslationPlan::from_text(&legacy).unwrap(), reverse);
 
         for invalid_text in [
             plan.to_text()
-                .replace("vn-translation-plan-v1", "vn-translation-plan-v0"),
+                .replace("vn-translation-plan-v2", "vn-translation-plan-v0"),
             plan.to_text().replace("mul_bias_relu", "unknown"),
             plan.to_text().replace("threads=256", "threads=0"),
             plan.to_text().replace("0:1", "3:1"),
