@@ -657,7 +657,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     .with_allocation_slab(gpu_allocation_slab);
     println!(
         "gpu_allocation_mode={}",
-        if gpu_allocation_slab { "slab" } else { "separate" }
+        if gpu_allocation_slab {
+            "slab"
+        } else {
+            "separate"
+        }
     );
     let holdout = HoldoutContext {
         engine: &engine,

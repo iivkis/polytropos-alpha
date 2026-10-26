@@ -195,7 +195,10 @@ fn slab_allocation_preserves_cuda_graph_outputs_and_packed_io() {
         .unwrap();
     let source = vec![
         (x, Tensor::from_slice(vec![4], &[1., 0., -3., 9.]).unwrap()),
-        (y, Tensor::from_slice(vec![4], &[2., -0., -4., 0.25]).unwrap()),
+        (
+            y,
+            Tensor::from_slice(vec![4], &[2., -0., -4., 0.25]).unwrap(),
+        ),
     ];
     let root = std::env::temp_dir().join(format!("vn_allocation_slab_{}", std::process::id()));
     let mut normal = ordinary_engine
@@ -206,13 +209,9 @@ fn slab_allocation_preserves_cuda_graph_outputs_and_packed_io() {
         .unwrap();
     for epoch in 0..3 {
         if epoch != 0 {
-            let x_values = Tensor::from_slice(
-                vec![4],
-                &[epoch as f32, -0., 0.125, -(epoch as f32)],
-            )
-            .unwrap();
-            let y_values =
-                Tensor::from_slice(vec![4], &[0.5, 7., -1., epoch as f32]).unwrap();
+            let x_values =
+                Tensor::from_slice(vec![4], &[epoch as f32, -0., 0.125, -(epoch as f32)]).unwrap();
+            let y_values = Tensor::from_slice(vec![4], &[0.5, 7., -1., epoch as f32]).unwrap();
             normal
                 .update_input_subset(&[(x, &x_values), (y, &y_values)])
                 .unwrap();

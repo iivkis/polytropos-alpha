@@ -3912,8 +3912,7 @@ impl GpuEngine {
             match (&node.operation, storage) {
                 (Operation::Input, _) => {
                     let value = given[&index];
-                    let ptr =
-                        allocate_node(&mut session, index, value.values().len())?;
+                    let ptr = allocate_node(&mut session, index, value.values().len())?;
                     session.copy_to_device(ptr, value.values())?;
                     input_addresses.insert(index, ptr);
                     buffers.insert(index, ptr);
@@ -3938,8 +3937,7 @@ impl GpuEngine {
                     | Operation::Pointwise(_),
                     NodeStorage::OwnedContiguous { .. },
                 ) => {
-                    let ptr =
-                        allocate_node(&mut session, index, node.shape.element_count())?;
+                    let ptr = allocate_node(&mut session, index, node.shape.element_count())?;
                     buffers.insert(index, ptr);
                 }
                 _ => unreachable!("the compilation pass rejected unsupported nodes"),
@@ -3947,14 +3945,14 @@ impl GpuEngine {
         }
 
         if profile {
-            let materialized_tensors = buffers
-                .values()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .len();
+            let materialized_tensors = buffers.values().copied().collect::<BTreeSet<_>>().len();
             eprintln!(
                 "gpu_prepare_allocations mode={} materialized_tensors={} cuda_allocations={} artifact_dir={}",
-                if self.allocation_slab { "slab" } else { "separate" },
+                if self.allocation_slab {
+                    "slab"
+                } else {
+                    "separate"
+                },
                 materialized_tensors,
                 if self.allocation_slab {
                     usize::from(materialized_tensors != 0)
