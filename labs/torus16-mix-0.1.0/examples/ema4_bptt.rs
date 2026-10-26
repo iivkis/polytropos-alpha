@@ -363,11 +363,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         Ok("0") | Err(std::env::VarError::NotPresent) => false,
         _ => return Err("TORUS16_HOIST_PARAMETER_ONLY must be 0 or 1".into()),
     };
+    let unroll_started = Instant::now();
     let window = if hoist_parameter_only {
         unroll_model_hoisted(&model, "logits", window_len)?
     } else {
         unroll_model(&model, "logits", window_len)?
     };
+    println!(
+        "setup_stage=temporal_unroll elapsed_ms={:.3}",
+        unroll_started.elapsed().as_secs_f64() * 1000.
+    );
     println!(
         "temporal_parameter_only_hoisting={} temporal_ir_nodes={}",
         if hoist_parameter_only {
@@ -390,6 +395,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .collect::<Result<Vec<_>, _>>()?;
     // Graph-provided CE cotangents are terminal VJP adjoints, not
     // differentiated as ordinary logits functions (no spurious Hessian).
+    let reverse_build_started = Instant::now();
     let mut train_graph = window.graph().clone();
     let ones_id = train_graph.input(Shape::new(vec![vocab, 1])?, Domain::Finite);
     let scale_id = train_graph.input(Shape::new(vec![1, 1])?, Domain::Finite);
@@ -421,6 +427,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .ok_or("missing differentiated parameter")
         })
         .collect::<Result<Vec<_>, _>>()?;
+    println!(
+        "setup_stage=loss_seed_and_reverse_ad elapsed_ms={:.3}",
+        reverse_build_started.elapsed().as_secs_f64() * 1000.
+    );
     let gpu_adamw_requested = std::env::var_os("TORUS16_GPU_ADAMW").is_some();
     // Explicit, checkpointed fine-tuning experiment. Do not change the
     // established 0.002 baseline or silently reset AdamW moments/steps.
@@ -687,8 +697,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
         )
     };
+    println!(
+        "setup_stage=before_fused_compile elapsed_ms={:.3}",
+        compile_clock.elapsed().as_secs_f64() * 1000.
+    );
+    let codegen_started = Instant::now();
     let program = engine.compile_outputs(&execution_graph, &selected)?;
     let new_kernels = program.kernel_count()?;
+    println!(
+        "setup_stage=fused_compile elapsed_ms={:.3}",
+        codegen_started.elapsed().as_secs_f64() * 1000.
+    );
     if let Some(old) = old_kernels {
         if new_kernels > old {
             return Err("experimental pointwise fusion unexpectedly increased kernel count".into());
@@ -816,7 +835,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The unfused program is no longer needed after optional parity/replay.
     // Drop its large LLVM/IR metadata before materializing the fused CUDA Graph.
     drop(baseline_program);
+    let cuda_prepare_started = Instant::now();
     let mut gpu = engine.prepare(&program, &supplied, &artifact)?;
+    println!(
+        "setup_stage=cuda_prepare elapsed_ms={:.3}",
+        cuda_prepare_started.elapsed().as_secs_f64() * 1000.
+    );
     if fresh {
         let stale_best = checkpoint_path.with_extension("best.ckpt");
         if stale_best.exists() {

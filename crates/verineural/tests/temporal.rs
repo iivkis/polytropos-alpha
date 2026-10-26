@@ -139,8 +139,15 @@ fn temporal_parameter_only_hoisting_reuses_immutable_nodes_but_not_states() {
             .filter(|node| matches!(node.operation, Operation::Permute { .. }))
             .count()
     };
-    assert_eq!(count_permute(baseline.graph()), 4);
-    assert_eq!(count_permute(optimized.graph()), 1);
+    // Each timestep also appends one transpose for the dot-product
+    // objective. Hoisting removes only the four repeated W transposes,
+    // reducing those to one; objective transposes must remain per-step.
+    assert_eq!(count_permute(baseline.graph()), 8);
+    assert_eq!(count_permute(optimized.graph()), 5);
+    assert_eq!(
+        count_permute(baseline.graph()) - count_permute(optimized.graph()),
+        3
+    );
     assert_eq!(
         baseline.graph().nodes().len() - optimized.graph().nodes().len(),
         6, // Three redundant transposes and three redundant bias products.

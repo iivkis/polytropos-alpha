@@ -1212,6 +1212,7 @@ tasks:
             }
           grep '^temporal_parameter_only_hoisting=' "$out/$mode.log" | tail -n 1
           grep '^cuda_graph_baseline=SKIPPED ' "$out/$mode.log" | tail -n 1
+          grep '^setup_stage=' "$out/$mode.log"
           grep '^setup_compile_and_cuda_prepare_ms=' "$out/$mode.log" | tail -n 1
           grep '^training_profile_avg_ms ' "$out/$mode.log" | tail -n 1
           grep '^training_total_s=' "$out/$mode.log" | tail -n 1

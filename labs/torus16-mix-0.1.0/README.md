@@ -909,3 +909,45 @@ checkpoint в `target/torus16-role-delta-hoist-benchmark/`,
 `training_profile_avg_ms`, `training_tokens_per_second`,
 validation BPC и setup time. Test split не читается.
 Это сравнительный benchmark, а не гарантия ускорения.
+
+
+### Проверка 26.10.2026: выигрыш обучения и сильный регресс времени подготовки
+
+Локальный прогон `task benchmark-torus16-role-delta-hoisting` (256 окон,
+rank 4, BPTT=4, CPU AdamW) показал:
+
+| Метрика | Обычный unroll | Hoisted |
+|---|---:|---:|
+| IR nodes | 7 510 | 7 279 |
+| CUDA Graph kernels | 16 239 | 15 865 |
+| training tokens/s | 157.30 | 178.73 |
+| GPU graph replay (среднее на окно), мс | 14.0116 | 13.9073 |
+| setup_compile_and_cuda_prepare_ms | 7 371.357 | 136 941.902 |
+| best validation BPC (64 символа) | 1.970608 | 1.970608 |
+
+Итак, end-to-end *training-loop* скорость выше на ~13.6%, но чистое
+исполнение CUDA Graph быстрее всего на ~0.7%. Разница в D2H/H2D
+в одном двухпрогонном benchmark может зависеть от условий выполнения,
+поэтому утверждение о стабильном ускорении требует повторов.
+Для коротких экспериментов hoisting в текущем измерении **сильно
+хуже по общему wall-clock**. Причина 136.9 с из прежней сводной
+метрики неизвестна: она включает несколько стадий и не доказывает
+регресс именно NVPTX.
+
+Для локализации затрат теперь печатаются отдельные
+`setup_stage=temporal_unroll`, `loss_seed_and_reverse_ad`,
+`before_fused_compile` (накопленное с начала setup),
+`fused_compile` и `cuda_prepare` (все значения в мс).
+`task benchmark-torus16-role-delta-hoisting` выводит эти строки.
+Эти таймеры не включают отдельную системную компиляцию Rust через Cargo.
+Следует сравнивать несколько повторов, желательно чередовать порядок
+baseline/hoisted; не принимать загрузку GPU за доказательство.
+
+Структурный unit test был исправлен: в четырёхшаговом примере
+4 дополнительных `Permute` относятся к целевой скалярной функции
+`dot(output, cotangent)`; они остаются и в hoisted. Итого
+обычный unroll содержит 8 `Permute`, hoisted 5, экономия 3,
+и 6 IR-узлов всего. GPU forward/VJP parity уже была успешно
+пройдена в пользовательском NVIDIA прогоне; структурный тест после
+исправления нужно повторить. Формальных гарантий GPU FP32/SASS
+сверх предыдущего уровня нет.
