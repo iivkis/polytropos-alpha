@@ -1184,6 +1184,83 @@ tasks:
         grep '^setup_compile_and_cuda_prepare_ms=' "$dir/fast.log"
         echo "Evidence: $dir"
 
+  profile-torus16-bptt16-interning:
+    desc: CPU BPTT16 preflight; opt-in NVIDIA BPTT8/BPTT16 JIT and synchronized CUDA Graph probes (no training)
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        gpu="${TORUS16_PROFILE_RUN_GPU:-0}"
+        case "$gpu" in 0|1) ;; *) echo "TORUS16_PROFILE_RUN_GPU must be 0 or 1" >&2; exit 1 ;; esac
+        out="${TORUS16_PROFILE_BPTT_DIR:-target/torus16-bptt16-interning}"
+        mkdir -p "$out"
+        cargo test -p torus16-mix-lab --example ema4_bptt bptt16_budget_tests -- --nocapture
+        # No warm-start, training, validation, test, or checkpoint mutation.
+        unset TORUS16_WARM_START_SHARED TORUS16_CORPUS TORUS16_GPU_ADAMW
+        unset TORUS16_VERIFY_FUSION TORUS16_BENCH_COMPARE TORUS16_BENCH_FUSED
+        unset TORUS16_GPU_FEEDBACK_EVENTS TORUS16_LR_DECAY_5X
+        export TORUS16_MATRIX_MODE=role_delta_4 TORUS16_ROLE_INIT=matched TORUS16_MATRIX_SEED=0
+        export TORUS16_HOIST_PARAMETER_ONLY=1 TORUS16_SKIP_FUSION_BASELINE=1
+        export TORUS16_FRESH=1 TORUS16_TRAIN_WINDOWS=1 TORUS16_SKIP_TEST=1
+        export TORUS16_VAL_LIMIT=64 TORUS16_TEST_LIMIT=64
+        export TORUS16_EVAL_EVERY=1 TORUS16_CHECKPOINT_EVERY=1
+        export TORUS16_METRIC_EVERY=1 TORUS16_LLC_OPT=0
+        export TORUS16_BPTT16_MAX_TENSOR_MIB=512
+        export TORUS16_BPTT16_MAX_UNIQUE_KERNELS=4096
+        export VERINEURAL_GPU_PREPARE_PROFILE=1
+        export TORUS16_BPTT=16 TORUS16_BPTT16_PREFLIGHT_ONLY=1
+        unset TORUS16_BPTT16_ENABLE_SLOW_JIT
+        # Preflight never calls LLVM llc or CUDA, even when the budget fails.
+        TORUS16_CHECKPOINT="$out/never-written-bptt16.ckpt" \
+          cargo run --release -p torus16-mix-lab --example ema4_bptt >"$out/bptt16-preflight.log" 2>&1 || {
+            tail -n 80 "$out/bptt16-preflight.log"; exit 1;
+          }
+        grep '^gpu_compilation_inventory bptt=16 ' "$out/bptt16-preflight.log"
+        grep '^bptt16_resource_preflight ' "$out/bptt16-preflight.log"
+        grep -F 'bptt16_preflight_only=PASS cuda_jit=SKIPPED gpu_graph=NOT_CREATED training=SKIPPED validation=SKIPPED test=SKIPPED' "$out/bptt16-preflight.log"
+        if grep -Eq '^(gpu_nvptx_stage=|gpu_prepare_phase=|setup_probe=|training_total_s=)' "$out/bptt16-preflight.log"; then
+          echo "FAIL: preflight entered GPU work or training" >&2; exit 1
+        fi
+        if [ "$gpu" = 0 ]; then
+          echo "PASS: BPTT16 CPU-only inventory. NVIDIA probes withheld."
+          echo "Explicit opt-in: TORUS16_PROFILE_RUN_GPU=1 task profile-torus16-bptt16-interning"
+          echo "Logs: $out"
+          exit 0
+        fi
+        timeout_s="${TORUS16_PROFILE_TIMEOUT_S:-240}"
+        case "$timeout_s" in ''|*[!0-9]*) echo "TORUS16_PROFILE_TIMEOUT_S must be integer seconds" >&2; exit 1 ;; esac
+        if [ "$timeout_s" -lt 30 ] || [ "$timeout_s" -gt 900 ]; then
+          echo "TORUS16_PROFILE_TIMEOUT_S must be in 30..900" >&2; exit 1
+        fi
+        export TORUS16_SETUP_PROBE_ONLY=1 TORUS16_BPTT16_PREFLIGHT_ONLY=0
+        # Raise the separate graph-node cap only for this explicitly opted-in
+        # diagnostic. PTX entrypoint and graph-tensor caps remain independent.
+        export TORUS16_BPTT16_MAX_KERNELS=80000
+        for bptt in 8 16; do
+          export TORUS16_BPTT="$bptt"
+          if [ "$bptt" -eq 16 ]; then
+            export TORUS16_BPTT16_ENABLE_SLOW_JIT=1
+          else
+            unset TORUS16_BPTT16_ENABLE_SLOW_JIT
+          fi
+          label="bptt$bptt-probe"
+          echo "NVIDIA setup/replay probe $label (timeout=${timeout_s}s, no AdamW/checkpoint/validation)"
+          TORUS16_CHECKPOINT="$out/never-written-$label.ckpt" \
+            timeout -k 10s "${timeout_s}s" cargo run --release -p torus16-mix-lab --example ema4_bptt >"$out/$label.log" 2>&1 || {
+              tail -n 100 "$out/$label.log"
+              echo "FAIL: $label; JIT may be too large; artifacts: $out" >&2
+              exit 1
+            }
+          grep "^setup_probe=PASS bptt=$bptt " "$out/$label.log"
+          grep '^gpu_nvptx_stage=' "$out/$label.log"
+          grep '^gpu_prepare_phase=' "$out/$label.log"
+          if [ -e "$out/never-written-$label.ckpt" ]; then
+            echo "FAIL: setup probe modified checkpoint" >&2; exit 1
+          fi
+        done
+        echo "PASS: two GPU setup probes completed. CUDA event replay and JIT timings are diagnostic, not throughput/BPC results."
+        echo "Graph tensor bytes are NOT peak VRAM. Evidence: $out"
+
   benchmark-torus16-v02-bptt16:
     desc: SAFE BPTT16 graph preflight only; never start blocking driver PTX JIT or a CUDA Graph
     deps: [prepare]
@@ -1215,7 +1292,7 @@ tasks:
           exit 1
         fi
         echo "PASS: CPU-only BPTT16 preflight completed without launching CUDA JIT."
-        echo "BLOCKED: Full BPTT16 GPU replay is not approved until the module/kernel count is reduced."
+        echo "GPU replay NOT RUN: use TORUS16_PROFILE_RUN_GPU=1 task profile-torus16-bptt16-interning for an explicitly bounded diagnostic."
         echo "Logs: $base/summary.log $raw"
 
   benchmark-torus16-v02-allocation-slab:

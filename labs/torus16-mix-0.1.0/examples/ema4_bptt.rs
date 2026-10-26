@@ -66,6 +66,22 @@ fn option_usize(
     }
     Ok(value)
 }
+// Graph launches and compiled PTX entrypoints are separate resources after
+// specialization interning. Never treat the number of graph nodes as the
+// number of unique CUDA functions again.
+fn bptt16_over_budget(
+    graph_kernels: usize,
+    unique_functions: usize,
+    tensor_bytes: usize,
+    graph_limit: usize,
+    function_limit: usize,
+    tensor_limit: usize,
+) -> bool {
+    graph_kernels > graph_limit
+        || unique_functions > function_limit
+        || tensor_bytes > tensor_limit
+}
+
 /// Shared, read-only evaluation inputs for validation and final test.
 struct HoldoutContext<'a> {
     engine: &'a GpuEngine,
@@ -244,6 +260,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The public temporal API already supports 16 steps; this lab keeps
     // BPTT=2 by default. The 16-step path is explicitly budgeted below.
     let window_len = option_usize("TORUS16_BPTT", 2, 2, 16)?;
+    // Diagnostic only: build and execute the genuine training graph, but
+    // never run AdamW, write checkpoints, score holdout or read test tokens.
+    let setup_probe_only = match std::env::var("TORUS16_SETUP_PROBE_ONLY").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => return Err("TORUS16_SETUP_PROBE_ONLY must be 0 or 1".into()),
+    };
     let train_windows = option_usize("TORUS16_TRAIN_WINDOWS", 2, 1, 1_000_000)?;
     let val_limit = option_usize("TORUS16_VAL_LIMIT", 64, 2, 100000)?;
     let test_limit = option_usize("TORUS16_TEST_LIMIT", 64, 2, 100000)?;
@@ -717,23 +740,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     let codegen_started = Instant::now();
     let program = engine.compile_outputs(&execution_graph, &selected)?;
     let new_kernels = program.kernel_count()?;
+    let unique_functions = program.unique_kernel_count();
+    let llvm_bytes = program.llvm_ir().len();
+    let tensor_bytes = program.tensor_allocation_bytes()?;
+    println!(
+        "gpu_compilation_inventory bptt={} graph_kernels={} unique_functions={} llvm_ir_bytes={} graph_tensor_bytes={} note=graph_tensor_bytes_excludes_cuda_graph_jit_staging_and_driver",
+        window_len, new_kernels, unique_functions, llvm_bytes, tensor_bytes
+    );
     // Calculate graph tensor storage before LLVM NVPTX and CUDA module JIT.
     // This does not account for JIT, CUDA Graph or staging overhead.
     if window_len == 16 {
-        let tensor_bytes = program.tensor_allocation_bytes()?;
-        // Kernel *count* is a rough guard on PTX module/JIT complexity,
-        // not only on CUDA Graph replay. 63,707 generated entry points
-        // stalled in driver module loading before the first GPU replay.
-        // Do not silently permit this through a large VRAM-only budget.
+        // CUDA Graph size and CUDA PTX JIT module complexity are different
+        // limits after interning. Neither number estimates peak VRAM.
+        // The older 40k graph-node threshold remains fail-closed by default.
         let max_kernels = option_usize("TORUS16_BPTT16_MAX_KERNELS", 40_000, 1, 1_000_000)?;
+        let max_unique = option_usize("TORUS16_BPTT16_MAX_UNIQUE_KERNELS", 4096, 1, 1_000_000)?;
         let max_tensor_mib = option_usize("TORUS16_BPTT16_MAX_TENSOR_MIB", 512, 1, 65_536)?;
         let max_tensor_bytes = max_tensor_mib
             .checked_mul(1024 * 1024)
             .ok_or("BPTT16 tensor allocation limit overflow")?;
-        let over_budget = new_kernels > max_kernels || tensor_bytes > max_tensor_bytes;
+        let over_budget = bptt16_over_budget(
+            new_kernels,
+            unique_functions,
+            tensor_bytes,
+            max_kernels,
+            max_unique,
+            max_tensor_bytes,
+        );
         println!(
-            "bptt16_resource_preflight kernels={} kernel_limit={} tensor_bytes={} tensor_limit_bytes={} over_budget={} scope=graph_tensors_only",
-            new_kernels, max_kernels, tensor_bytes, max_tensor_bytes, over_budget
+            "bptt16_resource_preflight kernels={} kernel_limit={} unique_functions={} unique_function_limit={} tensor_bytes={} tensor_limit_bytes={} over_budget={} scope=graph_tensors_only",
+            new_kernels,
+            max_kernels,
+            unique_functions,
+            max_unique,
+            tensor_bytes,
+            max_tensor_bytes,
+            over_budget
         );
         let preflight_only = match std::env::var("TORUS16_BPTT16_PREFLIGHT_ONLY").as_deref() {
             Ok("1") => true,
@@ -751,7 +793,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         if over_budget {
             return Err(format!(
-                "BPTT16 CUDA JIT blocked: kernels={new_kernels}/{max_kernels}, graph_tensor_bytes={tensor_bytes}/{max_tensor_bytes}. The previous 63707-kernel PTX module stalled in driver JIT. Run the safe BPTT16 preflight instead; raising the limit alone does not bypass the explicit JIT opt-in."
+                "BPTT16 GPU blocked: graph_nodes={new_kernels}/{max_kernels}, unique_ptx_functions={unique_functions}/{max_unique}, graph_tensor_bytes={tensor_bytes}/{max_tensor_bytes}. The old 63707-entrypoint module stalled in driver JIT. Raising budgets is not a guarantee of available VRAM or successful capture; CUDA JIT still requires explicit opt-in."
             )
             .into());
         }
@@ -910,6 +952,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         "setup_stage=cuda_prepare elapsed_ms={:.3}",
         cuda_prepare_started.elapsed().as_secs_f64() * 1000.
     );
+    if setup_probe_only {
+        // A completed graph capture is not evidence of a successful replay.
+        // Do one synchronized execution and validate an actual supervised
+        // readout. CUDA event timing is reported separately from host wall
+        // time and includes no optimizer step or held-out data.
+        let replay_started = Instant::now();
+        gpu.replay()?;
+        let replay_wall_ms = replay_started.elapsed().as_secs_f64() * 1000.;
+        let logits = gpu.read_outputs_selected(&[window.outputs()[0]])?;
+        if logits.len() != 1
+            || logits[0].0 != window.outputs()[0]
+            || logits[0].1.values().iter().any(|value| !value.is_finite())
+        {
+            return Err("GPU setup probe produced invalid supervised logits".into());
+        }
+        let timing = gpu.benchmark(1, 3)?;
+        println!(
+            "setup_probe=PASS bptt={} graph_kernels={} unique_functions={} graph_tensor_bytes={} prepare_total_ms={:.3} synchronized_replay_wall_ms={:.3} graph_event_replay_ms={:.5} event_warmup=1 event_measured=3 observed_logits={} training=SKIPPED validation=SKIPPED test=SKIPPED checkpoint=UNCHANGED",
+            window_len,
+            new_kernels,
+            unique_functions,
+            tensor_bytes,
+            compile_clock.elapsed().as_secs_f64() * 1000.,
+            replay_wall_ms,
+            timing.average().as_secs_f64() * 1000.,
+            logits[0].1.values().len(),
+        );
+        return Ok(());
+    }
     if fresh {
         let stale_best = checkpoint_path.with_extension("best.ckpt");
         if stale_best.exists() {
@@ -1449,4 +1520,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         "NOTE: GPU approximate-exp softmax CE seed + VJP, host CE metric; GPU AdamW experimental when opted in; no formal FP32 gradient/optimizer proof."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod bptt16_budget_tests {
+    use super::bptt16_over_budget;
+
+    #[test]
+    fn separates_graph_node_count_from_compiled_ptx_function_count() {
+        // The interning pass may make 63k launches use just a few functions.
+        assert!(!bptt16_over_budget(63_707, 320, 2_000, 80_000, 4096, 4096));
+        assert!(bptt16_over_budget(63_707, 320, 2_000, 40_000, 4096, 4096));
+        assert!(bptt16_over_budget(63_707, 4097, 2_000, 80_000, 4096, 4096));
+        assert!(bptt16_over_budget(63_707, 320, 4097, 80_000, 4096, 4096));
+    }
 }
