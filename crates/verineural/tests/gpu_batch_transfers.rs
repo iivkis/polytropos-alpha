@@ -110,6 +110,22 @@ fn batched_subset_transfers_match_single_updates_and_reads() {
             product_expected.to_bits()
         );
     }
+    // Exercise the cached packed graph against *new* GPU output values:
+    // matching pointer descriptors must not return the previous epoch.
+    let (packed_updated, cached_profile) = gpu
+        .read_outputs_selected_packed_profiled(&[product, sum])
+        .unwrap();
+    assert_eq!(cached_profile.transfers, 1);
+    for ((packed_id, packed_tensor), (regular_id, regular_tensor)) in
+        packed_updated.iter().zip(actual.iter().rev())
+    {
+        assert_eq!(packed_id, regular_id);
+        for (&packed_value, &regular_value) in
+            packed_tensor.values().iter().zip(regular_tensor.values())
+        {
+            assert_eq!(packed_value.to_bits(), regular_value.to_bits());
+        }
+    }
     // Existing pointwise single-update API still yields the same results.
     gpu.update_input(x, &new_x).unwrap();
     gpu.update_input(y, &new_y).unwrap();

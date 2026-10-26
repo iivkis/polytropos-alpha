@@ -1173,11 +1173,13 @@ DONE:
                     .ok_or(GpuError::UnsupportedSize { elements: offset })?;
                 copies.push((dst, src, elements));
             }
+            // Pinned CUDA allocation also requires a current context.
+            // Hold it across staging, graph packing, DMA and synchronization.
+            let _context = self.enter_context()?;
             let pinned = self.staging_buffer(bytes)?;
             let pointer = pinned.address;
             self.staging_pending.push(pinned);
             self.launch_readback_pack(&copies)?;
-            let _context = self.enter_context()?;
             check("cuMemcpyDtoHAsync_v2", unsafe {
                 (self.functions.device_to_host)(
                     pointer,
