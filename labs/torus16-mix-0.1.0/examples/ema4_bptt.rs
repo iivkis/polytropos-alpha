@@ -880,7 +880,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .cloned()
             .collect::<Vec<_>>();
         let baseline_dir = artifact.join("baseline");
-        let mut execution = baseline_engine.prepare(&baseline, &baseline_sources, &baseline_dir)?;
+        let mut execution = baseline_engine.prepare(baseline, &baseline_sources, &baseline_dir)?;
         let replay_ms = if compare_replay {
             Some(execution.benchmark(3, 10)?.average().as_secs_f64() * 1000.)
         } else {
