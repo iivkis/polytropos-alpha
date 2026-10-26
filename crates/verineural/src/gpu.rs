@@ -2190,7 +2190,7 @@ impl GpuExecution {
                     reason: "duplicate partial input update",
                 });
             }
-            if !self.program.source_inputs().contains(&id) {
+            if !self.input_addresses.contains_key(&id.index()) {
                 return Err(GpuError::InvalidInput {
                     node: id.index(),
                     reason: "source is outside the compiled output slice",
@@ -2225,7 +2225,7 @@ impl GpuExecution {
     pub fn update_input(&mut self, id: NodeId, value: &Tensor<f32>) -> Result<(), GpuError> {
         self.execution_health.ensure_ready()?;
         let node = self.program.graph.node(id)?;
-        if !self.program.source_inputs().contains(&id) {
+        if !self.input_addresses.contains_key(&id.index()) {
             return Err(GpuError::InvalidInput {
                 node: id.index(),
                 reason: "source is outside the compiled output slice",

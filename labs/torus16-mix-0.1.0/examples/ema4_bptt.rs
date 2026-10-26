@@ -441,9 +441,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("TORUS16_LR_DECAY_5X requires TORUS16_GPU_ADAMW".into());
     }
     let metric_every = option_usize("TORUS16_METRIC_EVERY", 1, 1, 1_000_000)?;
-    if metric_every > 1 && !gpu_adamw_requested {
-        return Err("TORUS16_METRIC_EVERY>1 requires TORUS16_GPU_ADAMW=1: host optimizer still needs gradient readback".into());
-    }
     let llc_opt = option_usize("TORUS16_LLC_OPT", 0, 0, 2)?;
     let codegen_opt_level = match llc_opt {
         0 => GpuCodegenOptLevel::O0,
@@ -1001,24 +998,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         let graph_replay_ms = timing.elapsed().as_secs_f64() * 1000.;
 
         let timing = Instant::now();
-        // One D2H batch for logits and gradients, no recurrent state
-        // readback except at checkpoint boundaries.
-        let read_count = if gpu_optimizer.is_some() {
-            output_count
-        } else {
-            train_output_count
-        };
-        // No host-logit readback is needed for gradient/AdamW updates:
-        // the VJP and optimizer are already in the CUDA Graph. Sampling
-        // changes only reporting, never loss seeds or parameter updates.
-        let observe_loss = gpu_optimizer.is_none()
-            || iteration == first_window
+        // Only sampled windows need host logits for CE reporting. CPU
+        // AdamW always reads gradients; GPU AdamW keeps them on-device.
+        // Output selection changes neither the CUDA Graph nor training.
+        let observe_loss = iteration == first_window
             || (iteration + 1) % metric_every == 0
             || iteration + 1 == train_windows;
-        let outputs = if observe_loss {
-            gpu.read_outputs_selected(&selected[..read_count])?
+        let to_read = if gpu_optimizer.is_some() {
+            if observe_loss {
+                &selected[..output_count]
+            } else {
+                &selected[..0]
+            }
+        } else if observe_loss {
+            &selected[..train_output_count]
         } else {
+            &selected[output_count..train_output_count]
+        };
+        let outputs = if to_read.is_empty() {
             Vec::new()
+        } else {
+            gpu.read_outputs_selected(to_read)?
         };
         if iteration == 0
             && let Some(path) = &initial_probe_path
@@ -1056,10 +1056,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let timing = Instant::now();
         if gpu_optimizer.is_none() {
+            // On unsampled windows the result batch starts with gradients.
+            let gradient_offset = if observe_loss { output_count } else { 0 };
             let derivative = names
                 .iter()
                 .enumerate()
-                .map(|(i, name)| (name.clone(), outputs[output_count + i].1.clone()))
+                .map(|(i, name)| (name.clone(), outputs[gradient_offset + i].1.clone()))
                 .collect::<BTreeMap<_, _>>();
             optimizer.step(&mut params, &derivative)?;
         }
