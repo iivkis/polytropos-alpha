@@ -283,7 +283,12 @@ impl Ema4Checkpoint {
             ));
         }
 
-        let shared = weights
+        // Source must remain the historical 4-layer schema even when the
+        // P2 target has six or eight blocks. Extra layers are new parameters.
+        let source_weights = Ema4Weights::deterministic_seeded(
+            weights.vocabulary, weights.matrix_seed,
+        ).map_err(|_| invalid("invalid baseline warm-start weights"))?;
+        let shared = source_weights
             .trainable_parameters_for(MatrixMode::TorusShared)
             .map_err(|_| invalid("cannot construct TorusShared parameter inventory"))?;
         if !same_schema(&self.parameters, &shared) {
@@ -295,7 +300,7 @@ impl Ema4Checkpoint {
         // are transferred into the new Role-Delta optimizer.
         AdamW::from_checkpoint(self.optimizer.clone(), &self.parameters)
             .map_err(|_| invalid("warm-start source has invalid AdamW state"))?;
-        let expected_states = weights
+        let expected_states = source_weights
             .bindings_for(0, MatrixMode::TorusShared)
             .map_err(|_| invalid("cannot construct TorusShared state inventory"))?
             .into_iter()
