@@ -1892,3 +1892,71 @@ tasks:
           grep '^test_evaluation=SKIPPED ' "$log" | tail -n 1
         done
         echo "Compare validation_best_nll_nats, training_tokens_per_second, graph_kernels and actual GPU resource use. Do not choose using test."
+
+  verify-torus16-p2:
+    desc: CPU structural, scalar and public-AD depth6/8 verification (no GPU)
+    deps: [prepare]
+    cmds:
+      - cargo test -p torus16-mix-lab --test ema4 p2_ -- --nocapture
+
+  verify-gpu-torus16-p2:
+    desc: Opt-in NVIDIA depth6 forward/recurrent state vs independent scalar oracle
+    deps: [prepare]
+    cmds:
+      - cargo test -p torus16-mix-lab --test ema4 p2_depth6_gpu_forward_matches_scalar_oracle -- --ignored --nocapture
+
+  train-torus16-p2:
+    desc: Resource-bounded depth4 vs depth6/8 ablation; no BPTT16 or width64
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        depth="${TORUS16_P2_DEPTH:-6}"
+        case "$depth" in 6|8) ;; *) echo "P2 comparison depth must be 6 or 8" >&2; exit 1 ;; esac
+        bptt="${TORUS16_P2_BPTT:-4}"
+        case "$bptt" in 4|8) ;; *) echo "P2 BPTT must be 4 or 8" >&2; exit 1 ;; esac
+        width="${TORUS16_P2_WIDTH:-48}"
+        if [ "$width" != 48 ]; then echo "Width64 is not implemented; P2 fails closed" >&2; exit 1; fi
+        ema="${TORUS16_P2_EMA:-static}"
+        case "$ema" in static|selective) ;; *) echo "P2 EMA must be static or selective" >&2; exit 1 ;; esac
+        seed="${TORUS16_P2_SEED:-0}"
+        case "$seed" in ''|*[!0-9]*) echo "P2 seed must be numeric" >&2; exit 1 ;; esac
+        tokens="${TORUS16_P2_TOKENS:-16384}"
+        case "$tokens" in ''|*[!0-9]*) echo "P2 tokens must be numeric" >&2; exit 1 ;; esac
+        if [ "$tokens" -lt 8192 ] || [ "$tokens" -gt 131072 ] || [ "$((tokens % bptt))" -ne 0 ]; then
+          echo "P2 tokens must be 8192..131072, divisible by BPTT" >&2; exit 1
+        fi
+        source="${TORUS16_P2_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
+        if [ ! -f "$source" ]; then echo "Missing historical TorusShared warm-start: $source" >&2; exit 1; fi
+        out="${TORUS16_P2_DIR:-target/torus16-p2/ema$ema-depth$depth-bptt$bptt-seed$seed}"
+        mkdir -p "$out"
+        export TORUS16_MATRIX_MODE=role_delta_4 TORUS16_ROLE_INIT=matched
+        export TORUS16_MATRIX_SEED="$seed" TORUS16_DELTA_SCALE=1
+        export TORUS16_EMA_MODE="$ema" TORUS16_WARM_START_SHARED="$source"
+        export TORUS16_BPTT="$bptt" TORUS16_P2_WIDTH=48
+        export TORUS16_TRAIN_WINDOWS="$((tokens / bptt))"
+        export TORUS16_EVAL_EVERY="$((8192 / bptt))"
+        export TORUS16_CHECKPOINT_EVERY=1024 TORUS16_METRIC_EVERY=32
+        export TORUS16_VAL_LIMIT=8192 TORUS16_TEST_LIMIT=8192
+        export TORUS16_GPU_ADAMW=1 TORUS16_SKIP_TEST=1 TORUS16_REUSE_HOLDOUT=1
+        export TORUS16_HOIST_PARAMETER_ONLY=1 TORUS16_SKIP_FUSION_BASELINE=1
+        export TORUS16_P0_RESOURCE_GATE=1 TORUS16_P0_MAX_KERNELS=40000
+        export TORUS16_P0_MAX_UNIQUE_KERNELS=4096 TORUS16_P0_MAX_TENSOR_MIB=256
+        export TORUS16_LLC_OPT=0 TORUS16_THREADS_PER_BLOCK=256
+        unset TORUS16_FRESH TORUS16_CORPUS TORUS16_LR_DECAY_5X TORUS16_MIN_RESUME_WINDOWS
+        unset TORUS16_VERIFY_FUSION TORUS16_BENCH_COMPARE TORUS16_BENCH_FUSED
+        unset TORUS16_GPU_FEEDBACK_EVENTS TORUS16_INITIAL_PROBE_PATH TORUS16_P1_MIX_BIAS_INIT
+        for d in 4 "$depth"; do
+          export TORUS16_P2_DEPTH="$d" TORUS16_P2_RESIDUAL=1
+          log="$out/depth$d.log"
+          echo "P2 depth=$d width=48 residual=1 ema=$ema bptt=$bptt train_tokens=$tokens" | tee -a "$log"
+          TORUS16_CHECKPOINT="$out/depth$d.ckpt" cargo run --release -p torus16-mix-lab --example ema4_bptt >>"$log" 2>&1 || {
+            tail -n 80 "$log"; echo "P2 failed: see $log" >&2; exit 1
+          }
+          grep '^p2_configuration ' "$log" | tail -n 1
+          grep '^p0_resource_preflight ' "$log" | tail -n 1
+          grep '^training_total_s=' "$log" | tail -n 1
+          grep '^validation_final_nll_nats=' "$log" | tail -n 1
+          grep '^test_evaluation=SKIPPED ' "$log" | tail -n 1
+        done
+        echo "P2 quality ranking requires multiple seeds and independent test; VRAM peak is not measured by tensor graph budget."
