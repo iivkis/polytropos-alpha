@@ -285,6 +285,15 @@ impl Ema4Weights {
             + if matches!(ema, EmaMode::Selective) { LAYERS * WIDTH } else { 0 }
     }
 
+    pub const fn parameter_count_for_configuration(
+        vocabulary: usize, mode: MatrixMode, ema: EmaMode, depth: usize, residual: bool,
+    ) -> usize {
+        let base = Self::parameter_count_for_ema(vocabulary, mode, ema);
+        let shared = vocabulary * WIDTH + 2 * WIDTH;
+        let per_layer = (base - shared) / LAYERS;
+        shared + per_layer * depth + if residual { 2 * depth } else { 0 }
+    }
+
     /// Preserve the existing shared-matrix consumer API.
     pub fn trainable_parameters(
         &self,
