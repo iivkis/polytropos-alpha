@@ -431,7 +431,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     let onehots = (0..vocab)
         .map(|token| onehot(token, vocab))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut weights = Ema4Weights::deterministic_seeded(vocab, matrix_seed)?;
+    let depth = option_usize("TORUS16_P2_DEPTH", 4, 4, 8)?;
+    if !matches!(depth, 4 | 6 | 8) {
+        return Err("TORUS16_P2_DEPTH must be 4, 6 or 8".into());
+    }
+    let width = option_usize("TORUS16_P2_WIDTH", 48, 48, 64)?;
+    if width != torus16_mix_lab::WIDTH {
+        return Err("P2 width64 is not implemented in the 48-channel Torus16 projection API".into());
+    }
+    let residual = match std::env::var("TORUS16_P2_RESIDUAL").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => return Err("TORUS16_P2_RESIDUAL must be 0 or 1".into()),
+    };
+    if depth > 4 && !residual {
+        return Err("P2 depth6/8 requires residual scaling".into());
+    }
+    if depth > 4 && !matches!(window_len, 4 | 8) {
+        return Err("P2 depth6/8 supports only BPTT4 or BPTT8".into());
+    }
+    println!("p2_configuration depth={depth} width={width} residual={residual} bptt={window_len}");
+    let mut weights = Ema4Weights::deterministic_seeded(vocab, matrix_seed)?.with_depth(depth)?;
     if matrix_mode.role_delta_rank().is_some() {
         let scale = std::env::var("TORUS16_DELTA_SCALE")
             .ok()
@@ -451,11 +471,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     if warm_start_path.is_some() && matrix_mode.role_delta_rank().is_none() {
         return Err("TORUS16_WARM_START_SHARED requires a Role-Delta matrix mode".into());
     }
-    let model = architecture_model_for_ema(vocab, matrix_mode, ema_mode)?;
+    let model = architecture_model_for_configuration(
+        vocab, matrix_mode, ema_mode, depth, residual,
+    )?;
     let mut initial_bindings =
-        weights.bindings_with_init_and_ema(0, matrix_mode, role_init, ema_mode)?;
+        weights.bindings_with_configuration(0, matrix_mode, role_init, ema_mode, residual)?;
     let mut trainable_initial =
-        weights.trainable_parameters_with_init_and_ema(matrix_mode, role_init, ema_mode)?;
+        weights.trainable_parameters_with_configuration(matrix_mode, role_init, ema_mode, residual)?;
     if let Some(path) = warm_start_path.as_ref() {
         // Do not overwrite the warm-start source through a target checkpoint
         // alias, including an existing symlink or the validation-best path.
@@ -499,7 +521,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "preserve".into());
     match mix_bias_mode.as_str() {
         "preserve" => {}
-        "zero" => override_mix_bias(&mut trainable_initial, &mut initial_bindings, 0.0)?,
+        "zero" => override_mix_bias(&mut trainable_initial, &mut initial_bindings, 0.0, depth)?,
         _ => return Err("TORUS16_P1_MIX_BIAS_INIT must be preserve or zero".into()),
     }
     println!("p1_mix_bias_initialization={mix_bias_mode} scope=pre_optimizer_initial_bindings");
@@ -783,8 +805,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         role_init.as_str(),
         matrix_seed,
         model_fingerprint,
-        matrix_mode.matrix_count(),
-        matrix_mode.matrix_count() * torus16_mix_lab::WIDTH * torus16_mix_lab::WIDTH,
+        matrix_mode.matrix_count() / torus16_mix_lab::ema4::LAYERS * depth,
+        matrix_mode.matrix_count() / torus16_mix_lab::ema4::LAYERS * depth * torus16_mix_lab::WIDTH * torus16_mix_lab::WIDTH,
         parameter_count,
         matrix_mode.role_delta_rank(),
         weights.delta_scale,
