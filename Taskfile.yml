@@ -1,5 +1,9 @@
 version: '3'
 
+vars:
+  # Single default for warm-start experiments; environment override stays supported.
+  TORUS16_SHARED_BASELINE_CHECKPOINT: target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt
+
 # Local developer commands. AI agents must not execute build/test commands
 # by default; see AGENTS.md. GitHub Actions checks CPU tests and publishes RepoSpool in dev.
 tasks:
@@ -1030,7 +1034,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then
           echo "Missing TorusShared source checkpoint: $source (set TORUS16_ROLE_DELTA_SOURCE)" >&2
           exit 1
@@ -1089,7 +1093,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then
           echo "Missing TorusShared source checkpoint: $source (set TORUS16_ROLE_DELTA_SOURCE)" >&2
           exit 1
@@ -1137,7 +1141,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then echo "Missing warm-start source: $source" >&2; exit 1; fi
         out="${TORUS16_ROLE_DELTA_BENCH_DIR:-target/torus16-role-delta-backend-benchmark}"
         mkdir -p "$out"
@@ -1182,7 +1186,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then echo "Missing warm-start source: $source" >&2; exit 1; fi
         mkdir -p target
         dir="$(mktemp -d target/torus16-role-delta-fast-setup.XXXXXX)"
@@ -1416,7 +1420,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then
           echo "Missing TorusShared warm-start checkpoint: $source" >&2
           exit 1
@@ -1516,7 +1520,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then
           echo "Missing trained TorusShared source checkpoint: $source" >&2
           exit 1
@@ -1571,7 +1575,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then
           echo "Missing trained TorusShared source checkpoint: $source" >&2
           exit 1
@@ -1614,7 +1618,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then
           echo "Missing trained TorusShared source checkpoint: $source" >&2
           exit 1
@@ -1656,7 +1660,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then
           echo "Missing trained TorusShared source checkpoint: $source" >&2
           exit 1
@@ -1698,7 +1702,7 @@ tasks:
     cmds:
       - |
         set -eu
-        source="${TORUS16_ROLE_DELTA_SOURCE:-target/torus16-bptt4-finetune-lr5-seed0/torus_shared-matched-seed0.best.ckpt}"
+        source="${TORUS16_ROLE_DELTA_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then
           echo "Missing trained TorusShared source checkpoint: $source" >&2
           exit 1

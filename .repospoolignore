@@ -44,6 +44,9 @@
 /labs/*/artifacts/
 /labs/*/EXPERIMENT_RESULTS.md
 /labs/*/examples/
+# Historical rotating-matrices implementation is available from Git on demand.
+# The first-pass snapshot retains the active Torus16 and coupled-field consumers.
+/labs/rotating-matrices-0.1.0/src/
 /labs/consumer-acceptance-0.1.0/src/
 /labs/xor-0.1.0/src/
 
