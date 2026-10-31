@@ -148,6 +148,8 @@ pub struct BlockWeights {
     pub decay_logit: [f32; WIDTH],
     /// Selective decay strength. Zero initializes exactly at static EMA.
     pub decay_gate: [f32; WIDTH],
+    pub residual_mem_scale: f32,
+    pub residual_ff_scale: f32,
     pub gate_scale: f32,
     pub depthwise1: [[f32; WIDTH]; KERNEL],
     pub depthwise2: [[f32; WIDTH]; KERNEL],
@@ -165,6 +167,8 @@ impl Default for BlockWeights {
             norm2_beta: [0.0; WIDTH],
             decay_logit: std::array::from_fn(|i| 2.7 - i as f32 * (4.2 / (WIDTH - 1) as f32)),
             decay_gate: [0.; WIDTH],
+            residual_mem_scale: 1.,
+            residual_ff_scale: 1.,
             gate_scale: 1.0,
             depthwise1: std::array::from_fn(|tap| {
                 std::array::from_fn(|lane| ((tap * 13 + lane * 3) % 17) as f32 * 0.002 - 0.016)
@@ -187,6 +191,7 @@ pub struct Ema4Weights {
     /// Tied input/output embedding [vocabulary, 48].
     pub embedding: Vec<f32>,
     pub blocks: [BlockWeights; LAYERS],
+    pub extra_blocks: Vec<BlockWeights>,
     pub final_gamma: [f32; WIDTH],
     pub final_beta: [f32; WIDTH],
 }
@@ -208,6 +213,7 @@ impl Ema4Weights {
                 .map(|i| ((i * 19 + 7) % 37) as f32 * 0.0011 - 0.020)
                 .collect(),
             blocks: std::array::from_fn(|_| BlockWeights::default()),
+            extra_blocks: Vec::new(),
             final_gamma: [1.; WIDTH],
             final_beta: [0.; WIDTH],
         };
@@ -223,6 +229,35 @@ impl Ema4Weights {
         Ok(result)
     }
 
+    /// Opt-in P2 depth extension. The historical four blocks remain intact.
+    pub fn with_depth(mut self, depth: usize) -> Result<Self, ModelError> {
+        if !matches!(depth, 4 | 6 | 8) {
+            return Err(ModelError::Invalid("P2 depth must be 4, 6 or 8".into()));
+        }
+        self.extra_blocks.clear();
+        for layer in LAYERS..depth {
+            let mut block = BlockWeights {
+                residual_mem_scale: 0.,
+                residual_ff_scale: 0.,
+                ..BlockWeights::default()
+            };
+            if self.matrix_seed != 0 {
+                for (row, values) in block.operator.weight.iter_mut().enumerate() {
+                    for (col, value) in values.iter_mut().enumerate() {
+                        *value = matrix_sample(self.matrix_seed, layer, 0, row * WIDTH + col);
+                    }
+                }
+            }
+            self.extra_blocks.push(block);
+        }
+        Ok(self)
+    }
+
+    pub fn layers(&self) -> usize { LAYERS + self.extra_blocks.len() }
+
+    pub fn all_blocks(&self) -> impl Iterator<Item = &BlockWeights> {
+        self.blocks.iter().chain(self.extra_blocks.iter())
+    }
     pub const fn parameter_count(vocabulary: usize) -> usize {
         // Eight physical projection roles share one W per block. The head is
         // tied to the embedding rather than a second trainable matrix.
