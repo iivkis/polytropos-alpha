@@ -1,0 +1,29 @@
+# RepoSpool is a compact source/contract context, not an archive of every
+# test, dataset, and generated result. These rules affect only .repospool:
+# all excluded paths remain available as normal GitHub repository files.
+
+# CI plumbing and reproducible dependency resolution are secondary to the
+# architecture, semantics, API and formal contracts.
+/.github/
+/Cargo.lock
+/flake.lock
+
+# Test/acceptance suites are useful for focused verification but not needed
+# for first-pass comprehension. Keep the implementation and Lean sources.
+/crates/verineural/tests/
+/crates/verineural/src/tests.rs
+/labs/*/tests/
+/labs/torus16-mix-0.1.0/src/role_delta_tests.rs
+
+# Historical stage demonstration programs. Keep the non-stage API examples
+# and all laboratory consumer entry points.
+/crates/verineural/examples/stage*.rs
+
+# Training corpora, generated LLVM/PTX/Lean evidence and measured outcomes
+# can be retrieved from Git when investigating an experiment.
+/labs/*/data/
+/labs/*/artifacts/
+/labs/*/EXPERIMENT_RESULTS.md
+
+# Historical implementation status; keep SPEC.md, ROADMAP.md and AUTO_BUILD.md.
+/docs/verineural/P0_P1_STATUS.md
