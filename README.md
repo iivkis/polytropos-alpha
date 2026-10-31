@@ -62,14 +62,21 @@ task test-lab-torus16-ema4-checkpoint
 
 ## Лёгкий CI (без GPU)
 
-В GitHub Actions для коммитов в `dev` и `main` выполняется один CPU job:
-генерация и проверка `.repospool` по зафиксированному `HEAD` с публикацией
-снимка как workflow artifact на 7 дней, затем `cargo test --locked -p verineural --lib --tests`.
-RepoSpool собирается из закреплённого Git-коммита в временный каталог runner,
-без тяжёлого Nix devShell. Тесты, явно помеченные `#[ignore]` из-за
-GPU/Lean/LLVM/Graphviz, в этом job не запускаются.
-**Лабораторные crates и их задачи в CI не тестируются и не исполняются.**
-Полную GPU/Lean-приёмку пользователь выполняет локально через Taskfile в Nix.
+GitHub Actions при push в `dev` и `main` генерирует и проверяет `.repospool`,
+загружает резервный snapshot в Actions Artifacts на 7 дней, затем запускает
+только `cargo test --locked -p verineural --lib --tests`. Тесты с `#[ignore]`
+(требующие GPU/Lean/LLVM/Graphviz) не запускаются. **Лабораторные crates
+и их задачи через CI не запускаются.** Полная GPU/Lean-приёмка остаётся локальной.
+
+После успешных тестов workflow **коммитит `.repospool` в `dev`** отдельным
+fast-forward коммитом от `github-actions[bot]` без force-push; `main` остаётся
+только для чтения и тестов. Снимок содержит исходное состояние предыдущего
+коммита: сам `.repospool` исключён из индекса RepoSpool, а его запись в Git
+создаёт новый SHA, поэтому он не может ссылаться на собственный Git-коммит.
+Следующие `task repospool-generate` / `task prepare` учитывают этот случай и
+не изменяют содержимое снимка на уже опубликованном artifact-only HEAD.
+Публикация выполняется только при успешной генерации, верификации и CPU-тестах;
+при конкурентном push обычный fast-forward `git push` отклонит устаревший снимок.
 
 ## Правила результатов и верификации
 

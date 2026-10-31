@@ -6,7 +6,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+# A new push supersedes an older source snapshot on the same branch.
+concurrency:
+  group: verineural-cpu-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   cpu:
@@ -17,7 +22,7 @@ jobs:
       - name: Checkout committed sources
         uses: actions/checkout@v4
         with:
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -28,8 +33,16 @@ jobs:
           echo "$RUNNER_TEMP/repospool/bin" >> "$GITHUB_PATH"
 
       - name: Generate and verify .repospool
+        shell: bash
         run: |
-          repospool generate .
+          set -euo pipefail
+          source_rev=HEAD
+          # The previous CI snapshot commit changes only .repospool.
+          # Regenerate from its source parent instead of nesting new revisions.
+          if [ "$(git diff-tree --no-commit-id --name-only -r HEAD)" = ".repospool" ]; then
+            source_rev=HEAD^
+          fi
+          repospool generate . --rev "$source_rev"
           repospool verify --artifact .repospool --repo .
 
       - name: Upload source snapshot
@@ -43,3 +56,19 @@ jobs:
 
       - name: VeriNeural CPU tests only (ignored GPU/toolchain tests excluded)
         run: cargo test --locked -p verineural --lib --tests
+
+      - name: Commit verified .repospool to dev
+        if: github.ref == 'refs/heads/dev'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- .repospool
+          if git diff --cached --quiet -- .repospool; then
+            echo "Committed RepoSpool snapshot is already current"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "chore(repospool): snapshot source ${GITHUB_SHA} [skip ci]"
+          # Never force-push. A concurrent source push must take precedence.
+          git push origin HEAD:refs/heads/dev

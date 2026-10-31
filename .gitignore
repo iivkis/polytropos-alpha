@@ -1,7 +1,6 @@
 **/target/
 
-# RepoSpool output is derived from committed HEAD and refreshed by task prepare.
-/.repospool
+# RepoSpool is tracked in dev by CI; its own bytes are excluded from its source index.
 /.direnv/
 /result
 /result-*

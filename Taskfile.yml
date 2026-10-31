@@ -1,7 +1,7 @@
 version: '3'
 
 # Local developer commands. AI agents must not execute build/test commands
-# by default; see AGENTS.md. GitHub Actions only checks VeriNeural CPU tests.
+# by default; see AGENTS.md. GitHub Actions checks CPU tests and publishes RepoSpool in dev.
 tasks:
   default:
     desc: Show available tasks
@@ -14,9 +14,15 @@ tasks:
       - cargo fmt --all
 
   repospool-generate:
-    desc: Generate the source snapshot of committed HEAD for laboratory workflows
+    desc: Refresh the source snapshot, using its source parent after a CI artifact-only commit
     cmds:
-      - repospool generate .
+      - |
+        set -eu
+        source_rev=HEAD
+        if [ "$(git diff-tree --no-commit-id --name-only -r HEAD)" = ".repospool" ]; then
+          source_rev=HEAD^
+        fi
+        repospool generate . --rev "$source_rev"
 
   # Safe local preflight: refresh RepoSpool, then format workspace sources.
   # Every lab generation/replay and workspace/lab test task depends on this.
