@@ -3,8 +3,12 @@
 
   # Keep the project's existing nixpkgs / flake.lock pin.
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  inputs.repospool = {
+    url = "github:iivkis/repospool/3f7ff9570c9302690b21b96be84e7adb95b6990a";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, repospool }:
     let
       # VeriNeural currently targets NVIDIA GPU development on Linux x86_64.
       system = "x86_64-linux";
@@ -15,7 +19,7 @@
     in
     {
       devShells.${system}.default = pkgs.mkShell {
-        packages = with pkgs; [
+        packages = (with pkgs; [
           git
           rustc
           cargo
@@ -39,7 +43,7 @@
           cudaPackages.cuda_cudart
           cudaPackages.nsight_systems
           cudaPackages.nsight_compute
-        ];
+        ]) ++ [ repospool.packages.${system}.default ];
 
         shellHook = ''
           # nvcc and native CUDA runtime come from pinned nixpkgs;
@@ -87,6 +91,7 @@
           echo "nsys=$(command -v nsys || echo unavailable)"
           echo "ncu=$(command -v ncu || echo unavailable)"
           echo "dot=$(command -v dot || echo unavailable)"
+          echo "repospool=$(command -v repospool || echo unavailable)"
           echo "Use 'task --list' to see local commands."
         '';
       };

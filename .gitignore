@@ -1,4 +1,7 @@
 **/target/
+
+# RepoSpool output is derived from committed HEAD and refreshed by task prepare.
+/.repospool
 /.direnv/
 /result
 /result-*

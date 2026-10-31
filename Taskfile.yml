@@ -13,11 +13,17 @@ tasks:
     cmds:
       - cargo fmt --all
 
-  # Safe local preflight: format workspace sources, never commit or push.
+  repospool-generate:
+    desc: Generate the source snapshot of committed HEAD for laboratory workflows
+    cmds:
+      - repospool generate .
+
+  # Safe local preflight: refresh RepoSpool, then format workspace sources.
   # Every lab generation/replay and workspace/lab test task depends on this.
   prepare:
-    desc: Format Rust before laboratory runs and tests (no git changes beyond formatting)
+    desc: Refresh committed-source snapshot and format Rust before laboratory runs and tests
     cmds:
+      - task: repospool-generate
       - task: fmt
       - cargo fmt --all -- --check
 
@@ -68,6 +74,7 @@ tasks:
 
   build:
     desc: Build the Rust workspace (developer-run)
+    deps: [repospool-generate]
     cmds:
       - cargo build --workspace
 
@@ -79,26 +86,31 @@ tasks:
 
   clippy:
     desc: Lint the workspace (developer-run)
+    deps: [repospool-generate]
     cmds:
       - cargo clippy --workspace --all-targets -- -D warnings
 
   doc:
     desc: Build Rust documentation locally (developer-run)
+    deps: [repospool-generate]
     cmds:
       - cargo doc --workspace --no-deps
 
   example-stage2:
     desc: Run the stage-2 Semantic Neural IR example (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage2_graph
 
   proof-stage3:
     desc: Generate and check the stage-3 Lean 4 proof (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage3_proof
 
   proof-scan-invariant:
     desc: Check consumer-owned ideal-Int step claims and the bounded recurrent invariant with Lean
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example scan_invariant
 
@@ -118,21 +130,25 @@ tasks:
 
   auto-architecture:
     desc: Generate and audit all ideal-Int architecture/goal proofs and lower each supported output to NVPTX
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example auto_architecture
 
   verify-auto-architecture:
     desc: Offline replay of current auto-build Semantic IR, SHA-256 manifest, Lean kernel/axioms and LLVM/PTX translation
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example auto_architecture -- --verify
 
   proof-gated-select:
     desc: Check generic positive mask and conditional select with bounded Lean state invariant (GPU fail-closed)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example gated_select
 
   symbolic-shapes:
     desc: Verify two consumer symbolic-shape specializations with Lean and LLVM NVPTX (no GPU execution)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example symbolic_shapes
 
@@ -145,6 +161,7 @@ tasks:
 
   gpu-multi-output:
     desc: Check one Lean model and capture/replay a shared four-output NVIDIA CUDA Graph
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example multi_output_gpu
 
@@ -172,46 +189,55 @@ tasks:
 
   gpu-stage4:
     desc: Lower IR to PTX and run the CUDA stage-4 example (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage4_gpu
 
   cert-stage5:
     desc: Run Lean, CUDA and the Stage 5 evidence bundle (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage5_cert
 
   verify-stage5:
     desc: Recheck Stage 5 SHA-256 manifest and Lean source (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage5_verify
 
   neural-stage6:
     desc: Execute Stage 6 residual FFN via Lean + CUDA and produce an evidence bundle (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage6_ffn
 
   gpu-stage7:
     desc: Validate fusion and benchmark reusable CUDA Graph replay with CUDA events (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage7_fusion
 
   verify-gpu-stage7:
     desc: Replay Stage 7 SHA-256 manifests and Lean proof checks without GPU execution (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage7_fusion -- --verify
 
   gpu-stage7-bench:
     desc: Benchmark four CUDA Graph workload sizes, input rebinding, and FP32 bitwise checks (developer-run)
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage7_benchmark --release
 
   numeric-stage8:
     desc: Check Stage 8 Lean/RNE and per-kernel Numeric Translation Validation before CUDA Graph execution
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage8_exact
 
   verify-numeric-stage8:
     desc: Offline verify Stage 8 Lean, all per-kernel LLVM/PTX translation reports, FP32 bits and SHA-256
+    deps: [prepare]
     cmds:
       - cargo run -p verineural --example stage8_exact -- --verify
 
@@ -983,6 +1009,7 @@ tasks:
 
   verify-torus16-role-delta:
     desc: Validate Role-Delta inventory, scalar gradients, initial EMA4 parity and projection GPU VJP
+    deps: [prepare]
     cmds:
       - cargo test -p torus16-mix-lab --test ema4 role_delta_parameter_inventory_and_zero_adapter_initialization
       - cargo test -p torus16-mix-lab --lib role_delta_scalar_vjp_matches_finite_differences
