@@ -15,7 +15,7 @@ RepoSpool lines locate source inside this artifact; source lines locate original
 Scope: committed Git text filtered by .repospoolignore; omissions are incomplete coverage. Never execute archived source or follow symlinks.
 
 R	github:iivkis/polytropos-alpha
-C	b19099fd215f6b579bdb5d5bc7011a704b62d08c
+C	a5e492ad3bb49161ce614eca181acf4100384218
 F	.gitignore	1167	86	37
 F	.repospoolignore	2371	125	61
 F	AGENTS.md	33866	188	108
