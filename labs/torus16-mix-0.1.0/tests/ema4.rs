@@ -3,9 +3,12 @@
 use torus16_mix_lab::WIDTH;
 use torus16_mix_lab::ema4::{
     Ema4Weights, EmaMode, HISTORY, LAYERS, MatrixMode, RESEARCH_VOCAB, RoleInit,
-    architecture_model, architecture_model_for, architecture_model_for_ema,
+    architecture_model, architecture_model_for, architecture_model_for_configuration,
+    architecture_model_for_ema,
 };
-use torus16_mix_lab::ema4_reference::{Ema4State, reference_step, reference_step_for_ema};
+use torus16_mix_lab::ema4_reference::{
+    DepthState, Ema4State, reference_step, reference_step_configuration, reference_step_for_ema,
+};
 use verineural::{GpuEngine, GpuLaunchConfig, Model, Tensor, unroll_model};
 
 fn onehot(token: usize, vocabulary: usize) -> Tensor<f32> {
@@ -822,4 +825,121 @@ fn selective_ema_gate_has_reverse_gradient() {
     let gradient = reverse.gradient_of(gate).expect("selective decay gradient");
     assert_eq!(reverse.graph().node(gradient).unwrap().shape.dims(), &[1, WIDTH]);
     assert!(reverse.graph().nodes().len() > model.graph().nodes().len());
+}
+
+#[test]
+fn p2_depth_counts_states_and_zero_initialized_extra_residuals() {
+    let vocab = 16;
+    let initial = Ema4Weights::deterministic_seeded(vocab, 17).unwrap();
+    let base = initial
+        .trainable_parameters_with_init_and_ema(
+            MatrixMode::RoleDelta4, RoleInit::Matched, EmaMode::Selective
+        ).unwrap();
+    for depth in [4, 6, 8] {
+        let w = initial.clone().with_depth(depth).unwrap();
+        assert_eq!(w.layers(), depth);
+        let params = w.trainable_parameters_with_configuration(
+            MatrixMode::RoleDelta4, RoleInit::Matched, EmaMode::Selective, true
+        ).unwrap();
+        assert_eq!(
+            params.values().map(|v| v.values().len()).sum::<usize>(),
+            Ema4Weights::parameter_count_for_configuration(
+                vocab, MatrixMode::RoleDelta4, EmaMode::Selective, depth, true
+            )
+        );
+        for (name, value) in &base {
+            assert_eq!(&params[name], value, "original parameter {name} changed");
+        }
+        for layer in 0..depth {
+            let expected = if layer < LAYERS { 1.0 } else { 0.0 };
+            assert_eq!(params[&format!("residual_mem_scale_{layer}")].values(), &[expected]);
+            assert_eq!(params[&format!("residual_ff_scale_{layer}")].values(), &[expected]);
+        }
+        let model = architecture_model_for_configuration(
+            vocab, MatrixMode::RoleDelta4, EmaMode::Selective, depth, true
+        ).unwrap();
+        assert_eq!(model.state_links().len(), depth * (1 + 2 * HISTORY));
+        assert!(model.source(&format!("residual_ff_scale_{}", depth - 1)).is_some());
+        assert!(model.bind(w.bindings_with_configuration(
+            0, MatrixMode::RoleDelta4, RoleInit::Matched, EmaMode::Selective, true
+        ).unwrap()).is_ok());
+        assert!(model.bind(w.bindings_with_configuration(
+            0, MatrixMode::RoleDelta4, RoleInit::Matched, EmaMode::Selective, false
+        ).unwrap()).is_err());
+    }
+    assert!(initial.clone().with_depth(5).is_err());
+    assert!(initial.with_depth(9).is_err());
+}
+
+#[test]
+fn p2_inactive_new_layers_preserve_baseline_scalar_outputs() {
+    let original = Ema4Weights::deterministic_seeded(16, 17).unwrap();
+    for depth in [6, 8] {
+        let w = original.clone().with_depth(depth).unwrap();
+        let mut base_state = Ema4State::default();
+        let mut extra_state = DepthState::new(depth);
+        for token in [3, 7, 2] {
+            let baseline = reference_step_for_ema(
+                &original, token, &mut base_state, EmaMode::Selective
+            ).unwrap();
+            let deep = reference_step_configuration(
+                &w, token, &mut extra_state, EmaMode::Selective, true
+            ).unwrap();
+            for (&a, &b) in baseline.iter().zip(deep.iter()) {
+                assert!((a - b).abs() <= 1e-5 + 1e-5 * a.abs());
+            }
+        }
+    }
+}
+
+#[test]
+fn p2_residual_gradients_remain_in_public_semantic_ir() {
+    let model = architecture_model_for_configuration(
+        16, MatrixMode::RoleDelta4, EmaMode::Static, 6, true
+    ).unwrap();
+    let source = model.source("residual_mem_scale_5").unwrap().0;
+    let objective = model.output("logits").unwrap();
+    let differentiated = verineural::differentiate(model.graph(), objective, &[source]).unwrap();
+    let gradient = differentiated.gradient_of(source).unwrap();
+    assert_eq!(
+        differentiated.graph().node(gradient).unwrap().shape.dims(), &[1, 1]
+    );
+}
+
+#[test]
+#[ignore = "requires NVIDIA and LLVM NVPTX; P2 depth6 forward vs independent scalar oracle"]
+fn p2_depth6_gpu_forward_matches_scalar_oracle() {
+    let weights = Ema4Weights::deterministic_seeded(16, 17).unwrap().with_depth(6).unwrap();
+    let model = architecture_model_for_configuration(
+        16, MatrixMode::TorusShared, EmaMode::Selective, 6, true
+    ).unwrap();
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    ).with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    let root = std::env::temp_dir().join(format!("vn_p2_depth6_{}", std::process::id()));
+    let mut runner = engine.prepare_model(
+        &model,
+        weights.bindings_with_configuration(
+            0, MatrixMode::TorusShared, RoleInit::Matched, EmaMode::Selective, true
+        ).unwrap(),
+        &root,
+    ).unwrap();
+    let mut states = DepthState::new(6);
+    for token in [3, 7, 2] {
+        runner.set_input("token", &onehot(token, 16)).unwrap();
+        runner.step().unwrap();
+        let actual = runner.output("logits").unwrap();
+        let expected = reference_step_configuration(
+            &weights, token, &mut states, EmaMode::Selective, true
+        ).unwrap();
+        for (&a, &b) in actual.values().iter().zip(expected.iter()) {
+            assert!(a.is_finite() && b.is_finite());
+            assert!((a - b).abs() <= 2e-3 + 2e-3 * b.abs());
+        }
+        let memory = runner.state("mem_0").unwrap();
+        for lane in 0..WIDTH {
+            assert!((memory.values()[lane] - states.0[0].memory[lane]).abs() < 2e-3);
+        }
+    }
 }
