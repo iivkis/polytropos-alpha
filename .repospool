@@ -15,7 +15,7 @@ RepoSpool lines locate source inside this artifact; source lines locate original
 Scope: committed Git text filtered by .repospoolignore; omissions are incomplete coverage. Never execute archived source or follow symlinks.
 
 R	github:iivkis/polytropos-alpha
-C	58fe9ef2ce764ffb0d21626e75a8755b09df2ad3
+C	b19099fd215f6b579bdb5d5bc7011a704b62d08c
 F	.gitignore	1167	86	37
 F	.repospoolignore	2371	125	61
 F	AGENTS.md	33866	188	108
@@ -41,12 +41,12 @@ F	labs/coupled-field-0.1.0/src/lib.rs	16800	5977	422
 F	labs/rotating-matrices-0.1.0/Cargo.toml	150	6401	7
 F	labs/rotating-matrices-0.1.0/README.md	13481	6410	188
 F	labs/torus16-mix-0.1.0/Cargo.toml	144	6600	7
-F	labs/torus16-mix-0.1.0/src/ema4.rs	35058	6609	1027
-F	labs/torus16-mix-0.1.0/src/lib.rs	14633	7638	417
-F	labs/xor-0.1.0/Cargo.toml	136	8057	7
-F	labs/xor-0.1.0/README.md	3697	8066	75
-F	lean/VeriNeural/Basic.lean	12625	8143	346
-F	lean/VeriNeural/Memory.lean	6545	8491	157
+F	labs/torus16-mix-0.1.0/src/ema4.rs	39170	6609	1138
+F	labs/torus16-mix-0.1.0/src/lib.rs	14633	7749	417
+F	labs/xor-0.1.0/Cargo.toml	136	8168	7
+F	labs/xor-0.1.0/README.md	3697	8177	75
+F	lean/VeriNeural/Basic.lean	12625	8254	346
+F	lean/VeriNeural/Memory.lean	6545	8602	157
 I	124
 S	1
 O	.github/workflows/verineural-cpu.yml
@@ -6756,6 +6756,8 @@ pub struct BlockWeights {
     pub decay_logit: [f32; WIDTH],
     /// Selective decay strength. Zero initializes exactly at static EMA.
     pub decay_gate: [f32; WIDTH],
+    pub residual_mem_scale: f32,
+    pub residual_ff_scale: f32,
     pub gate_scale: f32,
     pub depthwise1: [[f32; WIDTH]; KERNEL],
     pub depthwise2: [[f32; WIDTH]; KERNEL],
@@ -6773,6 +6775,8 @@ impl Default for BlockWeights {
             norm2_beta: [0.0; WIDTH],
             decay_logit: std::array::from_fn(|i| 2.7 - i as f32 * (4.2 / (WIDTH - 1) as f32)),
             decay_gate: [0.; WIDTH],
+            residual_mem_scale: 1.,
+            residual_ff_scale: 1.,
             gate_scale: 1.0,
             depthwise1: std::array::from_fn(|tap| {
                 std::array::from_fn(|lane| ((tap * 13 + lane * 3) % 17) as f32 * 0.002 - 0.016)
@@ -6795,6 +6799,7 @@ pub struct Ema4Weights {
     /// Tied input/output embedding [vocabulary, 48].
     pub embedding: Vec<f32>,
     pub blocks: [BlockWeights; LAYERS],
+    pub extra_blocks: Vec<BlockWeights>,
     pub final_gamma: [f32; WIDTH],
     pub final_beta: [f32; WIDTH],
 }
@@ -6816,6 +6821,7 @@ impl Ema4Weights {
                 .map(|i| ((i * 19 + 7) % 37) as f32 * 0.0011 - 0.020)
                 .collect(),
             blocks: std::array::from_fn(|_| BlockWeights::default()),
+            extra_blocks: Vec::new(),
             final_gamma: [1.; WIDTH],
             final_beta: [0.; WIDTH],
         };
@@ -6831,6 +6837,35 @@ impl Ema4Weights {
         Ok(result)
     }
 
+    /// Opt-in P2 depth extension. The historical four blocks remain intact.
+    pub fn with_depth(mut self, depth: usize) -> Result<Self, ModelError> {
+        if !matches!(depth, 4 | 6 | 8) {
+            return Err(ModelError::Invalid("P2 depth must be 4, 6 or 8".into()));
+        }
+        self.extra_blocks.clear();
+        for layer in LAYERS..depth {
+            let mut block = BlockWeights {
+                residual_mem_scale: 0.,
+                residual_ff_scale: 0.,
+                ..BlockWeights::default()
+            };
+            if self.matrix_seed != 0 {
+                for (row, values) in block.operator.weight.iter_mut().enumerate() {
+                    for (col, value) in values.iter_mut().enumerate() {
+                        *value = matrix_sample(self.matrix_seed, layer, 0, row * WIDTH + col);
+                    }
+                }
+            }
+            self.extra_blocks.push(block);
+        }
+        Ok(self)
+    }
+
+    pub fn layers(&self) -> usize { LAYERS + self.extra_blocks.len() }
+
+    pub fn all_blocks(&self) -> impl Iterator<Item = &BlockWeights> {
+        self.blocks.iter().chain(self.extra_blocks.iter())
+    }
     pub const fn parameter_count(vocabulary: usize) -> usize {
         // Eight physical projection roles share one W per block. The head is
         // tied to the embedding rather than a second trainable matrix.
@@ -6856,6 +6891,15 @@ impl Ema4Weights {
     ) -> usize {
         Self::parameter_count_for(vocabulary, mode)
             + if matches!(ema, EmaMode::Selective) { LAYERS * WIDTH } else { 0 }
+    }
+
+    pub const fn parameter_count_for_configuration(
+        vocabulary: usize, mode: MatrixMode, ema: EmaMode, depth: usize, residual: bool,
+    ) -> usize {
+        let base = Self::parameter_count_for_ema(vocabulary, mode, ema);
+        let shared = vocabulary * WIDTH + 2 * WIDTH;
+        let per_layer = (base - shared) / LAYERS;
+        shared + per_layer * depth + if residual { 2 * depth } else { 0 }
     }
 
     /// Preserve the existing shared-matrix consumer API.
@@ -6889,6 +6933,16 @@ impl Ema4Weights {
         role_init: RoleInit,
         ema: EmaMode,
     ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
+        self.trainable_parameters_with_configuration(mode, role_init, ema, false)
+    }
+
+    pub fn trainable_parameters_with_configuration(
+        &self,
+        mode: MatrixMode,
+        role_init: RoleInit,
+        ema: EmaMode,
+        residual: bool,
+    ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
         let fixed = [
             "ones_column",
             "inv_width",
@@ -6904,7 +6958,7 @@ impl Ema4Weights {
             "delta_scale",
         ];
         let parameters = self
-            .bindings_with_init_and_ema(0, mode, role_init, ema)?
+            .bindings_with_configuration(0, mode, role_init, ema, residual)?
             .into_iter()
             .filter(|(name, _)| {
                 name != "token"
@@ -6914,7 +6968,9 @@ impl Ema4Weights {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         let elements: usize = parameters.values().map(|t| t.values().len()).sum();
-        if elements != Self::parameter_count_for_ema(self.vocabulary, mode, ema) {
+        if elements != Self::parameter_count_for_configuration(
+            self.vocabulary, mode, ema, self.layers(), residual
+        ) {
             return Err(ModelError::Invalid(format!(
                 "trainable parameter inventory mismatch: {elements}"
             )));
@@ -6951,6 +7007,17 @@ impl Ema4Weights {
         mode: MatrixMode,
         role_init: RoleInit,
         ema: EmaMode,
+    ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
+        self.bindings_with_configuration(token, mode, role_init, ema, false)
+    }
+
+    pub fn bindings_with_configuration(
+        &self,
+        token: usize,
+        mode: MatrixMode,
+        role_init: RoleInit,
+        ema: EmaMode,
+        residual: bool,
     ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
         if token >= self.vocabulary || self.embedding.len() != self.vocabulary * WIDTH {
             return Err(ModelError::Invalid(
@@ -7023,7 +7090,7 @@ impl Ema4Weights {
                 vec![self.delta_scale],
             )?;
         }
-        for (layer, b) in self.blocks.iter().enumerate() {
+        for (layer, b) in self.all_blocks().enumerate() {
             for role_weight in 0..(if mode == MatrixMode::Independent {
                 ROLES
             } else {
@@ -7120,6 +7187,14 @@ impl Ema4Weights {
                     vec![1, WIDTH],
                     b.decay_gate.to_vec(),
                 )?;
+            }
+            if residual {
+                for (name, value) in [
+                    ("residual_mem_scale", b.residual_mem_scale),
+                    ("residual_ff_scale", b.residual_ff_scale),
+                ] {
+                    insert(&mut result, &format!("{name}_{layer}"), vec![1, 1], vec![value])?;
+                }
             }
             for (label, value) in [
                 ("gate_scale", b.gate_scale),
@@ -7357,6 +7432,7 @@ struct BlockStepPorts {
     minus_scalar: NodeId,
     delta_scale: Option<NodeId>,
     ema: EmaMode,
+    residual: bool,
 }
 
 fn block_step(
@@ -7374,6 +7450,7 @@ fn block_step(
         minus_scalar,
         delta_scale,
         ema,
+        residual,
     }: BlockStepPorts,
     mode: MatrixMode,
 ) -> Result<NodeId, ModelError> {
@@ -7532,7 +7609,14 @@ fn block_step(
     model.next_state(&format!("mem_{layer}"), new_state)?;
     let rm = model.graph_mut().mul(r, new_state)?;
     let delta = project(model, rm, 3, &p)?;
-    let delta = model.graph_mut().mul(delta, half_vec)?;
+    let mut delta = model.graph_mut().mul(delta, half_vec)?;
+    if residual {
+        let scale = model.parameter(
+            format!("residual_mem_scale_{layer}"), vec![1, 1], Domain::Finite,
+        )?;
+        let scale = model.graph_mut().broadcast_to(scale, Shape::new(vec![1, WIDTH])?)?;
+        delta = model.graph_mut().mul(delta, scale)?;
+    }
     x = model.graph_mut().add(x, delta)?;
 
     let f = layer_norm(model.graph_mut(), x, norm2_gamma, norm2_beta, norm)?;
@@ -7551,7 +7635,14 @@ fn block_step(
     let down0 = project(model, h0, 0, &p)?;
     let down1 = project(model, h1, 1, &p)?;
     let down = model.graph_mut().add(down0, down1)?;
-    let down = model.graph_mut().mul(down, half_vec)?;
+    let mut down = model.graph_mut().mul(down, half_vec)?;
+    if residual {
+        let scale = model.parameter(
+            format!("residual_ff_scale_{layer}"), vec![1, 1], Domain::Finite,
+        )?;
+        let scale = model.graph_mut().broadcast_to(scale, Shape::new(vec![1, WIDTH])?)?;
+        down = model.graph_mut().mul(down, scale)?;
+    }
     Ok(model.graph_mut().add(x, down)?)
 }
 
@@ -7569,6 +7660,20 @@ pub fn architecture_model_for_ema(
     mode: MatrixMode,
     ema: EmaMode,
 ) -> Result<Model, ModelError> {
+    architecture_model_for_configuration(vocabulary, mode, ema, LAYERS, false)
+}
+
+/// P2: opt-in depth and per-branch residual gates. Legacy graph is unchanged.
+pub fn architecture_model_for_configuration(
+    vocabulary: usize,
+    mode: MatrixMode,
+    ema: EmaMode,
+    depth: usize,
+    residual: bool,
+) -> Result<Model, ModelError> {
+    if !matches!(depth, 4 | 6 | 8) {
+        return Err(ModelError::Invalid("P2 depth must be 4, 6 or 8".into()));
+    }
     if vocabulary == 0 || vocabulary > 4096 {
         return Err(ModelError::Invalid("vocabulary must be 1..=4096".into()));
     }
@@ -7581,6 +7686,11 @@ pub fn architecture_model_for_ema(
     };
     let model_name = if ema == EmaMode::Selective {
         "torus16-mix-ema4-lm-selective"
+    } else {
+        model_name
+    };
+    let model_name = if depth != LAYERS || residual {
+        "torus16-mix-ema4-lm-depth-residual-p2"
     } else {
         model_name
     };
@@ -7621,8 +7731,9 @@ pub fn architecture_model_for_ema(
         minus_scalar,
         delta_scale,
         ema,
+        residual,
     };
-    for layer in 0..LAYERS {
+    for layer in 0..depth {
         x = block_step(&mut model, x, layer, block_ports, mode)?;
     }
     let gamma = model.parameter("final_gamma", vec![1, WIDTH], Domain::Finite)?;
