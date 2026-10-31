@@ -111,6 +111,32 @@ fn log_gate_parameter_diagnostics(
     Ok(())
 }
 
+fn log_p2_residual_scales(
+    params: &BTreeMap<String, Tensor<f32>>,
+    depth: usize,
+    residual: bool,
+    window: usize,
+) -> Result<(), Box<dyn Error>> {
+    if !residual {
+        return Ok(());
+    }
+    for layer in 0..depth {
+        let mem = params
+            .get(&format!("residual_mem_scale_{layer}"))
+            .ok_or("missing P2 memory residual parameter")?.values()[0];
+        let ff = params
+            .get(&format!("residual_ff_scale_{layer}"))
+            .ok_or("missing P2 FF residual parameter")?.values()[0];
+        if !mem.is_finite() || !ff.is_finite() {
+            return Err("P2 residual scale became non-finite".into());
+        }
+        println!(
+            "p2_residual_scales window={window} layer={layer} mem={mem:.7} ff={ff:.7} scope=parameter_only"
+        );
+    }
+    Ok(())
+}
+
 fn override_mix_bias(
     params: &mut BTreeMap<String, Tensor<f32>>,
     bindings: &mut [(String, Tensor<f32>)],
@@ -1535,6 +1561,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
             if eval_due {
                 log_gate_parameter_diagnostics(&params, ema_mode, iteration + 1, depth)?;
+                log_p2_residual_scales(&params, depth, residual, iteration + 1)?;
             }
             if improved {
                 let best_path = checkpoint_path.with_extension("best.ckpt");
@@ -1670,6 +1697,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         best_validation.unwrap_or(bpc as f32),
     );
     log_gate_parameter_diagnostics(&params, ema_mode, train_windows, depth)?;
+    log_p2_residual_scales(&params, depth, residual, train_windows)?;
     let final_nll = nll_nats_from_bpc(bpc);
     println!(
         "validation_final_nll_nats={final_nll:.6} validation_best_nll_nats={:.6} target_nll_nats={P0_TARGET_NLL_NATS:.6} final_target_met={} scored_characters={count} scope=validation_only",
