@@ -293,6 +293,7 @@ fn auto_build_refuses_successful_but_disconnected_property() {
 }
 
 #[test]
+#[ignore = "requires Lean 4, llc, sha256sum and Graphviz dot; run in the full Nix devShell"]
 fn auto_build_creates_dot_and_png_before_manifest_and_replays_without_mutation() {
     // The previous auto-build failed after Lean/PTX because SHA256SUMS listed
     // architecture.dot even though only verify_bundle wrote it.

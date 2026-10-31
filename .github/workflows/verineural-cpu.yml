@@ -1,0 +1,47 @@
+name: RepoSpool and VeriNeural CPU
+
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    name: RepoSpool snapshot and VeriNeural tests (no GPU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout committed sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pinned RepoSpool locally
+        run: |
+          cargo install --locked --root "$RUNNER_TEMP/repospool" \\
+            --git https://github.com/iivkis/repospool.git \\
+            --rev 3f7ff9570c9302690b21b96be84e7adb95b6990a repospool
+          echo "$RUNNER_TEMP/repospool/bin" >> "$GITHUB_PATH"
+
+      - name: Generate and verify .repospool
+        run: |
+          repospool generate .
+          repospool verify --artifact .repospool --repo .
+
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: repospool-${{ github.sha }}
+          path: .repospool
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: VeriNeural CPU tests only (ignored GPU/toolchain tests excluded)
+        run: cargo test --locked -p verineural --lib --tests

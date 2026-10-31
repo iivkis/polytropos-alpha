@@ -1,7 +1,7 @@
 version: '3'
 
 # Local developer commands. AI agents must not execute build/test commands
-# by default; see AGENTS.md. No CI is configured.
+# by default; see AGENTS.md. GitHub Actions only checks VeriNeural CPU tests.
 tasks:
   default:
     desc: Show available tasks
