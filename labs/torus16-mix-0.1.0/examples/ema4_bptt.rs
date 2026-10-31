@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use torus16_mix_lab::corpus::CharCorpus;
 use torus16_mix_lab::ema4::{
-    Ema4Weights, EmaMode, MatrixMode, RoleInit, architecture_model_for_ema,
+    Ema4Weights, EmaMode, MatrixMode, RoleInit, architecture_model_for_configuration,
 };
 use torus16_mix_lab::ema4_checkpoint::{
     CheckpointRequirements, Ema4Checkpoint, FingerprintContext, architecture_fingerprint,
@@ -63,6 +63,7 @@ fn log_gate_parameter_diagnostics(
     params: &BTreeMap<String, Tensor<f32>>,
     ema: EmaMode,
     window: usize,
+    depth: usize,
 ) -> Result<(), Box<dyn Error>> {
     let mut bias_gate_saturated = 0usize;
     let mut bias_gate_total = 0usize;
@@ -70,7 +71,7 @@ fn log_gate_parameter_diagnostics(
     let mut role_gate_l2_sum = 0f64;
     let mut role_gate_elements = 0usize;
     let mut decay_gate_l2_sum = 0f64;
-    for layer in 0..torus16_mix_lab::ema4::LAYERS {
+    for layer in 0..depth {
         for role in 0..torus16_mix_lab::ROLES {
             let bias = params
                 .get(&format!("mix_bias_{layer}_{role}"))
@@ -114,11 +115,12 @@ fn override_mix_bias(
     params: &mut BTreeMap<String, Tensor<f32>>,
     bindings: &mut [(String, Tensor<f32>)],
     bias: f32,
+    depth: usize,
 ) -> Result<(), Box<dyn Error>> {
     if !bias.is_finite() {
         return Err("P1 mix bias override must be finite".into());
     }
-    for layer in 0..torus16_mix_lab::ema4::LAYERS {
+    for layer in 0..depth {
         for role in 0..torus16_mix_lab::ROLES {
             let name = format!("mix_bias_{layer}_{role}");
             let value = Tensor::from_slice(vec![1, 1], &[bias])?;
@@ -173,6 +175,7 @@ struct HoldoutContext<'a> {
     mode: MatrixMode,
     role_init: RoleInit,
     ema: EmaMode,
+    residual: bool,
     corpus: &'a CharCorpus,
 }
 
@@ -190,13 +193,14 @@ fn holdout_bpc(
         mode,
         role_init,
         ema,
+        residual,
         corpus,
     } = context;
     if interval.start >= interval.end || interval.end >= corpus.validation.len() {
         return Err("holdout interval outside validation corpus".into());
     }
     let count = interval.len();
-    let mut bindings = weights.bindings_with_init_and_ema(0, *mode, *role_init, *ema)?;
+    let mut bindings = weights.bindings_with_configuration(0, *mode, *role_init, *ema, *residual)?;
     for (name, tensor) in &mut bindings {
         if let Some(updated) = params.get(name) {
             *tensor = updated.clone();
@@ -231,7 +235,7 @@ impl<'a> ReusedHoldout<'a> {
     fn prepare(context: &HoldoutContext<'a>) -> Result<Self, Box<dyn Error>> {
         let initial = context
             .weights
-            .bindings_with_init_and_ema(0, context.mode, context.role_init, context.ema)?;
+            .bindings_with_configuration(0, context.mode, context.role_init, context.ema, context.residual)?;
         // Reconstruct the execution slice through the public Model API.
         // Include next-state roots and the writable state sources, even if a
         // next-state computation does not read its previous value.
@@ -830,6 +834,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         mode: matrix_mode,
         role_init,
         ema: ema_mode,
+        residual,
         corpus: &corpus,
     };
     // This unfused compilation is diagnostic only; it neither launches
@@ -1507,7 +1512,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 optimizer: checkpoint_optimizer.unwrap_or_else(|| optimizer.checkpoint()),
             };
             if eval_due {
-                log_gate_parameter_diagnostics(&params, ema_mode, iteration + 1)?;
+                log_gate_parameter_diagnostics(&params, ema_mode, iteration + 1, depth)?;
             }
             if improved {
                 let best_path = checkpoint_path.with_extension("best.ckpt");
@@ -1642,7 +1647,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         validation_start.elapsed().as_secs_f64(),
         best_validation.unwrap_or(bpc as f32),
     );
-    log_gate_parameter_diagnostics(&params, ema_mode, train_windows)?;
+    log_gate_parameter_diagnostics(&params, ema_mode, train_windows, depth)?;
     let final_nll = nll_nats_from_bpc(bpc);
     println!(
         "validation_final_nll_nats={final_nll:.6} validation_best_nll_nats={:.6} target_nll_nats={P0_TARGET_NLL_NATS:.6} final_target_met={} scored_characters={count} scope=validation_only",
@@ -1753,7 +1758,7 @@ mod p1_bias_tests {
             .trainable_parameters_with_init_and_ema(MatrixMode::RoleDelta4, RoleInit::Matched, EmaMode::Selective).unwrap();
         let mut bindings = weights
             .bindings_with_init_and_ema(0, MatrixMode::RoleDelta4, RoleInit::Matched, EmaMode::Selective).unwrap();
-        override_mix_bias(&mut parameters, &mut bindings, 0.).unwrap();
+        override_mix_bias(&mut parameters, &mut bindings, 0., 4).unwrap();
         for layer in 0..torus16_mix_lab::ema4::LAYERS {
             for role in 0..torus16_mix_lab::ROLES {
                 let name = format!("mix_bias_{layer}_{role}");
@@ -1762,6 +1767,6 @@ mod p1_bias_tests {
                 assert_eq!(bound.1.values(), &[0.]);
             }
         }
-        assert!(override_mix_bias(&mut parameters, &mut bindings, f32::NAN).is_err());
+        assert!(override_mix_bias(&mut parameters, &mut bindings, f32::NAN, 4).is_err());
     }
 }
