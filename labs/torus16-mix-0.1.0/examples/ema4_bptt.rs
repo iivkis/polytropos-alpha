@@ -50,6 +50,13 @@ fn cross_entropy(logits: &[f32], target: usize) -> Result<(f32, Vec<f32>), Box<d
     }
     Ok((loss, grad))
 }
+
+const P0_TARGET_NLL_NATS: f64 = 1.5;
+
+fn nll_nats_from_bpc(bpc: f64) -> f64 {
+    bpc * std::f64::consts::LN_2
+}
+
 fn option_usize(
     name: &str,
     default: usize,
@@ -260,6 +267,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The public temporal API already supports 16 steps; this lab keeps
     // BPTT=2 by default. The 16-step path is explicitly budgeted below.
     let window_len = option_usize("TORUS16_BPTT", 2, 2, 16)?;
+    // The P0 quality path deliberately supports only affordable BPTT4/8.
+    // Keep legacy BPTT16 CPU diagnostics available outside this gate.
+    let p0_resource_gate = match std::env::var("TORUS16_P0_RESOURCE_GATE").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => return Err("TORUS16_P0_RESOURCE_GATE must be 0 or 1".into()),
+    };
+    if p0_resource_gate && !matches!(window_len, 4 | 8) {
+        return Err("Torus16 P0 training supports only BPTT4 or BPTT8".into());
+    }
     // Diagnostic only: build and execute the genuine training graph, but
     // never run AdamW, write checkpoints, score holdout or read test tokens.
     let setup_probe_only = match std::env::var("TORUS16_SETUP_PROBE_ONLY").as_deref() {
@@ -525,6 +542,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         None
     };
+    // P0 phase-2 must resume an actually completed phase-1 checkpoint.
+    // This is checked before LLVM/CUDA preparation, and is also valid for
+    // interrupted phase-2 runs (where the cursor already exceeds the floor).
+    let min_resume_windows = option_usize("TORUS16_MIN_RESUME_WINDOWS", 0, 0, 1_000_000)?;
+    if min_resume_windows > 0
+        && pending_checkpoint
+            .as_ref()
+            .is_none_or(|saved| saved.completed_windows < min_resume_windows)
+    {
+        return Err(format!(
+            "P0 resume requires checkpoint with at least {min_resume_windows} completed windows"
+        )
+        .into());
+    }
     if lr_decay_5x && pending_checkpoint.is_none() {
         return Err(
             "TORUS16_LR_DECAY_5X requires a resumable checkpoint; fresh training is forbidden"
@@ -747,6 +778,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         "gpu_compilation_inventory bptt={} graph_kernels={} unique_functions={} llvm_ir_bytes={} graph_tensor_bytes={} note=graph_tensor_bytes_excludes_cuda_graph_jit_staging_and_driver",
         window_len, new_kernels, unique_functions, llvm_bytes, tensor_bytes
     );
+    if p0_resource_gate {
+        // A bounded P0 graph must fail before llc or CUDA driver JIT.
+        // Graph tensor bytes exclude CUDA Graph, staging, driver and JIT
+        // allocations, so this is not a guarantee about peak VRAM.
+        let max_kernels = option_usize("TORUS16_P0_MAX_KERNELS", 40_000, 1, 1_000_000)?;
+        let max_unique = option_usize("TORUS16_P0_MAX_UNIQUE_KERNELS", 4096, 1, 1_000_000)?;
+        let max_tensor_mib = option_usize("TORUS16_P0_MAX_TENSOR_MIB", 256, 1, 65_536)?;
+        let max_tensor_bytes = max_tensor_mib
+            .checked_mul(1024 * 1024)
+            .ok_or("P0 tensor allocation limit overflow")?;
+        let over_budget = bptt16_over_budget(
+            new_kernels,
+            unique_functions,
+            tensor_bytes,
+            max_kernels,
+            max_unique,
+            max_tensor_bytes,
+        );
+        println!(
+            "p0_resource_preflight bptt={} graph_kernels={}/{} unique_functions={}/{} graph_tensor_bytes={}/{} over_budget={} scope=graph_tensors_only",
+            window_len, new_kernels, max_kernels, unique_functions, max_unique,
+            tensor_bytes, max_tensor_bytes, over_budget
+        );
+        if over_budget {
+            return Err("Torus16 P0 graph over budget before LLVM/CUDA; reduce BPTT or explicitly adjust P0 limits after inspecting available resources".into());
+        }
+    }
     // Calculate graph tensor storage before LLVM NVPTX and CUDA module JIT.
     // This does not account for JIT, CUDA Graph or staging overhead.
     if window_len == 16 {
@@ -1314,6 +1372,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     role_init.as_str(),
                     matrix_seed,
                 );
+                let nll = nll_nats_from_bpc(bpc);
+                println!(
+                    "validation_window={} validation_nll_nats={nll:.6} target_nll_nats={P0_TARGET_NLL_NATS:.6} target_met={} scored_characters={count} scope=validation_only",
+                    iteration + 1,
+                    nll <= P0_TARGET_NLL_NATS
+                );
                 Some(bpc as f32)
             } else {
                 None
@@ -1385,9 +1449,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         if curve_windows == 1024 || iteration + 1 == train_windows {
             println!(
-                "train_curve_window={} train_bpc_mean={:.6} window_count={} matrix_mode={}",
+                "train_curve_window={} train_bpc_mean={:.6} train_nll_nats_mean={:.6} window_count={} matrix_mode={}",
                 iteration + 1,
                 curve_bpc_sum / curve_windows as f64,
+                nll_nats_from_bpc(curve_bpc_sum / curve_windows as f64),
                 curve_windows,
                 matrix_mode.as_str(),
             );
@@ -1469,6 +1534,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         validation_start.elapsed().as_secs_f64(),
         best_validation.unwrap_or(bpc as f32),
     );
+    let final_nll = nll_nats_from_bpc(bpc);
+    println!(
+        "validation_final_nll_nats={final_nll:.6} validation_best_nll_nats={:.6} target_nll_nats={P0_TARGET_NLL_NATS:.6} final_target_met={} scored_characters={count} scope=validation_only",
+        nll_nats_from_bpc(f64::from(best_validation.unwrap_or(bpc as f32))),
+        final_nll <= P0_TARGET_NLL_NATS,
+    );
     // Rank/architecture selection must not repeatedly consult test data.
     // Stop before loading the best snapshot or touching test-suffix tokens.
     if skip_test {
@@ -1517,6 +1588,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         matrix_seed,
         best_path.display(),
     );
+    let test_nll = nll_nats_from_bpc(test_bpc);
+    println!(
+        "test_nll_nats={test_nll:.6} target_nll_nats={P0_TARGET_NLL_NATS:.6} target_met={} scored_characters={test_count} scope=selected_checkpoint_test",
+        test_nll <= P0_TARGET_NLL_NATS,
+    );
     println!(
         "NOTE: GPU approximate-exp softmax CE seed + VJP, host CE metric; GPU AdamW experimental when opted in; no formal FP32 gradient/optimizer proof."
     );
@@ -1534,5 +1610,25 @@ mod bptt16_budget_tests {
         assert!(bptt16_over_budget(63_707, 320, 2_000, 40_000, 4096, 4096));
         assert!(bptt16_over_budget(63_707, 4097, 2_000, 80_000, 4096, 4096));
         assert!(bptt16_over_budget(63_707, 320, 4097, 80_000, 4096, 4096));
+    }
+}
+
+#[cfg(test)]
+mod p0_metric_tests {
+    use super::{P0_TARGET_NLL_NATS, nll_nats_from_bpc};
+
+    #[test]
+    fn bpc_nll_units_and_target_are_consistent() {
+        let bpc = 1.5 / std::f64::consts::LN_2;
+        assert!((nll_nats_from_bpc(bpc) - P0_TARGET_NLL_NATS).abs() < 1e-12);
+        assert!((nll_nats_from_bpc(2.444471) - 1.6943).abs() < 1e-4);
+    }
+
+    #[test]
+    fn graph_resource_limits_are_separate() {
+        use super::bptt16_over_budget;
+        assert!(!bptt16_over_budget(31_759, 200, 10_000_000, 40_000, 4096, 256 * 1024 * 1024));
+        assert!(bptt16_over_budget(40_001, 200, 10_000_000, 40_000, 4096, 256 * 1024 * 1024));
+        assert!(bptt16_over_budget(31_759, 4097, 10_000_000, 40_000, 4096, 256 * 1024 * 1024));
     }
 }

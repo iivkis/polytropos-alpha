@@ -1727,3 +1727,93 @@ tasks:
         echo "Assess kernel count, replay time, wall-clock throughput and validation BPC."
         echo "Different IR fingerprints/FP32 gradient reduction order: do not require bitwise checkpoint equality."
         echo "Logs and checkpoints: $out"
+
+  verify-torus16-p0:
+    desc: CPU unit checks for Torus16 P0 NLL/BPC and independent resource budgets
+    deps: [prepare]
+    cmds:
+      - cargo test -p torus16-mix-lab --example ema4_bptt p0_metric_tests -- --nocapture
+
+  train-torus16-p0:
+    desc: Explicit staged rank4 training; BPTT4 default, optional BPTT8, never test or BPTT16
+    deps: [prepare]
+    cmds:
+      - |
+        set -eu
+        # Phase 1 trains with LR=0.002. Phase 2 resumes the last phase-1
+        # checkpoint at LR=0.0004 without resetting AdamW moments or cursor.
+        # The separately selected best checkpoint never controls the cursor.
+        phase="${TORUS16_P0_PHASE:-base}"
+        case "$phase" in base|decay) ;; *) echo "TORUS16_P0_PHASE must be base or decay" >&2; exit 1 ;; esac
+        bptt="${TORUS16_P0_BPTT:-4}"
+        case "$bptt" in 4|8) ;; *) echo "P0 only supports BPTT4 or BPTT8" >&2; exit 1 ;; esac
+        seed="${TORUS16_P0_SEED:-0}"
+        case "$seed" in ''|*[!0-9]*) echo "P0 seed must be a nonnegative integer" >&2; exit 1 ;; esac
+        base_tokens="${TORUS16_P0_BASE_TOKENS:-131072}"
+        total_tokens="${TORUS16_P0_TOTAL_TOKENS:-262144}"
+        eval_tokens="${TORUS16_P0_EVAL_TOKENS:-32768}"
+        for count in "$base_tokens" "$total_tokens" "$eval_tokens"; do
+          case "$count" in ''|*[!0-9]*) echo "P0 token budgets must be positive integers" >&2; exit 1 ;; esac
+          if [ "$count" -le 0 ] || [ "$((count % bptt))" -ne 0 ]; then
+            echo "P0 budgets must be positive and divisible by BPTT=$bptt" >&2; exit 1
+          fi
+        done
+        if [ "$base_tokens" -ge "$total_tokens" ] || [ "$total_tokens" -ge 472373 ] || [ "$eval_tokens" -gt 32768 ]; then
+          echo "P0 budgets must satisfy 0 < base < total < 472373, eval <= 32768" >&2; exit 1
+        fi
+        source="${TORUS16_P0_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
+        if [ ! -f "$source" ]; then
+          echo "Missing TorusShared warm-start checkpoint: $source" >&2; exit 1
+        fi
+        output="${TORUS16_P0_DIR:-target/torus16-p0/rank4-bptt$bptt-seed$seed}"
+        mkdir -p "$output"
+        # Protect the historical experiment and target checkpoints.
+        export TORUS16_WARM_START_SHARED="$source"
+        export TORUS16_MATRIX_MODE=role_delta_4 TORUS16_ROLE_INIT=matched
+        export TORUS16_MATRIX_SEED="$seed" TORUS16_DELTA_SCALE=1 TORUS16_BPTT="$bptt"
+        export TORUS16_GPU_ADAMW=1 TORUS16_SKIP_TEST=1 TORUS16_SKIP_FUSION_BASELINE=1
+        export TORUS16_HOIST_PARAMETER_ONLY=1 TORUS16_REUSE_HOLDOUT=1
+        export TORUS16_VAL_LIMIT=8192 TORUS16_TEST_LIMIT=8192
+        export TORUS16_EVAL_EVERY="$((eval_tokens / bptt))"
+        export TORUS16_CHECKPOINT_EVERY=1024 TORUS16_METRIC_EVERY=32
+        export TORUS16_LLC_OPT=0 TORUS16_THREADS_PER_BLOCK=256
+        export TORUS16_P0_RESOURCE_GATE=1
+        export TORUS16_P0_MAX_KERNELS="${TORUS16_P0_MAX_KERNELS:-40000}"
+        export TORUS16_P0_MAX_UNIQUE_KERNELS="${TORUS16_P0_MAX_UNIQUE_KERNELS:-4096}"
+        export TORUS16_P0_MAX_TENSOR_MIB="${TORUS16_P0_MAX_TENSOR_MIB:-256}"
+        unset TORUS16_FRESH TORUS16_CORPUS TORUS16_VERIFY_FUSION TORUS16_BENCH_COMPARE
+        unset TORUS16_BENCH_FUSED TORUS16_GPU_FEEDBACK_EVENTS TORUS16_INITIAL_PROBE_PATH
+        unset TORUS16_LR_DECAY_5X TORUS16_MIN_RESUME_WINDOWS
+        if [ "$phase" = base ]; then
+          checkpoint="$output/base.ckpt"
+          export TORUS16_TRAIN_WINDOWS="$((base_tokens / bptt))"
+        else
+          # Do not enter a lower-LR stage with a partial phase-1 run.
+          # The runner separately validates the checkpoint cursor before JIT.
+          if [ ! -f "$output/base.ckpt" ] || [ ! -f "$output/base.best.ckpt" ]; then
+            echo "P0 decay requires completed base checkpoint and validation-best checkpoint" >&2; exit 1
+          fi
+          checkpoint="$output/decay.ckpt"
+          if [ ! -f "$checkpoint" ]; then
+            if [ -e "$output/decay.best.ckpt" ]; then
+              echo "P0 decay state inconsistent: best exists but decay checkpoint does not" >&2; exit 1
+            fi
+            cp "$output/base.ckpt" "$checkpoint"
+            cp "$output/base.best.ckpt" "$output/decay.best.ckpt"
+          fi
+          export TORUS16_LR_DECAY_5X=1
+          export TORUS16_MIN_RESUME_WINDOWS="$((base_tokens / bptt))"
+          export TORUS16_TRAIN_WINDOWS="$((total_tokens / bptt))"
+        fi
+        log="$output/$phase.log"
+        echo "P0 phase=$phase bptt=$bptt base_tokens=$base_tokens total_tokens=$total_tokens eval_tokens=$eval_tokens checkpoint=$checkpoint" | tee -a "$log"
+        TORUS16_CHECKPOINT="$checkpoint" cargo run --release -p torus16-mix-lab --example ema4_bptt >>"$log" 2>&1 || {
+          tail -n 80 "$log"; echo "P0 failed; see $log" >&2; exit 1
+        }
+        grep '^p0_resource_preflight ' "$log" | tail -n 1
+        grep '^training_adamw_lr=' "$log" | tail -n 1
+        grep '^training_total_s=' "$log" | tail -n 1
+        grep '^holdout_reset_streaming_bpc=' "$log" | tail -n 1
+        grep '^validation_final_nll_nats=' "$log" | tail -n 1
+        grep '^test_evaluation=SKIPPED ' "$log" | tail -n 1
+        echo "P0 result: $log (test not opened; hardware training is not a certification)"

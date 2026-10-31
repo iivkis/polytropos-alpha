@@ -62,14 +62,21 @@ task train-lab-torus16-ema4-bptt
 task verify-torus16-role-delta
 task compare-torus16-role-delta-ranks
 
-# Исследование v0.2 и ограничений BPTT16
+# P0: доступное длительное обучение (BPTT4 по умолчанию)
+task verify-torus16-p0
+task train-torus16-p0
+TORUS16_P0_PHASE=decay task train-torus16-p0
+
+# Опционально: отдельный BPTT8 на тех же бюджетах символов
+TORUS16_P0_BPTT=8 task train-torus16-p0
+
+# Исторический benchmarking v0.2 (не P0)
 task benchmark-torus16-v02-horizon
-task benchmark-torus16-v02-bptt16
 ```
 
 Команды выполняются разработчиком в `nix develop`, как предписывает [AGENTS.md](../../AGENTS.md). GPU-задачи требуют NVIDIA, CUDA Driver и совместимого `VERINEURAL_CUDA_ARCH`. Некоторые сценарии требуют подготовленного baseline checkpoint; его путь настраивается через `TORUS16_ROLE_DELTA_SOURCE`. Актуальные переменные и проверки находятся **только** в [Taskfile.yml](../../Taskfile.yml), не дублируются здесь.
 
-**Предупреждение BPTT16:** `benchmark-torus16-v02-bptt16` выполняет только безопасный CPU preflight, без запуска CUDA PTX JIT, обучения и измерения качества. Предыдущий полный BPTT16 граф приводил к чрезмерно большой компиляции; экспериментальный GPU setup разрешается отдельно и ограниченно, см. [план перехода](V0.2_TRANSITION.md).
+**Текущий план:** BPTT16/32 больше не используются для достижения NLL <= 1.5 на RTX 5060. Исторический `benchmark-torus16-v02-bptt16` оставлен как CPU preflight, но не является рекомендованным этапом. P0 использует BPTT4/8, отдельные каталоги checkpoint, двухэтапный LR, validation 8192 символов и закрытый test. Для второй фазы сначала должен завершиться `base`; оба запуска должны использовать одинаковые `TORUS16_P0_*` бюджеты, seed и corpus. Данные 512-символьного исторического test нельзя использовать для отбора конфигураций. Детали, границы доказательств и критерии приёмки см. в [плане перехода](V0.2_TRANSITION.md).
 
 ## Граница верификации
 
