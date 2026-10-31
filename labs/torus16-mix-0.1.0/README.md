@@ -61,6 +61,10 @@ task test-lab-torus16-ema4-checkpoint
 task train-lab-torus16-ema4-bptt
 task verify-torus16-role-delta
 task compare-torus16-role-delta-ranks
+task verify-torus16-p1
+task train-torus16-p1
+# Optional NVIDIA parity check:
+task verify-gpu-torus16-p1
 
 # P0: доступное длительное обучение (BPTT4 по умолчанию)
 task verify-torus16-p0
@@ -75,6 +79,15 @@ task benchmark-torus16-v02-horizon
 ```
 
 Команды выполняются разработчиком в `nix develop`, как предписывает [AGENTS.md](../../AGENTS.md). GPU-задачи требуют NVIDIA, CUDA Driver и совместимого `VERINEURAL_CUDA_ARCH`. Некоторые сценарии требуют подготовленного baseline checkpoint; его путь настраивается через `TORUS16_ROLE_DELTA_SOURCE`. Актуальные переменные и проверки находятся **только** в [Taskfile.yml](../../Taskfile.yml), не дублируются здесь.
+
+**P1:** `TORUS16_EMA_MODE=static|selective` выбирает историческую или
+входо-зависимую EMA. В режиме `selective` на каждом из четырёх блоков
+добавлен обучаемый `decay_gate_[layer]` (48 чисел, начально нули).
+`task train-torus16-p1` запускает paired ablation с одинаковыми
+rank/BPTT/seed/warm-start и отдельными checkpoint; test закрыт.
+Вывод `p1_gate_diagnostics` содержит только статистику параметров,
+**не** измерение gates на активациях. Для rank8/BPTT8 требуется
+явно задать `TORUS16_P1_RANK=8 TORUS16_P1_BPTT=8`.
 
 **Текущий план:** BPTT16/32 больше не используются для достижения NLL <= 1.5 на RTX 5060. Исторический `benchmark-torus16-v02-bptt16` оставлен как CPU preflight, но не является рекомендованным этапом. P0 использует BPTT4/8, отдельные каталоги checkpoint, двухэтапный LR, validation 8192 символов и закрытый test. Для второй фазы сначала должен завершиться `base`; оба запуска должны использовать одинаковые `TORUS16_P0_*` бюджеты, seed и corpus. Данные 512-символьного исторического test нельзя использовать для отбора конфигураций. Детали, границы доказательств и критерии приёмки см. в [плане перехода](V0.2_TRANSITION.md).
 

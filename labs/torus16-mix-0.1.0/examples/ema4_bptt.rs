@@ -10,7 +10,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Instant;
 use torus16_mix_lab::corpus::CharCorpus;
-use torus16_mix_lab::ema4::{Ema4Weights, MatrixMode, RoleInit, architecture_model_for};
+use torus16_mix_lab::ema4::{
+    Ema4Weights, EmaMode, MatrixMode, RoleInit, architecture_model_for_ema,
+};
 use torus16_mix_lab::ema4_checkpoint::{
     CheckpointRequirements, Ema4Checkpoint, FingerprintContext, architecture_fingerprint,
     fingerprint,
@@ -57,6 +59,57 @@ fn nll_nats_from_bpc(bpc: f64) -> f64 {
     bpc * std::f64::consts::LN_2
 }
 
+fn log_gate_parameter_diagnostics(
+    params: &BTreeMap<String, Tensor<f32>>,
+    ema: EmaMode,
+    window: usize,
+) -> Result<(), Box<dyn Error>> {
+    let mut bias_gate_saturated = 0usize;
+    let mut bias_gate_total = 0usize;
+    let mut bias_gate_sum = 0f64;
+    let mut role_gate_l2_sum = 0f64;
+    let mut role_gate_elements = 0usize;
+    let mut decay_gate_l2_sum = 0f64;
+    for layer in 0..torus16_mix_lab::ema4::LAYERS {
+        for role in 0..torus16_mix_lab::ROLES {
+            let bias = params
+                .get(&format!("mix_bias_{layer}_{role}"))
+                .ok_or("missing mix bias for P1 diagnostics")?.values()[0];
+            let gate = 1f64 / (1f64 + (-(bias as f64)).exp());
+            bias_gate_sum += gate;
+            bias_gate_total += 1;
+            if !(0.05..=0.95).contains(&gate) {
+                bias_gate_saturated += 1;
+            }
+            let w = params.get(&format!("mix_gate_{layer}_{role}"))
+                .ok_or("missing mix gate for P1 diagnostics")?;
+            for &v in w.values() {
+                role_gate_l2_sum += f64::from(v) * f64::from(v);
+                role_gate_elements += 1;
+            }
+        }
+        if ema == EmaMode::Selective {
+            let gate = params.get(&format!("decay_gate_{layer}"))
+                .ok_or("missing selective decay gate")?;
+            for &v in gate.values() {
+                decay_gate_l2_sum += f64::from(v) * f64::from(v);
+            }
+        }
+    }
+    // Not an activation histogram: current token-dependent gates may
+    // differ substantially from the bias-only approximation.
+    println!(
+        "p1_gate_diagnostics window={window} ema_mode={} mix_bias_only_sigmoid_mean={:.6} mix_bias_only_saturated={}/{} mix_gate_rms={:.6} decay_gate_l2={:.6} scope=parameter_only_not_activation_stats",
+        ema.as_str(),
+        bias_gate_sum / bias_gate_total as f64,
+        bias_gate_saturated,
+        bias_gate_total,
+        (role_gate_l2_sum / role_gate_elements as f64).sqrt(),
+        decay_gate_l2_sum.sqrt(),
+    );
+    Ok(())
+}
+
 fn option_usize(
     name: &str,
     default: usize,
@@ -96,6 +149,7 @@ struct HoldoutContext<'a> {
     weights: &'a Ema4Weights,
     mode: MatrixMode,
     role_init: RoleInit,
+    ema: EmaMode,
     corpus: &'a CharCorpus,
 }
 
@@ -112,13 +166,14 @@ fn holdout_bpc(
         weights,
         mode,
         role_init,
+        ema,
         corpus,
     } = context;
     if interval.start >= interval.end || interval.end >= corpus.validation.len() {
         return Err("holdout interval outside validation corpus".into());
     }
     let count = interval.len();
-    let mut bindings = weights.bindings_with_init(0, *mode, *role_init)?;
+    let mut bindings = weights.bindings_with_init_and_ema(0, *mode, *role_init, *ema)?;
     for (name, tensor) in &mut bindings {
         if let Some(updated) = params.get(name) {
             *tensor = updated.clone();
@@ -153,7 +208,7 @@ impl<'a> ReusedHoldout<'a> {
     fn prepare(context: &HoldoutContext<'a>) -> Result<Self, Box<dyn Error>> {
         let initial = context
             .weights
-            .bindings_with_init(0, context.mode, context.role_init)?;
+            .bindings_with_init_and_ema(0, context.mode, context.role_init, context.ema)?;
         // Reconstruct the execution slice through the public Model API.
         // Include next-state roots and the writable state sources, even if a
         // next-state computation does not read its previous value.
@@ -312,6 +367,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if matrix_mode != MatrixMode::Independent && role_init != RoleInit::Matched {
         return Err("Shared/Role-Delta modes require TORUS16_ROLE_INIT=matched".into());
     }
+    // Explicit EMA mode. Static preserves existing fingerprints and runs.
+    let ema_name = std::env::var("TORUS16_EMA_MODE").unwrap_or_else(|_| "static".into());
+    let ema_mode = EmaMode::parse(&ema_name)
+        .ok_or("TORUS16_EMA_MODE must be static or selective")?;
     let matrix_seed = std::env::var("TORUS16_MATRIX_SEED")
         .ok()
         .map(|seed| seed.parse::<u64>())
@@ -365,9 +424,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     if warm_start_path.is_some() && matrix_mode.role_delta_rank().is_none() {
         return Err("TORUS16_WARM_START_SHARED requires a Role-Delta matrix mode".into());
     }
-    let model = architecture_model_for(vocab, matrix_mode)?;
-    let mut initial_bindings = weights.bindings_with_init(0, matrix_mode, role_init)?;
-    let mut trainable_initial = weights.trainable_parameters_with_init(matrix_mode, role_init)?;
+    let model = architecture_model_for_ema(vocab, matrix_mode, ema_mode)?;
+    let mut initial_bindings =
+        weights.bindings_with_init_and_ema(0, matrix_mode, role_init, ema_mode)?;
+    let mut trainable_initial =
+        weights.trainable_parameters_with_init_and_ema(matrix_mode, role_init, ema_mode)?;
     if let Some(path) = warm_start_path.as_ref() {
         // Do not overwrite the warm-start source through a target checkpoint
         // alias, including an existing symlink or the validation-best path.
@@ -379,7 +440,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         let saved = Ema4Checkpoint::read(path)?;
-        trainable_initial = saved.role_delta_warm_start(&weights, matrix_mode, corpus_hash)?;
+        // Warm-start copies historical static parameters; selective decay
+        // gates remain zero and are newly trained. Never import optimizer
+        // moments/cursor from the shared checkpoint.
+        for (name, value) in saved.role_delta_warm_start(&weights, matrix_mode, corpus_hash)? {
+            if !trainable_initial.contains_key(&name) {
+                return Err(format!("warm-start introduced unknown parameter: {name}").into());
+            }
+            trainable_initial.insert(name, value);
+        }
         // Fingerprint the *effective* initial parameters. Resume therefore
         // rejects absent/changed warm-start sources, not just changed shapes.
         for (name, tensor) in &mut initial_bindings {
@@ -670,8 +739,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     );
     println!(
-        "experiment_matrix_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} adapter_rank={:?} delta_scale={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
+        "experiment_matrix_mode={} ema_mode={} role_init={} matrix_seed={} architecture_fingerprint={} projection_matrices={} matrix_values={} trainable_values={} adapter_rank={:?} delta_scale={} optimizer=AdamW corpus_hash={} bptt={} train_windows={} val_limit={} test_limit={} eval_every={}",
         matrix_mode.as_str(),
+        ema_mode.as_str(),
         role_init.as_str(),
         matrix_seed,
         model_fingerprint,
@@ -725,6 +795,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         weights: &weights,
         mode: matrix_mode,
         role_init,
+        ema: ema_mode,
         corpus: &corpus,
     };
     // This unfused compilation is diagnostic only; it neither launches
@@ -1401,6 +1472,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 states,
                 optimizer: checkpoint_optimizer.unwrap_or_else(|| optimizer.checkpoint()),
             };
+            if eval_due {
+                log_gate_parameter_diagnostics(&params, ema_mode, iteration + 1)?;
+            }
             if improved {
                 let best_path = checkpoint_path.with_extension("best.ckpt");
                 snapshot.write_atomic(&best_path)?;
@@ -1534,6 +1608,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         validation_start.elapsed().as_secs_f64(),
         best_validation.unwrap_or(bpc as f32),
     );
+    log_gate_parameter_diagnostics(&params, ema_mode, train_windows)?;
     let final_nll = nll_nats_from_bpc(bpc);
     println!(
         "validation_final_nll_nats={final_nll:.6} validation_best_nll_nats={:.6} target_nll_nats={P0_TARGET_NLL_NATS:.6} final_target_met={} scored_characters={count} scope=validation_only",

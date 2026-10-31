@@ -2,10 +2,10 @@
 //! numerical autoregressive GPU steps. No PyTorch is involved.
 use torus16_mix_lab::WIDTH;
 use torus16_mix_lab::ema4::{
-    Ema4Weights, HISTORY, LAYERS, MatrixMode, RESEARCH_VOCAB, architecture_model,
-    architecture_model_for,
+    Ema4Weights, EmaMode, HISTORY, LAYERS, MatrixMode, RESEARCH_VOCAB, RoleInit,
+    architecture_model, architecture_model_for, architecture_model_for_ema,
 };
-use torus16_mix_lab::ema4_reference::{Ema4State, reference_step};
+use torus16_mix_lab::ema4_reference::{Ema4State, reference_step, reference_step_for_ema};
 use verineural::{GpuEngine, GpuLaunchConfig, Model, Tensor, unroll_model};
 
 fn onehot(token: usize, vocabulary: usize) -> Tensor<f32> {
@@ -714,6 +714,98 @@ fn role_delta_initial_gpu_logits_and_state_match() {
                     );
                 }
             }
+        }
+    }
+}
+
+// P1: no new CUDA kernels or bespoke IR. Only the consumer composition changes.
+#[test]
+fn selective_ema_parameter_inventory_and_identity_initialization() {
+    assert_eq!(EmaMode::parse("static"), Some(EmaMode::Static));
+    assert_eq!(EmaMode::parse("selective"), Some(EmaMode::Selective));
+    assert_eq!(EmaMode::parse("bptt16"), None);
+    let vocab = 16;
+    let w = Ema4Weights::deterministic_seeded(vocab, 41).unwrap();
+    for matrix in [MatrixMode::RoleDelta4, MatrixMode::RoleDelta8] {
+        let baseline = w.trainable_parameters_for(matrix).unwrap();
+        let selective = w.trainable_parameters_with_init_and_ema(matrix, RoleInit::Matched, EmaMode::Selective).unwrap();
+        assert_eq!(selective.len(), baseline.len() + LAYERS);
+        assert_eq!(selective.values().map(|t| t.values().len()).sum::<usize>(),
+            Ema4Weights::parameter_count_for_ema(vocab, matrix, EmaMode::Selective));
+        for (name, value) in &baseline {
+            assert_eq!(&selective[name], value, "{name}");
+        }
+        for layer in 0..LAYERS {
+            let gate = &selective[&format!("decay_gate_{layer}")];
+            assert_eq!(gate.shape().dims(), &[1, WIDTH]);
+            assert!(gate.values().iter().all(|&v| v.to_bits() == 0));
+        }
+        let sm = architecture_model_for_ema(vocab, matrix, EmaMode::Static).unwrap();
+        let dm = architecture_model_for_ema(vocab, matrix, EmaMode::Selective).unwrap();
+        assert_eq!(sm.state_links().len(), dm.state_links().len());
+        assert!(sm.source("decay_gate_0").is_none());
+        assert!(dm.source("decay_gate_0").is_some());
+        assert!(dm.bind(w.bindings_with_init_and_ema(0, matrix, RoleInit::Matched, EmaMode::Selective).unwrap()).is_ok());
+        assert!(sm.bind(w.bindings_with_init_and_ema(0, matrix, RoleInit::Matched, EmaMode::Selective).unwrap()).is_err());
+    }
+}
+
+#[test]
+fn selective_ema_scalar_oracle_preserves_zero_gate_and_responds_to_input() {
+    let mut w = Ema4Weights::deterministic(16).unwrap();
+    let mut static_state = Ema4State::default();
+    let mut selective_state = Ema4State::default();
+    for token in [3, 7, 2] {
+        let static_logits = reference_step(&w, token, &mut static_state).unwrap();
+        let selective_logits = reference_step_for_ema(&w, token, &mut selective_state, EmaMode::Selective).unwrap();
+        assert_eq!(static_logits, selective_logits);
+        assert_eq!(static_state.0[0].memory, selective_state.0[0].memory);
+    }
+    for layer in 0..LAYERS {
+        w.blocks[layer].decay_gate = [3.; WIDTH];
+    }
+    let mut changed = Ema4State::default();
+    let _ = reference_step_for_ema(&w, 3, &mut changed, EmaMode::Selective).unwrap();
+    let mut default_state = Ema4State::default();
+    let _ = reference_step(&w, 3, &mut default_state).unwrap();
+    assert!(changed.0.iter().zip(default_state.0.iter()).any(|(a, b)|
+        a.memory.iter().zip(b.memory.iter()).any(|(&x, &y)| (x - y).abs() > 1e-9)
+    ));
+}
+
+#[test]
+#[ignore = "NVIDIA CUDA Graph/LLVM NVPTX required: selective EMA must match independent scalar reference"]
+fn selective_ema_gpu_streaming_matches_scalar_reference() {
+    let vocabulary = 16;
+    let mut w = Ema4Weights::deterministic(vocabulary).unwrap();
+    // Nonzero strength prevents the test from merely confirming static identity.
+    for layer in 0..LAYERS {
+        w.blocks[layer].decay_gate = [2.; WIDTH];
+    }
+    let model = architecture_model_for_ema(vocabulary, MatrixMode::TorusShared, EmaMode::Selective).unwrap();
+    let engine = GpuEngine::new(
+        "llc",
+        std::env::var("VERINEURAL_CUDA_ARCH").unwrap_or_else(|_| "sm_52".into()),
+    ).with_launch_config(GpuLaunchConfig::default().with_approximate_exp());
+    let root = std::env::temp_dir().join(format!("vn_selective_ema_{}", std::process::id()));
+    let mut exec = engine.prepare_model(
+        &model,
+        w.bindings_with_init_and_ema(0, MatrixMode::TorusShared, RoleInit::Matched, EmaMode::Selective).unwrap(),
+        &root,
+    ).unwrap();
+    let mut state = Ema4State::default();
+    for token in [3, 7, 2] {
+        exec.set_input("token", &onehot(token, vocabulary)).unwrap();
+        exec.step().unwrap();
+        let expected = reference_step_for_ema(&w, token, &mut state, EmaMode::Selective).unwrap();
+        let actual = exec.output("logits").unwrap();
+        for (a, b) in actual.values().iter().zip(expected.iter()) {
+            assert!(a.is_finite() && b.is_finite());
+            assert!((a - b).abs() < 2e-3 + 2e-3 * b.abs(), "{a} vs {b}");
+        }
+        let gpu_memory = exec.state("mem_0").unwrap();
+        for lane in 0..WIDTH {
+            assert!((gpu_memory.values()[lane] - state.0[0].memory[lane]).abs() < 2e-3);
         }
     }
 }

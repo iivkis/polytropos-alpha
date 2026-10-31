@@ -76,6 +76,31 @@ impl MatrixMode {
     }
 }
 
+/// EMA memory update policy. Static preserves the historical Semantic IR
+/// and checkpoint identities; Selective introduces input-dependent decay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmaMode {
+    Static,
+    Selective,
+}
+
+impl EmaMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Selective => "selective",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "static" => Some(Self::Static),
+            "selective" => Some(Self::Selective),
+            _ => None,
+        }
+    }
+}
+
 /// Initialization policy for independent role matrices. The matched mode
 /// isolates weight tying; the diverse mode is the unconstrained baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,6 +146,8 @@ pub struct BlockWeights {
     pub norm2_gamma: [f32; WIDTH],
     pub norm2_beta: [f32; WIDTH],
     pub decay_logit: [f32; WIDTH],
+    /// Selective decay strength. Zero initializes exactly at static EMA.
+    pub decay_gate: [f32; WIDTH],
     pub gate_scale: f32,
     pub depthwise1: [[f32; WIDTH]; KERNEL],
     pub depthwise2: [[f32; WIDTH]; KERNEL],
@@ -137,6 +164,7 @@ impl Default for BlockWeights {
             norm2_gamma: [1.0; WIDTH],
             norm2_beta: [0.0; WIDTH],
             decay_logit: std::array::from_fn(|i| 2.7 - i as f32 * (4.2 / (WIDTH - 1) as f32)),
+            decay_gate: [0.; WIDTH],
             gate_scale: 1.0,
             depthwise1: std::array::from_fn(|tap| {
                 std::array::from_fn(|lane| ((tap * 13 + lane * 3) % 17) as f32 * 0.002 - 0.016)
@@ -211,6 +239,17 @@ impl Ema4Weights {
             + mode.adapter_parameter_count()
     }
 
+    /// Extended parameter inventory: one [1,48] gate per layer only for
+    /// selective EMA. It must match the model's actual declared parameters.
+    pub const fn parameter_count_for_ema(
+        vocabulary: usize,
+        mode: MatrixMode,
+        ema: EmaMode,
+    ) -> usize {
+        Self::parameter_count_for(vocabulary, mode)
+            + if matches!(ema, EmaMode::Selective) { LAYERS * WIDTH } else { 0 }
+    }
+
     /// Preserve the existing shared-matrix consumer API.
     pub fn trainable_parameters(
         &self,
@@ -233,6 +272,15 @@ impl Ema4Weights {
         mode: MatrixMode,
         role_init: RoleInit,
     ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
+        self.trainable_parameters_with_init_and_ema(mode, role_init, EmaMode::Static)
+    }
+
+    pub fn trainable_parameters_with_init_and_ema(
+        &self,
+        mode: MatrixMode,
+        role_init: RoleInit,
+        ema: EmaMode,
+    ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
         let fixed = [
             "ones_column",
             "inv_width",
@@ -248,7 +296,7 @@ impl Ema4Weights {
             "delta_scale",
         ];
         let parameters = self
-            .bindings_with_init(0, mode, role_init)?
+            .bindings_with_init_and_ema(0, mode, role_init, ema)?
             .into_iter()
             .filter(|(name, _)| {
                 name != "token"
@@ -258,7 +306,7 @@ impl Ema4Weights {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         let elements: usize = parameters.values().map(|t| t.values().len()).sum();
-        if elements != Self::parameter_count_for(self.vocabulary, mode) {
+        if elements != Self::parameter_count_for_ema(self.vocabulary, mode, ema) {
             return Err(ModelError::Invalid(format!(
                 "trainable parameter inventory mismatch: {elements}"
             )));
@@ -285,6 +333,16 @@ impl Ema4Weights {
         token: usize,
         mode: MatrixMode,
         role_init: RoleInit,
+    ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
+        self.bindings_with_init_and_ema(token, mode, role_init, EmaMode::Static)
+    }
+
+    pub fn bindings_with_init_and_ema(
+        &self,
+        token: usize,
+        mode: MatrixMode,
+        role_init: RoleInit,
+        ema: EmaMode,
     ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
         if token >= self.vocabulary || self.embedding.len() != self.vocabulary * WIDTH {
             return Err(ModelError::Invalid(
@@ -445,6 +503,14 @@ impl Ema4Weights {
                     &format!("{label}_{layer}"),
                     vec![1, WIDTH],
                     values.to_vec(),
+                )?;
+            }
+            if ema == EmaMode::Selective {
+                insert(
+                    &mut result,
+                    &format!("decay_gate_{layer}"),
+                    vec![1, WIDTH],
+                    b.decay_gate.to_vec(),
                 )?;
             }
             for (label, value) in [
@@ -682,6 +748,7 @@ struct BlockStepPorts {
     inv_sqrt: NodeId,
     minus_scalar: NodeId,
     delta_scale: Option<NodeId>,
+    ema: EmaMode,
 }
 
 fn block_step(
@@ -698,6 +765,7 @@ fn block_step(
         inv_sqrt,
         minus_scalar,
         delta_scale,
+        ema,
     }: BlockStepPorts,
     mode: MatrixMode,
 ) -> Result<NodeId, ModelError> {
@@ -833,7 +901,22 @@ fn block_step(
     let v = project(model, a, 2, &p)?;
     let kv = model.graph_mut().mul(k, v)?;
     let state = model.state(format!("mem_{layer}"), vec![1, WIDTH], Domain::Any)?;
-    let decay = sigmoid(model.graph_mut(), decay, one_vec, minus_vec)?;
+    // Selective alpha_t = sigmoid(decay_logit + a_t * decay_gate).
+    // a_t is the normalized/Conv9 token representation. The zero gate
+    // starts at the same decay as historical Static EMA, and the extra
+    // parameters are assembled solely from shared VeriNeural primitives.
+    let decay_logit = if ema == EmaMode::Selective {
+        let strength = model.parameter(
+            format!("decay_gate_{layer}"),
+            vec![1, WIDTH],
+            Domain::Finite,
+        )?;
+        let conditioned = model.graph_mut().mul(a, strength)?;
+        model.graph_mut().add(decay, conditioned)?
+    } else {
+        decay
+    };
+    let decay = sigmoid(model.graph_mut(), decay_logit, one_vec, minus_vec)?;
     let old = model.graph_mut().mul(decay, state)?;
     let one_minus = model.graph_mut().sub(one_vec, decay)?;
     let injected = model.graph_mut().mul(one_minus, kv)?;
@@ -870,6 +953,14 @@ pub fn architecture_model(vocabulary: usize) -> Result<Model, ModelError> {
 }
 
 pub fn architecture_model_for(vocabulary: usize, mode: MatrixMode) -> Result<Model, ModelError> {
+    architecture_model_for_ema(vocabulary, mode, EmaMode::Static)
+}
+
+pub fn architecture_model_for_ema(
+    vocabulary: usize,
+    mode: MatrixMode,
+    ema: EmaMode,
+) -> Result<Model, ModelError> {
     if vocabulary == 0 || vocabulary > 4096 {
         return Err(ModelError::Invalid("vocabulary must be 1..=4096".into()));
     }
@@ -879,6 +970,11 @@ pub fn architecture_model_for(vocabulary: usize, mode: MatrixMode) -> Result<Mod
         MatrixMode::RoleDelta2 | MatrixMode::RoleDelta4 | MatrixMode::RoleDelta8 => {
             "torus16-mix-ema4-lm-role-delta"
         }
+    };
+    let model_name = if ema == EmaMode::Selective {
+        "torus16-mix-ema4-lm-selective"
+    } else {
+        model_name
     };
     let mut model = ModelBuilder::new(model_name, "0.2.0");
     let token = model.input("token", vec![1, vocabulary], Domain::NonNegativeFinite)?;
@@ -916,6 +1012,7 @@ pub fn architecture_model_for(vocabulary: usize, mode: MatrixMode) -> Result<Mod
         inv_sqrt,
         minus_scalar,
         delta_scale,
+        ema,
     };
     for layer in 0..LAYERS {
         x = block_step(&mut model, x, layer, block_ports, mode)?;

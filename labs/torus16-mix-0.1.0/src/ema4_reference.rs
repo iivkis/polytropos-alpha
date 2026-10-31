@@ -1,6 +1,6 @@
 //! Independent scalar streaming reference for EMA4-LM regression tests.
 //! This is a host *oracle*, never an alternate CUDA/IR/backend implementation.
-use super::ema4::{BlockWeights, Ema4Weights, HISTORY, LAYERS};
+use super::ema4::{BlockWeights, Ema4Weights, EmaMode, HISTORY, LAYERS};
 use crate::{WIDTH, reference_project};
 use verineural::NeuralError;
 
@@ -63,6 +63,7 @@ fn step_block(
     x: [f32; WIDTH],
     p: &BlockWeights,
     state: &mut BlockState,
+    ema: EmaMode,
 ) -> Result<[f32; WIDTH], NeuralError> {
     let a = norm(&x, &p.norm1_gamma, &p.norm1_beta);
     let a = conv(&a, &mut state.history1, &p.depthwise1, p.conv_scale1);
@@ -70,7 +71,13 @@ fn step_block(
     let key = reference_project(&a, &p.operator, 1)?;
     let value = reference_project(&a, &p.operator, 2)?;
     for lane in 0..WIDTH {
-        let decay = sigmoid(p.decay_logit[lane]);
+        let decay_logit = p.decay_logit[lane]
+            + if ema == EmaMode::Selective {
+                a[lane] * p.decay_gate[lane]
+            } else {
+                0.
+            };
+        let decay = sigmoid(decay_logit);
         state.memory[lane] =
             decay * state.memory[lane] + (1. - decay) * sigmoid(key[lane]) * value[lane];
     }
@@ -108,6 +115,16 @@ pub fn reference_step(
     token: usize,
     states: &mut Ema4State,
 ) -> Result<Vec<f32>, NeuralError> {
+    reference_step_for_ema(parameters, token, states, EmaMode::Static)
+}
+
+/// Scalar independent reference for an input-conditioned EMA transition.
+pub fn reference_step_for_ema(
+    parameters: &Ema4Weights,
+    token: usize,
+    states: &mut Ema4State,
+    ema: EmaMode,
+) -> Result<Vec<f32>, NeuralError> {
     assert!(
         token < parameters.vocabulary
             && parameters.embedding.len() == parameters.vocabulary * WIDTH
@@ -115,7 +132,7 @@ pub fn reference_step(
     let mut x: [f32; WIDTH] =
         std::array::from_fn(|lane| parameters.embedding[token * WIDTH + lane]);
     for layer in 0..LAYERS {
-        x = step_block(x, &parameters.blocks[layer], &mut states.0[layer])?;
+        x = step_block(x, &parameters.blocks[layer], &mut states.0[layer], ema)?;
     }
     let x = norm(&x, &parameters.final_gamma, &parameters.final_beta);
     Ok((0..parameters.vocabulary)
