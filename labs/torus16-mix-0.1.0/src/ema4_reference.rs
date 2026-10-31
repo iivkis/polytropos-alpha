@@ -64,6 +64,7 @@ fn step_block(
     p: &BlockWeights,
     state: &mut BlockState,
     ema: EmaMode,
+    residual: bool,
 ) -> Result<[f32; WIDTH], NeuralError> {
     let a = norm(&x, &p.norm1_gamma, &p.norm1_beta);
     let a = conv(&a, &mut state.history1, &p.depthwise1, p.conv_scale1);
@@ -84,7 +85,10 @@ fn step_block(
     let gated: [f32; WIDTH] =
         std::array::from_fn(|lane| sigmoid(gate[lane] * p.gate_scale) * state.memory[lane]);
     let projected = reference_project(&gated, &p.operator, 3)?;
-    let x = std::array::from_fn(|lane| x[lane] + 0.5 * projected[lane]);
+    let x = std::array::from_fn(|lane| {
+        let update = 0.5 * projected[lane];
+        x[lane] + if residual { update * p.residual_mem_scale } else { update }
+    });
 
     let a = norm(&x, &p.norm2_gamma, &p.norm2_beta);
     let f = conv(&a, &mut state.history2, &p.depthwise2, p.conv_scale2);
@@ -105,7 +109,8 @@ fn step_block(
     let d0 = reference_project(&h0, &p.operator, 0)?;
     let d1 = reference_project(&h1, &p.operator, 1)?;
     Ok(std::array::from_fn(|lane| {
-        x[lane] + 0.5 * (d0[lane] + d1[lane])
+        let update = 0.5 * (d0[lane] + d1[lane]);
+        x[lane] + if residual { update * p.residual_ff_scale } else { update }
     }))
 }
 
@@ -132,13 +137,51 @@ pub fn reference_step_for_ema(
     let mut x: [f32; WIDTH] =
         std::array::from_fn(|lane| parameters.embedding[token * WIDTH + lane]);
     for layer in 0..LAYERS {
-        x = step_block(x, &parameters.blocks[layer], &mut states.0[layer], ema)?;
+        x = step_block(x, &parameters.blocks[layer], &mut states.0[layer], ema, false)?;
     }
     let x = norm(&x, &parameters.final_gamma, &parameters.final_beta);
     Ok((0..parameters.vocabulary)
         .map(|word| {
             (0..WIDTH)
                 .map(|lane| x[lane] * parameters.embedding[word * WIDTH + lane])
+                .sum::<f32>()
+        })
+        .collect())
+}
+
+/// Scalar P2 state with an explicitly configured number of blocks.
+#[derive(Clone, Debug)]
+pub struct DepthState(pub Vec<BlockState>);
+
+impl DepthState {
+    pub fn new(depth: usize) -> Self {
+        Self((0..depth).map(|_| BlockState::default()).collect())
+    }
+}
+
+/// Independent streaming scalar oracle for bounded-depth P2.
+pub fn reference_step_configuration(
+    weights: &Ema4Weights,
+    token: usize,
+    states: &mut DepthState,
+    ema: EmaMode,
+    residual: bool,
+) -> Result<Vec<f32>, NeuralError> {
+    assert!(
+        token < weights.vocabulary
+            && states.0.len() == weights.layers()
+            && weights.embedding.len() == weights.vocabulary * WIDTH
+    );
+    let mut x: [f32; WIDTH] =
+        std::array::from_fn(|lane| weights.embedding[token * WIDTH + lane]);
+    for (block, state) in weights.all_blocks().zip(states.0.iter_mut()) {
+        x = step_block(x, block, state, ema, residual)?;
+    }
+    let x = norm(&x, &weights.final_gamma, &weights.final_beta);
+    Ok((0..weights.vocabulary)
+        .map(|word| {
+            (0..WIDTH)
+                .map(|lane| x[lane] * weights.embedding[word * WIDTH + lane])
                 .sum::<f32>()
         })
         .collect())
