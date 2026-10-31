@@ -24,9 +24,7 @@ jobs:
 
       - name: Install pinned RepoSpool locally
         run: |
-          cargo install --locked --root "$RUNNER_TEMP/repospool" \\
-            --git https://github.com/iivkis/repospool.git \\
-            --rev 3f7ff9570c9302690b21b96be84e7adb95b6990a repospool
+          cargo install --locked --root "$RUNNER_TEMP/repospool" --git https://github.com/iivkis/repospool.git --rev 3f7ff9570c9302690b21b96be84e7adb95b6990a repospool
           echo "$RUNNER_TEMP/repospool/bin" >> "$GITHUB_PATH"
 
       - name: Generate and verify .repospool
