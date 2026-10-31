@@ -96,3 +96,7 @@ rank/BPTT/seed/warm-start и отдельными checkpoint; test закрыт.
 Результаты `GpuExecution` и CUDA Graph проверяются численно относительно независимых Rust reference. Это **не** доказательство IEEE-754, LLVM/PTX → SASS, аппаратного исполнения, сходимости обучения или глобальных свойств сети. Строгий путь сертификации Torus16 с экспонентой обязан отклонять неподдерживаемые операции; явный approximate-exp runtime остаётся экспериментальным. Не объявлять успешную проверку GPU/Lean без настоящего запуска.
 
 Детальная история архитектурных изменений, latency/throughput, checkpoint parity, сравнений rank и графовых ограничений хранится в [EXPERIMENT_RESULTS.md](EXPERIMENT_RESULTS.md) и [V0.2_TRANSITION.md](V0.2_TRANSITION.md), а формальные границы библиотеки описаны в [SPEC.md](../../docs/verineural/SPEC.md).
+
+Для проверки влияния исходного смещения смешивания без изменения
+протокола: `TORUS16_P1_MIX_BIAS_INIT=zero task train-torus16-p1`.
+Сравнивать с обычным `preserve`; checkpoint разнесены по каталогам.

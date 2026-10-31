@@ -1823,6 +1823,7 @@ tasks:
     deps: [prepare]
     cmds:
       - cargo test -p torus16-mix-lab --test ema4 selective_ema_ -- --nocapture
+      - cargo test -p torus16-mix-lab --example ema4_bptt p1_bias_tests -- --nocapture
 
   verify-gpu-torus16-p1:
     desc: Optional NVIDIA selective EMA GPU vs independent scalar streaming reference
@@ -1855,7 +1856,12 @@ tasks:
         case "$seed" in ''|*[!0-9]*) echo "P1 seed must be a nonnegative integer" >&2; exit 1 ;; esac
         source="${TORUS16_P1_SOURCE:-{{.TORUS16_SHARED_BASELINE_CHECKPOINT}}}"
         if [ ! -f "$source" ]; then echo "Missing TorusShared baseline: $source" >&2; exit 1; fi
+        mix_bias="${TORUS16_P1_MIX_BIAS_INIT:-preserve}"
+        case "$mix_bias" in preserve|zero) ;; *) echo "P1 mix bias must be preserve or zero" >&2; exit 1 ;; esac
+        export TORUS16_P1_MIX_BIAS_INIT="$mix_bias"
         out="${TORUS16_P1_DIR:-target/torus16-p1/rank$rank-bptt$bptt-seed$seed}"
+        # Never mix a reset-bias trajectory with pretrained-bias resume.
+        out="$out/mix-$mix_bias"
         mkdir -p "$out"
         export TORUS16_MATRIX_MODE="role_delta_$rank" TORUS16_ROLE_INIT=matched
         export TORUS16_MATRIX_SEED="$seed" TORUS16_DELTA_SCALE=1
@@ -1873,12 +1879,13 @@ tasks:
         for ema in static selective; do
           export TORUS16_EMA_MODE="$ema"
           log="$out/$ema.log"
-          echo "P1 mode=$ema rank=$rank bptt=$bptt train_tokens=$tokens validation_chars=8192 test=SKIPPED" | tee -a "$log"
+          echo "P1 mode=$ema rank=$rank bptt=$bptt mix_bias=$mix_bias train_tokens=$tokens validation_chars=8192 test=SKIPPED" | tee -a "$log"
           TORUS16_CHECKPOINT="$out/$ema.ckpt" cargo run --release -p torus16-mix-lab --example ema4_bptt >>"$log" 2>&1 || {
             tail -n 100 "$log"; echo "P1 $ema failed: $log" >&2; exit 1
           }
           grep '^experiment_matrix_mode=' "$log" | tail -n 1
           grep '^p0_resource_preflight ' "$log" | tail -n 1
+          grep '^p1_mix_bias_initialization=' "$log" | tail -n 1
           grep '^p1_gate_diagnostics ' "$log" | tail -n 1
           grep '^training_total_s=' "$log" | tail -n 1
           grep '^validation_final_nll_nats=' "$log" | tail -n 1

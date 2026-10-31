@@ -110,6 +110,29 @@ fn log_gate_parameter_diagnostics(
     Ok(())
 }
 
+fn override_mix_bias(
+    params: &mut BTreeMap<String, Tensor<f32>>,
+    bindings: &mut [(String, Tensor<f32>)],
+    bias: f32,
+) -> Result<(), Box<dyn Error>> {
+    if !bias.is_finite() {
+        return Err("P1 mix bias override must be finite".into());
+    }
+    for layer in 0..torus16_mix_lab::ema4::LAYERS {
+        for role in 0..torus16_mix_lab::ROLES {
+            let name = format!("mix_bias_{layer}_{role}");
+            let value = Tensor::from_slice(vec![1, 1], &[bias])?;
+            let parameter = params.get_mut(&name)
+                .ok_or("P1 mix bias parameter missing")?;
+            *parameter = value.clone();
+            let binding = bindings.iter_mut().find(|(key, _)| key == &name)
+                .ok_or("P1 mix bias binding missing")?;
+            binding.1 = value;
+        }
+    }
+    Ok(())
+}
+
 fn option_usize(
     name: &str,
     default: usize,
@@ -465,6 +488,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             saved.parameters.len()
         );
     }
+    // Optional P1 ablation: reset pretrained role-mix biases *after*
+    // copying the TorusShared weights, so the experimental branch is
+    // distinguishable in both initial bindings and checkpoint fingerprint.
+    let mix_bias_mode = std::env::var("TORUS16_P1_MIX_BIAS_INIT")
+        .unwrap_or_else(|_| "preserve".into());
+    match mix_bias_mode.as_str() {
+        "preserve" => {}
+        "zero" => override_mix_bias(&mut trainable_initial, &mut initial_bindings, 0.0)?,
+        _ => return Err("TORUS16_P1_MIX_BIAS_INIT must be preserve or zero".into()),
+    }
+    println!("p1_mix_bias_initialization={mix_bias_mode} scope=pre_optimizer_initial_bindings");
     let parameter_count: usize = trainable_initial.values().map(|v| v.values().len()).sum();
     // Parameter-only subgraphs are pure and invariant within one BPTT
     // window. Opt in explicitly: the resulting training IR and therefore its
@@ -1705,5 +1739,29 @@ mod p0_metric_tests {
         assert!(!bptt16_over_budget(31_759, 200, 10_000_000, 40_000, 4096, 256 * 1024 * 1024));
         assert!(bptt16_over_budget(40_001, 200, 10_000_000, 40_000, 4096, 256 * 1024 * 1024));
         assert!(bptt16_over_budget(31_759, 4097, 10_000_000, 40_000, 4096, 256 * 1024 * 1024));
+    }
+}
+
+// P1 CPU-only checkpoint/parameter identity diagnostic. No CUDA required.
+#[cfg(test)]
+mod p1_bias_tests {
+    use super::{override_mix_bias, Ema4Weights, EmaMode, MatrixMode, RoleInit};
+    #[test]
+    fn mix_bias_override_updates_binding_and_trainable_inventory_together() {
+        let weights = Ema4Weights::deterministic(16).unwrap();
+        let mut parameters = weights
+            .trainable_parameters_with_init_and_ema(MatrixMode::RoleDelta4, RoleInit::Matched, EmaMode::Selective).unwrap();
+        let mut bindings = weights
+            .bindings_with_init_and_ema(0, MatrixMode::RoleDelta4, RoleInit::Matched, EmaMode::Selective).unwrap();
+        override_mix_bias(&mut parameters, &mut bindings, 0.).unwrap();
+        for layer in 0..torus16_mix_lab::ema4::LAYERS {
+            for role in 0..torus16_mix_lab::ROLES {
+                let name = format!("mix_bias_{layer}_{role}");
+                let bound = bindings.iter().find(|(n, _)| n == &name).unwrap();
+                assert_eq!(parameters[&name].values(), &[0.]);
+                assert_eq!(bound.1.values(), &[0.]);
+            }
+        }
+        assert!(override_mix_bias(&mut parameters, &mut bindings, f32::NAN).is_err());
     }
 }
