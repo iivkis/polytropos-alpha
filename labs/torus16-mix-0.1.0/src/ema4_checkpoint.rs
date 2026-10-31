@@ -1180,6 +1180,24 @@ mod tests {
                     .all(|(_, value)| value.values().iter().all(|value| value.to_bits() == 0))
             );
         }
+        // P2: a strictly validated four-layer source may initialize a deeper
+        // target, but newly added blocks must stay at their deterministic
+        // initialization and must not import optimizer moments or state.
+        for depth in [6, 8] {
+            let deep = weights.clone().with_depth(depth).unwrap();
+            let transferred = source
+                .role_delta_warm_start(&deep, MatrixMode::RoleDelta4, corpus)
+                .unwrap();
+            let fresh = deep.trainable_parameters_for(MatrixMode::RoleDelta4).unwrap();
+            assert_eq!(transferred.len(), fresh.len());
+            assert_eq!(transferred["weight_0"], trained["weight_0"]);
+            for layer in 4..depth {
+                let name = format!("weight_{layer}");
+                assert_eq!(transferred[&name], fresh[&name]);
+                let bias = format!("mix_bias_{layer}_0");
+                assert_eq!(transferred[&bias], fresh[&bias]);
+            }
+        }
         // Changes in imported pretrained weights must change the new
         // experiment fingerprint, independently of the source checkpoint's
         // previous optimizer state and cursor.
