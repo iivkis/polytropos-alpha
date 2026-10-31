@@ -20,6 +20,8 @@
 /crates/verineural/src/tests.rs
 /crates/verineural/src/bin/
 /crates/verineural/src/*.rs
+# Split GPU backend implementation is available on demand, not first-pass context.
+/crates/verineural/src/gpu/
 !/crates/verineural/src/lib.rs
 !/crates/verineural/src/ir.rs
 !/crates/verineural/src/model.rs
