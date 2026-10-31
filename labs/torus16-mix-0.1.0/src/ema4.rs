@@ -824,6 +824,7 @@ struct BlockStepPorts {
     minus_scalar: NodeId,
     delta_scale: Option<NodeId>,
     ema: EmaMode,
+    residual: bool,
 }
 
 fn block_step(
@@ -841,6 +842,7 @@ fn block_step(
         minus_scalar,
         delta_scale,
         ema,
+        residual,
     }: BlockStepPorts,
     mode: MatrixMode,
 ) -> Result<NodeId, ModelError> {
@@ -999,7 +1001,14 @@ fn block_step(
     model.next_state(&format!("mem_{layer}"), new_state)?;
     let rm = model.graph_mut().mul(r, new_state)?;
     let delta = project(model, rm, 3, &p)?;
-    let delta = model.graph_mut().mul(delta, half_vec)?;
+    let mut delta = model.graph_mut().mul(delta, half_vec)?;
+    if residual {
+        let scale = model.parameter(
+            format!("residual_mem_scale_{layer}"), vec![1, 1], Domain::Finite,
+        )?;
+        let scale = model.graph_mut().broadcast_to(scale, Shape::new(vec![1, WIDTH])?)?;
+        delta = model.graph_mut().mul(delta, scale)?;
+    }
     x = model.graph_mut().add(x, delta)?;
 
     let f = layer_norm(model.graph_mut(), x, norm2_gamma, norm2_beta, norm)?;
@@ -1018,7 +1027,14 @@ fn block_step(
     let down0 = project(model, h0, 0, &p)?;
     let down1 = project(model, h1, 1, &p)?;
     let down = model.graph_mut().add(down0, down1)?;
-    let down = model.graph_mut().mul(down, half_vec)?;
+    let mut down = model.graph_mut().mul(down, half_vec)?;
+    if residual {
+        let scale = model.parameter(
+            format!("residual_ff_scale_{layer}"), vec![1, 1], Domain::Finite,
+        )?;
+        let scale = model.graph_mut().broadcast_to(scale, Shape::new(vec![1, WIDTH])?)?;
+        down = model.graph_mut().mul(down, scale)?;
+    }
     Ok(model.graph_mut().add(x, down)?)
 }
 
@@ -1036,6 +1052,20 @@ pub fn architecture_model_for_ema(
     mode: MatrixMode,
     ema: EmaMode,
 ) -> Result<Model, ModelError> {
+    architecture_model_for_configuration(vocabulary, mode, ema, LAYERS, false)
+}
+
+/// P2: opt-in depth and per-branch residual gates. Legacy graph is unchanged.
+pub fn architecture_model_for_configuration(
+    vocabulary: usize,
+    mode: MatrixMode,
+    ema: EmaMode,
+    depth: usize,
+    residual: bool,
+) -> Result<Model, ModelError> {
+    if !matches!(depth, 4 | 6 | 8) {
+        return Err(ModelError::Invalid("P2 depth must be 4, 6 or 8".into()));
+    }
     if vocabulary == 0 || vocabulary > 4096 {
         return Err(ModelError::Invalid("vocabulary must be 1..=4096".into()));
     }
@@ -1048,6 +1078,11 @@ pub fn architecture_model_for_ema(
     };
     let model_name = if ema == EmaMode::Selective {
         "torus16-mix-ema4-lm-selective"
+    } else {
+        model_name
+    };
+    let model_name = if depth != LAYERS || residual {
+        "torus16-mix-ema4-lm-depth-residual-p2"
     } else {
         model_name
     };
@@ -1088,8 +1123,9 @@ pub fn architecture_model_for_ema(
         minus_scalar,
         delta_scale,
         ema,
+        residual,
     };
-    for layer in 0..LAYERS {
+    for layer in 0..depth {
         x = block_step(&mut model, x, layer, block_ports, mode)?;
     }
     let gamma = model.parameter("final_gamma", vec![1, WIDTH], Domain::Finite)?;
