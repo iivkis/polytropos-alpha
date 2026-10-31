@@ -100,3 +100,26 @@ rank/BPTT/seed/warm-start и отдельными checkpoint; test закрыт.
 Для проверки влияния исходного смещения смешивания без изменения
 протокола: `TORUS16_P1_MIX_BIAS_INIT=zero task train-torus16-p1`.
 Сравнивать с обычным `preserve`; checkpoint разнесены по каталогам.
+
+## P2: depth/residual (проверка на GPU ожидается)
+
+Режимы `4/6/8` блоков при ширине 48 доступны через
+`Ema4Weights::with_depth` и
+`architecture_model_for_configuration`; по умолчанию старые
+четырёхблочные архитектуры не меняются. Дополнительные блоки
+имеют zero-initialized residual scales для memory и FF путей,
+старые блоки начинают с масштаба 1.
+
+```sh
+task verify-torus16-p2
+task verify-gpu-torus16-p2
+task train-torus16-p2
+TORUS16_P2_DEPTH=8 task train-torus16-p2
+```
+
+По умолчанию сравниваются depth4 и depth6, Role-Delta rank4,
+static EMA, BPTT4, ограниченные GPU-ресурсы, одинаковые
+16384 обучающих символов, длинная validation и закрытый test.
+Ширина 64 пока не реализована: `TORUS16_P2_WIDTH=64`
+явно отклоняется. Исходники не подтверждают снижение NLL
+или выполнение аппаратных бюджетов до локального прогона.
