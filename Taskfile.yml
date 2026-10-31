@@ -1898,6 +1898,7 @@ tasks:
     deps: [prepare]
     cmds:
       - cargo test -p torus16-mix-lab --test ema4 p2_ -- --nocapture
+      - cargo test -p torus16-mix-lab --lib role_delta_warm_start_accepts_shared_and_rejects_incompatible_sources
 
   verify-gpu-torus16-p2:
     desc: Opt-in NVIDIA depth6 forward/recurrent state vs independent scalar oracle
