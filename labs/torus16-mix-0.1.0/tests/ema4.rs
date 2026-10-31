@@ -809,3 +809,17 @@ fn selective_ema_gpu_streaming_matches_scalar_reference() {
         }
     }
 }
+
+#[test]
+fn selective_ema_gate_has_reverse_gradient() {
+    // This exercises the same architecture-neutral AD path used by BPTT,
+    // without running a full time-unrolled training graph or GPU kernel.
+    let model = architecture_model_for_ema(16, MatrixMode::TorusShared, EmaMode::Selective)
+        .unwrap();
+    let gate = model.source("decay_gate_0").unwrap().0;
+    let logits = model.output("logits").unwrap();
+    let reverse = verineural::differentiate(model.graph(), logits, &[gate]).unwrap();
+    let gradient = reverse.gradient_of(gate).expect("selective decay gradient");
+    assert_eq!(reverse.graph().node(gradient).unwrap().shape.dims(), &[1, WIDTH]);
+    assert!(reverse.graph().nodes().len() > model.graph().nodes().len());
+}
