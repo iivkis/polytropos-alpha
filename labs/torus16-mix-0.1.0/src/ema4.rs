@@ -325,6 +325,16 @@ impl Ema4Weights {
         role_init: RoleInit,
         ema: EmaMode,
     ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
+        self.trainable_parameters_with_configuration(mode, role_init, ema, false)
+    }
+
+    pub fn trainable_parameters_with_configuration(
+        &self,
+        mode: MatrixMode,
+        role_init: RoleInit,
+        ema: EmaMode,
+        residual: bool,
+    ) -> Result<std::collections::BTreeMap<String, Tensor<f32>>, ModelError> {
         let fixed = [
             "ones_column",
             "inv_width",
@@ -340,7 +350,7 @@ impl Ema4Weights {
             "delta_scale",
         ];
         let parameters = self
-            .bindings_with_init_and_ema(0, mode, role_init, ema)?
+            .bindings_with_configuration(0, mode, role_init, ema, residual)?
             .into_iter()
             .filter(|(name, _)| {
                 name != "token"
@@ -350,7 +360,9 @@ impl Ema4Weights {
             })
             .collect::<std::collections::BTreeMap<_, _>>();
         let elements: usize = parameters.values().map(|t| t.values().len()).sum();
-        if elements != Self::parameter_count_for_ema(self.vocabulary, mode, ema) {
+        if elements != Self::parameter_count_for_configuration(
+            self.vocabulary, mode, ema, self.layers(), residual
+        ) {
             return Err(ModelError::Invalid(format!(
                 "trainable parameter inventory mismatch: {elements}"
             )));
