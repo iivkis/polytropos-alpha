@@ -128,7 +128,7 @@ impl GpuProgram {
         &self.fused_dual_outputs
     }
 
-    fn skipped_nodes(&self) -> BTreeSet<usize> {
+    pub(super) fn skipped_nodes(&self) -> BTreeSet<usize> {
         let mut skipped = self.fused_relus.values().copied().collect::<BTreeSet<_>>();
         for chain in self.fused_pointwise_chains.values() {
             skipped.extend(chain.iter().copied());
