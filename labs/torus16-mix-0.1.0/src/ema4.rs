@@ -400,6 +400,17 @@ impl Ema4Weights {
         role_init: RoleInit,
         ema: EmaMode,
     ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
+        self.bindings_with_configuration(token, mode, role_init, ema, false)
+    }
+
+    pub fn bindings_with_configuration(
+        &self,
+        token: usize,
+        mode: MatrixMode,
+        role_init: RoleInit,
+        ema: EmaMode,
+        residual: bool,
+    ) -> Result<Vec<(String, Tensor<f32>)>, ModelError> {
         if token >= self.vocabulary || self.embedding.len() != self.vocabulary * WIDTH {
             return Err(ModelError::Invalid(
                 "token outside vocabulary or bad embedding".into(),
@@ -471,7 +482,7 @@ impl Ema4Weights {
                 vec![self.delta_scale],
             )?;
         }
-        for (layer, b) in self.blocks.iter().enumerate() {
+        for (layer, b) in self.all_blocks().enumerate() {
             for role_weight in 0..(if mode == MatrixMode::Independent {
                 ROLES
             } else {
@@ -568,6 +579,14 @@ impl Ema4Weights {
                     vec![1, WIDTH],
                     b.decay_gate.to_vec(),
                 )?;
+            }
+            if residual {
+                for (name, value) in [
+                    ("residual_mem_scale", b.residual_mem_scale),
+                    ("residual_ff_scale", b.residual_ff_scale),
+                ] {
+                    insert(&mut result, &format!("{name}_{layer}"), vec![1, 1], vec![value])?;
+                }
             }
             for (label, value) in [
                 ("gate_scale", b.gate_scale),
