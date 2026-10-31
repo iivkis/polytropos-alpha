@@ -1,29 +1,56 @@
-# RepoSpool is a compact source/contract context, not an archive of every
-# test, dataset, and generated result. These rules affect only .repospool:
-# all excluded paths remain available as normal GitHub repository files.
+# RepoSpool is a small first-pass architecture context, not a full source
+# mirror. All omitted files remain in GitHub and must be read on demand.
+# Rules use Git's gitignore syntax and apply only to .repospool.
 
-# CI plumbing and reproducible dependency resolution are secondary to the
-# architecture, semantics, API and formal contracts.
+# CI, lockfiles, and verbose task wiring are available in Git.
 /.github/
 /Cargo.lock
 /flake.lock
+/Taskfile.yml
 
-# Test/acceptance suites are useful for focused verification but not needed
-# for first-pass comprehension. Keep the implementation and Lean sources.
+# The normative design/roadmap is large; preserve their locations in README.
+# Read these original documents from Git before changes to VeriNeural.
+/docs/verineural/
+
+# Keep a compact public API + Semantic IR / model composition slice.
+# Full backends (GPU/CUDA, proof generation, numeric verification, exporters),
+# auxiliary runtime and implementation tests remain individually retrievable.
 /crates/verineural/tests/
+/crates/verineural/examples/
 /crates/verineural/src/tests.rs
+/crates/verineural/src/bin/
+/crates/verineural/src/*.rs
+!/crates/verineural/src/lib.rs
+!/crates/verineural/src/ir.rs
+!/crates/verineural/src/model.rs
+!/crates/verineural/src/tensor.rs
+!/crates/verineural/src/modules.rs
+!/crates/verineural/src/primitive.rs
+!/crates/verineural/src/consumer.rs
+!/crates/verineural/src/symbolic.rs
+!/crates/verineural/src/temporal.rs
+!/crates/verineural/src/autodiff.rs
+
+# Keep the compact formal semantics (Basic, Memory); the more detailed Lean
+# numerical/special/fusion models can be consulted for proof-specific work.
+/lean/VeriNeural/*.lean
+!/lean/VeriNeural/Basic.lean
+!/lean/VeriNeural/Memory.lean
+
+# Keep lab Cargo manifests, short READMEs and representative consumer code.
+# No datasets, generated evidence, giant reports, or test suites.
 /labs/*/tests/
-/labs/torus16-mix-0.1.0/src/role_delta_tests.rs
-
-# Historical stage demonstration programs. Keep the non-stage API examples
-# and all laboratory consumer entry points.
-/crates/verineural/examples/stage*.rs
-
-# Training corpora, generated LLVM/PTX/Lean evidence and measured outcomes
-# can be retrieved from Git when investigating an experiment.
 /labs/*/data/
 /labs/*/artifacts/
 /labs/*/EXPERIMENT_RESULTS.md
+/labs/*/examples/
+/labs/consumer-acceptance-0.1.0/src/
+/labs/xor-0.1.0/src/
 
-# Historical implementation status; keep SPEC.md, ROADMAP.md and AUTO_BUILD.md.
-/docs/verineural/P0_P1_STATUS.md
+# Torus16's massive experiment journal and checkpoint/training helpers are
+# secondary to the consumer IR definitions and EMA4 model builder.
+/labs/torus16-mix-0.1.0/README.md
+/labs/torus16-mix-0.1.0/V0.2_TRANSITION.md
+/labs/torus16-mix-0.1.0/src/*.rs
+!/labs/torus16-mix-0.1.0/src/lib.rs
+!/labs/torus16-mix-0.1.0/src/ema4.rs
